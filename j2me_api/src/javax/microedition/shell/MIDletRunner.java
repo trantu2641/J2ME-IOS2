@@ -1,131 +1,202 @@
 /*
- * MIDletRunner — Java-based MIDlet launcher for iOS/miniJVM.
- *
- * Replaces J2ME-Loader's MicroLoader + MidletThread + MicroActivity.
- * Reads the MIDlet JAR manifest, loads the MIDlet class via reflection,
- * and manages the MIDlet lifecycle (startApp/pauseApp/destroyApp).
+ * MIDletRunner - Java MIDlet launcher for iOS / MiniJVM.
+ * Reads MIDlet metadata, loads the entry class and executes the MIDlet lifecycle.
  */
+
 package javax.microedition.shell;
 
 import javax.microedition.midlet.MIDlet;
-import javax.microedition.midlet.MIDletStateChangeException;
 import javax.microedition.lcdui.Canvas;
 import javax.microedition.lcdui.Display;
+
 import java.io.BufferedReader;
 import java.io.InputStream;
 import java.io.InputStreamReader;
+
 import java.util.HashMap;
 import java.util.Map;
+
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 
 public class MIDletRunner {
 
-    /**
-     * Entry point. Args:
-     *   args[0] = path to MIDlet JAR file
-     *   args[1] = (optional) MIDlet class name override
-     */
     public static void main(String[] args) {
+
         if (args == null || args.length < 1) {
-            System.out.println("[MIDletRunner] ERROR: Usage: MIDletRunner <midlet.jar> [ClassName]");
-            return;
+            throw new RuntimeException(
+                "Usage: MIDletRunner <midlet.jar> [ClassName]"
+            );
         }
 
         String jarPath = args[0];
-        String classNameOverride = (args.length > 1) ? args[1] : null;
 
-        System.out.println("[MIDletRunner] Loading MIDlet JAR: " + jarPath);
+        String classNameOverride =
+            (args.length > 1) ? args[1] : null;
+
+        System.out.println(
+            "[MIDletRunner] Loading MIDlet JAR: " + jarPath
+        );
 
         try {
-            // 1. Read manifest
-            Map<String, String> manifestAttrs = readManifest(jarPath);
 
-            String midletName = manifestAttrs.get("MIDlet-Name");
-            String midletVersion = manifestAttrs.get("MIDlet-Version");
-            System.out.println("[MIDletRunner] MIDlet-Name: " + midletName);
-            System.out.println("[MIDletRunner] MIDlet-Version: " + midletVersion);
+            Map<String, String> manifestAttrs =
+                readManifest(jarPath);
 
-            // 2. Determine MIDlet class name
-            String className;
-            if (classNameOverride != null && !classNameOverride.isEmpty()) {
-                className = classNameOverride;
-            } else {
-                className = parseMIDletClassName(manifestAttrs);
+            String midletName =
+                manifestAttrs.get("MIDlet-Name");
+
+            String midletVersion =
+                manifestAttrs.get("MIDlet-Version");
+
+            System.out.println(
+                "[MIDletRunner] MIDlet-Name: " + midletName
+            );
+
+            System.out.println(
+                "[MIDletRunner] MIDlet-Version: " + midletVersion
+            );
+
+            String className =
+                (classNameOverride != null && !classNameOverride.isEmpty())
+                ? classNameOverride
+                : parseMIDletClassName(manifestAttrs);
+
+            if (className == null || className.trim().isEmpty()) {
+                throw new RuntimeException(
+                    "No MIDlet class found in META-INF/MANIFEST.MF (MIDlet-1)"
+                );
             }
 
-            if (className == null) {
-                System.out.println("[MIDletRunner] ERROR: No MIDlet class found in manifest");
-                return;
-            }
-            System.out.println("[MIDletRunner] MIDlet class: " + className);
+            System.out.println(
+                "[MIDletRunner] MIDlet class: " + className
+            );
 
-            // 3. Initialize properties (manifest attributes available to MIDlet)
             MIDlet.initProps(manifestAttrs);
             MIDlet.resetDestroyRequest();
 
-            // Apply FPS limit from system property (set by iOS native side)
-            String fpsStr = System.getProperty("j2me.fps.limit");
+            String fpsStr =
+                System.getProperty("j2me.fps.limit");
+
             if (fpsStr != null) {
                 try {
                     Canvas.setLimitFps(Integer.parseInt(fpsStr));
-                } catch (NumberFormatException ignored) {}
+                } catch (NumberFormatException ignored) {
+                    System.out.println(
+                        "[MIDletRunner] Invalid FPS property: " + fpsStr
+                    );
+                }
             }
 
-            // 4. Load and instantiate MIDlet class
-            System.out.println("[MIDletRunner] Loading class: " + className);
+            System.out.println(
+                "[MIDletRunner] Loading class: " + className
+            );
+
             Class<?> clazz = Class.forName(className);
-            MIDlet midlet = (MIDlet) clazz.newInstance();
 
-            // 5. Run lifecycle
-            runLifecycle(midlet);
+            Object instance = clazz.newInstance();
 
-        } catch (Exception e) {
-            System.out.println("[MIDletRunner] ERROR: " + e.getClass().getName() + ": " + e.getMessage());
-            e.printStackTrace();
+            if (!(instance instanceof MIDlet)) {
+                throw new RuntimeException(
+                    "Entry class does not extend javax.microedition.midlet.MIDlet: "
+                    + className
+                );
+            }
+
+            runLifecycle((MIDlet) instance);
+
+        } catch (Throwable error) {
+
+            System.out.println(
+                "[MIDletRunner] FATAL: "
+                + error.getClass().getName()
+                + ": "
+                + error.getMessage()
+            );
+
+            error.printStackTrace();
+
+            // Propagate the failure to MiniJVM.
+            // The old implementation swallowed exceptions and returned normally.
+            if (error instanceof RuntimeException) {
+                throw (RuntimeException) error;
+            }
+
+            throw new RuntimeException(
+                "MIDlet launch failed: " + error.getMessage()
+            );
         }
     }
 
-    /**
-     * Read all attributes from the JAR's META-INF/MANIFEST.MF using ZipFile.
-     * Manual parsing since miniJVM's JarFile.getManifest().getMainAttributes()
-     * is not fully implemented.
-     */
-    private static Map<String, String> readManifest(String jarPath) throws Exception {
-        Map<String, String> result = new HashMap<String, String>();
+    private static Map<String, String> readManifest(
+        String jarPath
+    ) throws Exception {
+
+        Map<String, String> result =
+            new HashMap<String, String>();
 
         ZipFile zipFile = new ZipFile(jarPath);
+
         try {
-            ZipEntry entry = zipFile.getEntry("META-INF/MANIFEST.MF");
+
+            ZipEntry entry =
+                zipFile.getEntry("META-INF/MANIFEST.MF");
+
             if (entry == null) {
-                System.out.println("[MIDletRunner] WARNING: No MANIFEST.MF in JAR");
-                return result;
+                throw new RuntimeException(
+                    "JAR does not contain META-INF/MANIFEST.MF"
+                );
             }
 
-            InputStream is = zipFile.getInputStream(entry);
-            BufferedReader reader = new BufferedReader(new InputStreamReader(is, "UTF-8"));
+            InputStream input =
+                zipFile.getInputStream(entry);
+
+            BufferedReader reader =
+                new BufferedReader(
+                    new InputStreamReader(input, "UTF-8")
+                );
 
             String lastKey = null;
             String line;
-            while ((line = reader.readLine()) != null) {
-                if (line.isEmpty()) continue;
 
-                // Continuation line (starts with space)
+            while ((line = reader.readLine()) != null) {
+
+                if (line.length() == 0) {
+                    continue;
+                }
+
+                // Manifest continuation line.
                 if (line.charAt(0) == ' ' && lastKey != null) {
-                    String prev = result.get(lastKey);
-                    result.put(lastKey, prev + line.substring(1));
+
+                    String previous = result.get(lastKey);
+
+                    result.put(
+                        lastKey,
+                        (previous == null ? "" : previous)
+                        + line.substring(1)
+                    );
+
                     continue;
                 }
 
                 int colon = line.indexOf(':');
+
                 if (colon > 0) {
-                    String key = line.substring(0, colon).trim();
-                    String value = line.substring(colon + 1).trim();
+
+                    String key =
+                        line.substring(0, colon).trim();
+
+                    String value =
+                        line.substring(colon + 1).trim();
+
                     result.put(key, value);
+
                     lastKey = key;
                 }
             }
+
             reader.close();
+
         } finally {
             zipFile.close();
         }
@@ -133,79 +204,107 @@ public class MIDletRunner {
         return result;
     }
 
-    /**
-     * Parse the MIDlet class name from MIDlet-1 attribute.
-     * Format: "Name, Icon, ClassName"
-     */
-    private static String parseMIDletClassName(Map<String, String> attrs) {
-        // Try MIDlet-1 first
-        String midlet1 = attrs.get("MIDlet-1");
-        if (midlet1 == null) {
-            // Try any MIDlet-N
-            for (Map.Entry<String, String> entry : attrs.entrySet()) {
-                String key = entry.getKey();
-                if (key.startsWith("MIDlet-") && !key.equals("MIDlet-Name")
-                        && !key.equals("MIDlet-Version")
-                        && !key.equals("MIDlet-Vendor")) {
-                    midlet1 = entry.getValue();
+    private static String parseMIDletClassName(
+        Map<String, String> attrs
+    ) {
+
+        String entry = attrs.get("MIDlet-1");
+
+        if (entry == null) {
+
+            for (Map.Entry<String, String> item : attrs.entrySet()) {
+
+                String key = item.getKey();
+
+                if (key.startsWith("MIDlet-")
+                    && key.length() > 7
+                    && !key.equals("MIDlet-Name")
+                    && !key.equals("MIDlet-Version")
+                    && !key.equals("MIDlet-Vendor")) {
+
+                    entry = item.getValue();
                     break;
                 }
             }
         }
 
-        if (midlet1 == null) return null;
+        if (entry == null) {
+            return null;
+        }
 
-        System.out.println("[MIDletRunner] MIDlet-1: " + midlet1);
+        System.out.println(
+            "[MIDletRunner] MIDlet entry: " + entry
+        );
 
-        // Parse "Name, Icon, ClassName"
-        String[] parts = midlet1.split(",");
+        String[] parts = entry.split(",", -1);
+
         if (parts.length >= 3) {
             return parts[2].trim();
-        } else if (parts.length == 1) {
+        }
+
+        if (parts.length == 1) {
             return parts[0].trim();
         }
 
         return null;
     }
 
-    /**
-     * Run the MIDlet lifecycle: startApp → (wait) → pauseApp → destroyApp
-     */
     private static void runLifecycle(MIDlet midlet) {
-        try {
-            // startApp
-            System.out.println("[MIDletRunner] >>> Calling startApp()");
-            midlet.callStartApp();
-            System.out.println("[MIDletRunner] <<< startApp() returned");
 
-            // Run event/render loop — blocks until MIDlet calls notifyDestroyed().
-            // Always run the loop — MIDlet may set Display.setCurrent()
-            // asynchronously from its own thread (e.g. Gravity Defied).
-            // If native stop was already requested (user pressed Back during init/startApp),
-            // the loop will detect it on the first iteration and exit immediately.
-            Display display = Display.getDisplay(midlet);
+        try {
+
+            System.out.println(
+                "[MIDletRunner] >>> startApp()"
+            );
+
+            midlet.callStartApp();
+
+            System.out.println(
+                "[MIDletRunner] <<< startApp() returned"
+            );
+
+            Display display =
+                Display.getDisplay(midlet);
+
             display.runEventLoop();
 
-            // pauseApp
             if (!MIDlet.isDestroyRequested()) {
-                System.out.println("[MIDletRunner] >>> Calling pauseApp()");
+
+                System.out.println(
+                    "[MIDletRunner] >>> pauseApp()"
+                );
+
                 midlet.callPauseApp();
-                System.out.println("[MIDletRunner] <<< pauseApp() returned");
             }
 
-            // destroyApp
-            System.out.println("[MIDletRunner] >>> Calling destroyApp(true)");
+            System.out.println(
+                "[MIDletRunner] >>> destroyApp(true)"
+            );
+
             midlet.callDestroyApp(true);
-            System.out.println("[MIDletRunner] <<< destroyApp() returned");
 
-            System.out.println("[MIDletRunner] MIDlet lifecycle complete");
+            System.out.println(
+                "[MIDletRunner] MIDlet lifecycle complete"
+            );
 
-        } catch (MIDletStateChangeException e) {
-            System.out.println("[MIDletRunner] MIDletStateChangeException: " + e.getMessage());
-        } catch (Exception e) {
-            System.out.println("[MIDletRunner] ERROR in lifecycle: " + e.getClass().getName()
-                    + ": " + e.getMessage());
-            e.printStackTrace();
+        } catch (Throwable error) {
+
+            System.out.println(
+                "[MIDletRunner] LIFECYCLE FATAL: "
+                + error.getClass().getName()
+                + ": "
+                + error.getMessage()
+            );
+
+            error.printStackTrace();
+
+            if (error instanceof RuntimeException) {
+                throw (RuntimeException) error;
+            }
+
+            throw new RuntimeException(
+                "MIDlet lifecycle failed: " + error.getMessage()
+            );
         }
     }
 }
