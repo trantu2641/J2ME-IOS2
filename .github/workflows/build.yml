@@ -1,0 +1,74 @@
+name: Build J2ME iOS
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: macos-15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show Xcode
+        run: |
+          xcodebuild -version
+
+      - name: Show project
+        run: |
+          find . -maxdepth 3 \
+            \( -name "*.xcodeproj" -o -name "build_jar.sh" -o -name "build.sh" \) \
+            -print
+
+      - name: Build miniJVM
+        run: |
+          cd miniJVM-2.0.0/binary
+          chmod +x build_jar.sh
+          ./build_jar.sh
+
+      - name: Build J2ME API
+        run: |
+          cd J2MEEmulator/j2me_api
+          chmod +x build.sh
+          ./build.sh
+
+      - name: Find Xcode project
+        run: |
+          find . -name "*.xcodeproj" -print
+
+      - name: Build iOS
+        run: |
+          PROJECT=$(find . -name "*.xcodeproj" | head -n 1)
+          echo "PROJECT=$PROJECT"
+
+          xcodebuild \
+            -project "$PROJECT" \
+            -configuration Release \
+            -sdk iphoneos \
+            -arch arm64 \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            build
+
+      - name: Find app
+        run: |
+          find . -name "*.app" -type d -print
+
+      - name: Package IPA
+        run: |
+          APP=$(find . -name "*.app" -type d | head -n 1)
+
+          mkdir -p Payload
+          cp -R "$APP" Payload/J2MEPlayer.app
+
+          zip -qry J2ME-iOS.ipa Payload
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: J2ME-iOS-IPA
+          path: J2ME-iOS.ipa
