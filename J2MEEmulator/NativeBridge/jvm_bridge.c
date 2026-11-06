@@ -14,16 +14,111 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdatomic.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 static MiniJVM *g_jvm = NULL;
 static atomic_int g_jvm_stop_requested = 0;
 
+static int g_saved_stdout = -1;
+static int g_saved_stderr = -1;
+static int g_log_redirected = 0;
+
 int g_render_3d_scale = 1;
 
 /*
+ * Redirect MiniJVM stdout/stderr into the game's writable save folder.
+ */
+static void start_runtime_log(const char *save_root) {
+
+    if (!save_root || !save_root[0]) {
+        return;
+    }
+
+    char path[2048];
+
+    snprintf(
+        path,
+        sizeof(path),
+        "%s/minijvm.log",
+        save_root
+    );
+
+    int fd = open(
+        path,
+        O_WRONLY | O_CREAT | O_TRUNC,
+        0600
+    );
+
+    if (fd < 0) {
+        fprintf(
+            stderr,
+            "[JVM Bridge] Cannot open diagnostic log: %s\n",
+            path
+        );
+        return;
+    }
+
+    fflush(stdout);
+    fflush(stderr);
+
+    if (g_saved_stdout < 0) {
+        g_saved_stdout = dup(STDOUT_FILENO);
+    }
+
+    if (g_saved_stderr < 0) {
+        g_saved_stderr = dup(STDERR_FILENO);
+    }
+
+    if (dup2(fd, STDOUT_FILENO) < 0 ||
+        dup2(fd, STDERR_FILENO) < 0) {
+
+        close(fd);
+        return;
+    }
+
+    close(fd);
+
+    setvbuf(stdout, NULL, _IOLBF, 0);
+    setvbuf(stderr, NULL, _IONBF, 0);
+
+    g_log_redirected = 1;
+
+    printf(
+        "[JVM Bridge] Diagnostic log: %s\n",
+        path
+    );
+}
+
+static void stop_runtime_log(void) {
+
+    if (!g_log_redirected) {
+        return;
+    }
+
+    fflush(stdout);
+    fflush(stderr);
+
+    if (g_saved_stdout >= 0) {
+        dup2(g_saved_stdout, STDOUT_FILENO);
+        close(g_saved_stdout);
+        g_saved_stdout = -1;
+    }
+
+    if (g_saved_stderr >= 0) {
+        dup2(g_saved_stderr, STDERR_FILENO);
+        close(g_saved_stderr);
+        g_saved_stderr = -1;
+    }
+
+    setvbuf(stdout, NULL, _IOLBF, 0);
+    setvbuf(stderr, NULL, _IONBF, 0);
+
+    g_log_redirected = 0;
+}
+
+/*
  * Read META-INF/MANIFEST.MF using MiniJVM's native ZIP reader.
- *
- * This avoids java.util.zip.ZipFile, which is not part of CLDC 1.1.
  */
 static char *load_midlet_manifest(const char *jar_path) {
 
@@ -37,22 +132,31 @@ static char *load_midlet_manifest(const char *jar_path) {
         "META-INF/MANIFEST.MF"
     );
 
-    if (manifest_size <= 0 || manifest_size > 1024 * 1024) {
+    if (manifest_size <= 0 ||
+        manifest_size > 1024 * 1024) {
+
         printf(
             "[JVM Bridge] ERROR: Invalid or missing MIDlet manifest, size=%lld\n",
             (long long)manifest_size
         );
+
         return NULL;
     }
 
-    char *manifest = (char *)malloc((size_t)manifest_size + 1);
+    char *manifest = (char *)malloc(
+        (size_t)manifest_size + 1
+    );
 
     if (!manifest) {
         printf("[JVM Bridge] ERROR: Cannot allocate manifest buffer\n");
         return NULL;
     }
 
-    memset(manifest, 0, (size_t)manifest_size + 1);
+    memset(
+        manifest,
+        0,
+        (size_t)manifest_size + 1
+    );
 
     s32 result = zip_loadfile_to_mem(
         jar_path,
@@ -86,14 +190,13 @@ int jvm_bridge_init(
     int render_3d_scale,
     int fps_limit
 ) {
+
     if (g_jvm) {
         printf("[JVM Bridge] JVM already initialized\n");
         return -1;
     }
 
-    /*
-     * Stop state is reset after the previous JVM is destroyed.
-     */
+    start_runtime_log(save_root);
 
     char bootclasspath[1024];
 
@@ -128,6 +231,7 @@ int jvm_bridge_init(
 
     if (!g_jvm) {
         printf("[JVM Bridge] ERROR: jvm_create() failed\n");
+        stop_runtime_log();
         return -2;
     }
 
@@ -144,6 +248,7 @@ int jvm_bridge_init(
     );
 
     if (ret) {
+
         printf(
             "[JVM Bridge] ERROR: jvm_init() failed: %d\n",
             ret
@@ -152,12 +257,10 @@ int jvm_bridge_init(
         jvm_destroy(g_jvm);
         g_jvm = NULL;
 
+        stop_runtime_log();
+
         return -3;
     }
-
-    /*
-     * Register native methods.
-     */
 
     j2me_render_reg_natives(g_jvm);
     j2me_input_reg_natives(g_jvm);
@@ -165,10 +268,6 @@ int jvm_bridge_init(
     j2me_audio_reg_natives(g_jvm);
     j2me_micro3d_gl_reg_natives(g_jvm);
     j2me_m3g_reg_natives(g_jvm);
-
-    /*
-     * Standard J2ME properties.
-     */
 
     sys_properties_set_c(g_jvm, "os.name", "iOS");
     sys_properties_set_c(g_jvm, "app.save.root", save_root);
@@ -186,10 +285,6 @@ int jvm_bridge_init(
 
     sys_properties_set_c(g_jvm, "j2me.screen.width", sw);
     sys_properties_set_c(g_jvm, "j2me.screen.height", sh);
-
-    /*
-     * 3D supersampling.
-     */
 
     g_render_3d_scale =
         render_3d_scale > 0 ? render_3d_scale : 1;
@@ -209,14 +304,16 @@ int jvm_bridge_init(
         ss
     );
 
-    /*
-     * FPS limit.
-     */
-
     if (fps_limit > 0) {
+
         char fl[8];
 
-        snprintf(fl, sizeof(fl), "%d", fps_limit);
+        snprintf(
+            fl,
+            sizeof(fl),
+            "%d",
+            fps_limit
+        );
 
         sys_properties_set_c(
             g_jvm,
@@ -238,13 +335,6 @@ int jvm_bridge_init(
     return 0;
 }
 
-/*
- * Run the MIDlet.
- *
- * Java arguments:
- * args[0] = JAR path
- * args[1] = raw manifest text
- */
 int jvm_bridge_run_midlet(const char *midlet_jar_path) {
 
     if (!g_jvm) {
@@ -306,31 +396,15 @@ void jvm_bridge_destroy(void) {
 
         printf("[JVM Bridge] Destroying JVM\n");
 
-        /*
-         * Stop rendering before JVM destruction.
-         */
-
         j2me_render_stop();
-
-        /*
-         * Stop threads.
-         */
 
         g_jvm->collector->exit_flag = 1;
 
         thread_stop_all(g_jvm);
 
-        /*
-         * Destroy JVM.
-         */
-
         jvm_destroy(g_jvm);
 
         g_jvm = NULL;
-
-        /*
-         * Clean native subsystems.
-         */
 
         j2me_input_reset();
         j2me_audio_stop_all();
@@ -347,6 +421,8 @@ void jvm_bridge_destroy(void) {
             "[JVM Bridge] JVM destroyed and native state cleaned up\n"
         );
     }
+
+    stop_runtime_log();
 }
 
 void jvm_bridge_request_stop(void) {
