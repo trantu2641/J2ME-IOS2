@@ -54,7 +54,7 @@ jobs:
 
       - name: Verify app and package unsigned IPA
         run: |
-          APP="$RUNNER_TEMP/DerivedData/Build/Products/Release-iphoneos/J2MEEmulator.app"
+          APP="$RUNNER_TEMP/DerivedData/Build/Products/Release-iphoneos/JarBox.app"
           if [ ! -d "$APP" ]; then
             echo "ERROR: Built .app was not found. Available app bundles:"
             find "$RUNNER_TEMP/DerivedData" -name '*.app' -type d -print || true
