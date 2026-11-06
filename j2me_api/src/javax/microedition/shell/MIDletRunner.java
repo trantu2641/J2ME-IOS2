@@ -1,6 +1,8 @@
 /*
- * MIDletRunner - Java MIDlet launcher for iOS / MiniJVM.
- * Reads MIDlet metadata, loads the entry class and executes the MIDlet lifecycle.
+ * MIDletRunner
+ *
+ * CLDC-compatible MIDlet launcher.
+ * Manifest is extracted by the native MiniJVM ZIP reader.
  */
 
 package javax.microedition.shell;
@@ -9,101 +11,98 @@ import javax.microedition.midlet.MIDlet;
 import javax.microedition.lcdui.Canvas;
 import javax.microedition.lcdui.Display;
 
-import java.io.BufferedReader;
-import java.io.InputStream;
-import java.io.InputStreamReader;
+import java.util.Hashtable;
 
-import java.util.HashMap;
-import java.util.Map;
-
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipFile;
-
-public class MIDletRunner {
+public final class MIDletRunner {
 
     public static void main(String[] args) {
 
-        if (args == null || args.length < 1) {
+        if (args == null || args.length < 2) {
             throw new RuntimeException(
-                "Usage: MIDletRunner <midlet.jar> [ClassName]"
+                "MIDletRunner requires JAR path and manifest text"
             );
         }
 
         String jarPath = args[0];
-
-        String classNameOverride =
-            (args.length > 1) ? args[1] : null;
+        String manifestText = args[1];
 
         System.out.println(
-            "[MIDletRunner] Loading MIDlet JAR: " + jarPath
+            "[MIDletRunner] JAR: " + jarPath
         );
 
         try {
 
-            Map<String, String> manifestAttrs =
-                readManifest(jarPath);
+            Hashtable manifest = parseManifest(manifestText);
 
-            String midletName =
-                manifestAttrs.get("MIDlet-Name");
-
-            String midletVersion =
-                manifestAttrs.get("MIDlet-Version");
+            String midletName = (String) manifest.get("MIDlet-Name");
+            String midletVersion = (String) manifest.get("MIDlet-Version");
 
             System.out.println(
-                "[MIDletRunner] MIDlet-Name: " + midletName
+                "[MIDletRunner] Name: " + midletName
             );
 
             System.out.println(
-                "[MIDletRunner] MIDlet-Version: " + midletVersion
+                "[MIDletRunner] Version: " + midletVersion
             );
 
-            String className =
-                (classNameOverride != null && !classNameOverride.isEmpty())
-                ? classNameOverride
-                : parseMIDletClassName(manifestAttrs);
+            String className = getMidletClassName(manifest);
 
-            if (className == null || className.trim().isEmpty()) {
+            if (className == null || className.length() == 0) {
                 throw new RuntimeException(
-                    "No MIDlet class found in META-INF/MANIFEST.MF (MIDlet-1)"
+                    "MIDlet-1 entry or MIDlet class is missing"
                 );
             }
 
             System.out.println(
-                "[MIDletRunner] MIDlet class: " + className
+                "[MIDletRunner] Entry class: " + className
             );
 
-            MIDlet.initProps(manifestAttrs);
+            /*
+             * Make all manifest properties available to the MIDlet.
+             */
+
+            MIDlet.initProps(manifest);
             MIDlet.resetDestroyRequest();
 
-            String fpsStr =
-                System.getProperty("j2me.fps.limit");
+            /*
+             * FPS limit.
+             */
 
-            if (fpsStr != null) {
+            String fps = System.getProperty("j2me.fps.limit");
+
+            if (fps != null) {
                 try {
-                    Canvas.setLimitFps(Integer.parseInt(fpsStr));
-                } catch (NumberFormatException ignored) {
+                    Canvas.setLimitFps(
+                        Integer.parseInt(fps)
+                    );
+                } catch (Exception e) {
                     System.out.println(
-                        "[MIDletRunner] Invalid FPS property: " + fpsStr
+                        "[MIDletRunner] Invalid FPS value: " + fps
                     );
                 }
             }
 
+            /*
+             * Load MIDlet class.
+             */
+
             System.out.println(
-                "[MIDletRunner] Loading class: " + className
+                "[MIDletRunner] Loading " + className
             );
 
-            Class<?> clazz = Class.forName(className);
+            Class clazz = Class.forName(className);
 
             Object instance = clazz.newInstance();
 
             if (!(instance instanceof MIDlet)) {
                 throw new RuntimeException(
-                    "Entry class does not extend javax.microedition.midlet.MIDlet: "
-                    + className
+                    "Class does not extend MIDlet: " + className
                 );
             }
 
-            runLifecycle((MIDlet) instance);
+            MIDlet midlet = (MIDlet) instance;
+
+            runLifecycle(midlet);
 
         } catch (Throwable error) {
 
@@ -116,8 +115,6 @@ public class MIDletRunner {
 
             error.printStackTrace();
 
-            // Propagate the failure to MiniJVM.
-            // The old implementation swallowed exceptions and returned normally.
             if (error instanceof RuntimeException) {
                 throw (RuntimeException) error;
             }
@@ -128,169 +125,227 @@ public class MIDletRunner {
         }
     }
 
-    private static Map<String, String> readManifest(
-        String jarPath
-    ) throws Exception {
+    /*
+     * Parse the main manifest section.
+     *
+     * Uses only CLDC-compatible String, StringBuffer and Hashtable.
+     * Handles CRLF and manifest continuation lines.
+     */
 
-        Map<String, String> result =
-            new HashMap<String, String>();
+    private static Hashtable parseManifest(String text) {
 
-        ZipFile zipFile = new ZipFile(jarPath);
+        Hashtable result = new Hashtable();
 
-        try {
+        if (text == null) {
+            return result;
+        }
 
-            ZipEntry entry =
-                zipFile.getEntry("META-INF/MANIFEST.MF");
+        String currentKey = null;
+        StringBuffer currentValue = new StringBuffer();
 
-            if (entry == null) {
-                throw new RuntimeException(
-                    "JAR does not contain META-INF/MANIFEST.MF"
-                );
+        int position = 0;
+        int length = text.length();
+
+        while (position <= length) {
+
+            int lineEnd = text.indexOf('\n', position);
+
+            if (lineEnd < 0) {
+                lineEnd = length;
             }
 
-            InputStream input =
-                zipFile.getInputStream(entry);
+            String line = text.substring(position, lineEnd);
 
-            BufferedReader reader =
-                new BufferedReader(
-                    new InputStreamReader(input, "UTF-8")
-                );
+            if (line.length() > 0
+                && line.charAt(line.length() - 1) == '\r') {
 
-            String lastKey = null;
-            String line;
+                line = line.substring(0, line.length() - 1);
+            }
 
-            while ((line = reader.readLine()) != null) {
+            position = lineEnd + 1;
 
-                if (line.length() == 0) {
-                    continue;
-                }
+            /*
+             * A blank line ends the main manifest section.
+             */
 
-                // Manifest continuation line.
-                if (line.charAt(0) == ' ' && lastKey != null) {
+            if (line.length() == 0) {
 
-                    String previous = result.get(lastKey);
-
+                if (currentKey != null) {
                     result.put(
-                        lastKey,
-                        (previous == null ? "" : previous)
-                        + line.substring(1)
+                        currentKey,
+                        currentValue.toString().trim()
                     );
-
-                    continue;
                 }
 
-                int colon = line.indexOf(':');
-
-                if (colon > 0) {
-
-                    String key =
-                        line.substring(0, colon).trim();
-
-                    String value =
-                        line.substring(colon + 1).trim();
-
-                    result.put(key, value);
-
-                    lastKey = key;
-                }
+                break;
             }
 
-            reader.close();
+            /*
+             * Continuation line.
+             */
 
-        } finally {
-            zipFile.close();
+            if (line.charAt(0) == ' ') {
+
+                if (currentKey != null) {
+                    currentValue.append(
+                        line.substring(1)
+                    );
+                }
+
+                continue;
+            }
+
+            /*
+             * Store the previous attribute.
+             */
+
+            if (currentKey != null) {
+
+                result.put(
+                    currentKey,
+                    currentValue.toString().trim()
+                );
+            }
+
+            currentKey = null;
+            currentValue = new StringBuffer();
+
+            int colon = line.indexOf(':');
+
+            if (colon > 0) {
+
+                currentKey = line.substring(0, colon).trim();
+
+                String value = line.substring(colon + 1);
+
+                /*
+                 * Manifest format normally has one space after colon.
+                 */
+
+                if (value.length() > 0
+                    && value.charAt(0) == ' ') {
+
+                    value = value.substring(1);
+                }
+
+                currentValue.append(value);
+            }
+
+            if (position > length) {
+                break;
+            }
+        }
+
+        /*
+         * Store final attribute if there was no trailing blank line.
+         */
+
+        if (currentKey != null
+            && result.get(currentKey) == null) {
+
+            result.put(
+                currentKey,
+                currentValue.toString().trim()
+            );
         }
 
         return result;
     }
 
-    private static String parseMIDletClassName(
-        Map<String, String> attrs
-    ) {
+    /*
+     * Read MIDlet-1, then MIDlet-2, and so on.
+     *
+     * Standard manifest format:
+     * MIDlet-1: Name, icon.png, package.MainClass
+     */
 
-        String entry = attrs.get("MIDlet-1");
+    private static String getMidletClassName(Hashtable manifest) {
 
-        if (entry == null) {
+        for (int index = 1; index <= 9; index++) {
 
-            for (Map.Entry<String, String> item : attrs.entrySet()) {
+            String key = "MIDlet-" + index;
 
-                String key = item.getKey();
+            String entry = (String) manifest.get(key);
 
-                if (key.startsWith("MIDlet-")
-                    && key.length() > 7
-                    && !key.equals("MIDlet-Name")
-                    && !key.equals("MIDlet-Version")
-                    && !key.equals("MIDlet-Vendor")) {
-
-                    entry = item.getValue();
-                    break;
-                }
+            if (entry == null || entry.length() == 0) {
+                continue;
             }
-        }
 
-        if (entry == null) {
-            return null;
-        }
+            System.out.println(
+                "[MIDletRunner] " + key + ": " + entry
+            );
 
-        System.out.println(
-            "[MIDletRunner] MIDlet entry: " + entry
-        );
+            int firstComma = entry.indexOf(',');
 
-        String[] parts = entry.split(",", -1);
+            if (firstComma < 0) {
+                return entry.trim();
+            }
 
-        if (parts.length >= 3) {
-            return parts[2].trim();
-        }
+            int secondComma = entry.indexOf(
+                ',',
+                firstComma + 1
+            );
 
-        if (parts.length == 1) {
-            return parts[0].trim();
+            if (secondComma < 0) {
+                continue;
+            }
+
+            String className = entry.substring(
+                secondComma + 1
+            ).trim();
+
+            if (className.length() > 0) {
+                return className;
+            }
         }
 
         return null;
     }
+
+    /*
+     * Run the MIDlet lifecycle.
+     */
 
     private static void runLifecycle(MIDlet midlet) {
 
         try {
 
             System.out.println(
-                "[MIDletRunner] >>> startApp()"
+                "[MIDletRunner] Calling startApp()"
             );
 
             midlet.callStartApp();
 
             System.out.println(
-                "[MIDletRunner] <<< startApp() returned"
+                "[MIDletRunner] startApp() returned"
             );
 
-            Display display =
-                Display.getDisplay(midlet);
+            Display display = Display.getDisplay(midlet);
+
+            System.out.println(
+                "[MIDletRunner] Starting Display event loop"
+            );
 
             display.runEventLoop();
 
             if (!MIDlet.isDestroyRequested()) {
-
-                System.out.println(
-                    "[MIDletRunner] >>> pauseApp()"
-                );
-
                 midlet.callPauseApp();
             }
 
             System.out.println(
-                "[MIDletRunner] >>> destroyApp(true)"
+                "[MIDletRunner] Calling destroyApp(true)"
             );
 
             midlet.callDestroyApp(true);
 
             System.out.println(
-                "[MIDletRunner] MIDlet lifecycle complete"
+                "[MIDletRunner] MIDlet stopped normally"
             );
 
         } catch (Throwable error) {
 
             System.out.println(
-                "[MIDletRunner] LIFECYCLE FATAL: "
+                "[MIDletRunner] LIFECYCLE ERROR: "
                 + error.getClass().getName()
                 + ": "
                 + error.getMessage()
