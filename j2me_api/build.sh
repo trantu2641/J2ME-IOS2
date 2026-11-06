@@ -1,38 +1,65 @@
 #!/bin/bash
-# Build j2me_api.jar — minimal J2ME API for iOS/miniJVM
-set -e
+
+# Build j2me_api.jar for the iOS MiniJVM runtime.
+
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-MINIJVM_RT="$SCRIPT_DIR/../../miniJVM-2.0.0/binary/lib/minijvm_rt.jar"
-OUTPUT_DIR="$SCRIPT_DIR/../J2MEEmulator/Resources/jars"
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-if ! command -v javac &> /dev/null; then
-    if [ -f /opt/homebrew/opt/openjdk/bin/javac ]; then
-        export PATH="/opt/homebrew/opt/openjdk/bin:$PATH"
-    else
-        echo "ERROR: javac not found"; exit 1
-    fi
-fi
+MINIJVM_RT="$ROOT_DIR/J2MEEmulator/Resources/jars/minijvm_rt.jar"
+OUTPUT_DIR="$ROOT_DIR/J2MEEmulator/Resources/jars"
 
-if [ ! -f "$MINIJVM_RT" ]; then
-    echo "ERROR: minijvm_rt.jar not found at $MINIJVM_RT"
+CLASSES_DIR="$SCRIPT_DIR/classes"
+SOURCES_FILE="$SCRIPT_DIR/sources.txt"
+
+if ! command -v javac >/dev/null 2>&1; then
+    echo "ERROR: javac is required. Install JDK 17."
     exit 1
 fi
 
-echo "Building j2me_api.jar..."
+if ! command -v jar >/dev/null 2>&1; then
+    echo "ERROR: jar command is required. Install JDK 17."
+    exit 1
+fi
 
-rm -rf "$SCRIPT_DIR/classes"
-mkdir -p "$SCRIPT_DIR/classes"
+if [ ! -s "$MINIJVM_RT" ]; then
+    echo "ERROR: MiniJVM runtime not found: $MINIJVM_RT"
+    exit 1
+fi
+
+rm -rf "$CLASSES_DIR"
+
+mkdir -p "$CLASSES_DIR"
 mkdir -p "$OUTPUT_DIR"
 
-find "$SCRIPT_DIR/src" -name "*.java" > "$SCRIPT_DIR/sources.txt"
+find "$SCRIPT_DIR/src" \
+    -type f \
+    -name '*.java' \
+    | sort > "$SOURCES_FILE"
+
+if [ ! -s "$SOURCES_FILE" ]; then
+    echo "ERROR: No Java sources found in $SCRIPT_DIR/src"
+    exit 1
+fi
+
+echo "Compiling J2ME API sources against:"
+echo "$MINIJVM_RT"
 
 javac --release 8 \
-    -cp "$MINIJVM_RT" \
-    -d "$SCRIPT_DIR/classes" \
-    @"$SCRIPT_DIR/sources.txt"
+    -encoding UTF-8 \
+    -classpath "$MINIJVM_RT" \
+    -d "$CLASSES_DIR" \
+    @"$SOURCES_FILE"
 
-jar cf "$OUTPUT_DIR/j2me_api.jar" -C "$SCRIPT_DIR/classes" .
+jar cf "$OUTPUT_DIR/j2me_api.jar" \
+    -C "$CLASSES_DIR" .
 
-rm -f "$SCRIPT_DIR/sources.txt"
+if [ ! -s "$OUTPUT_DIR/j2me_api.jar" ]; then
+    echo "ERROR: j2me_api.jar was not generated."
+    exit 1
+fi
+
+rm -f "$SOURCES_FILE"
+
 echo "Built: $OUTPUT_DIR/j2me_api.jar"
