@@ -3,72 +3,86 @@ name: Build J2ME iOS
 on:
   workflow_dispatch:
   push:
-    branches:
-      - main
+    branches: [main]
+
+permissions:
+  contents: read
 
 jobs:
   build:
-    runs-on: macos-15
+    runs-on: macos-26
+    timeout-minutes: 60
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Show Xcode
+      - name: Show toolchain
         run: |
           xcodebuild -version
+          xcodebuild -showsdks
 
-      - name: Show project
+      - name: Verify project and bundled J2ME runtime
         run: |
-          find . -maxdepth 3 \
-            \( -name "*.xcodeproj" -o -name "build_jar.sh" -o -name "build.sh" \) \
-            -print
+          test -d J2MEEmulator.xcodeproj
+          test -f J2MEEmulator/Resources/jars/j2me_api.jar
+          test -f J2MEEmulator/Resources/jars/minijvm_rt.jar
+          echo "Xcode project and both bundled runtime JARs found."
+          ls -lh J2MEEmulator/Resources/jars/
+          xcodebuild -list -project J2MEEmulator.xcodeproj
 
-      - name: Build miniJVM
+      # The repository already contains minijvm_rt.jar and j2me_api.jar.
+      # Do not call the old shell builders here: their paths still point to
+      # miniJVM-2.0.0/ and J2MEEmulator/J2MEEmulator/, which do not exist
+      # in this repository layout.
+      - name: Build iOS app for iOS 16.4+
         run: |
-          cd miniJVM-2.0.0/binary
-          chmod +x build_jar.sh
-          ./build_jar.sh
-
-      - name: Build J2ME API
-        run: |
-          cd J2MEEmulator/j2me_api
-          chmod +x build.sh
-          ./build.sh
-
-      - name: Find Xcode project
-        run: |
-          find . -name "*.xcodeproj" -print
-
-      - name: Build iOS
-        run: |
-          PROJECT=$(find . -name "*.xcodeproj" | head -n 1)
-          echo "PROJECT=$PROJECT"
-
+          set -o pipefail
           xcodebuild \
-            -project "$PROJECT" \
+            -project J2MEEmulator.xcodeproj \
+            -scheme J2MEEmulator \
             -configuration Release \
             -sdk iphoneos \
-            -arch arm64 \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            IPHONEOS_DEPLOYMENT_TARGET=16.4 \
+            PRODUCT_BUNDLE_IDENTIFIER=com.trantu2641.j2meplayer \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
-            build
+            CODE_SIGN_IDENTITY='' \
+            build 2>&1 | tee "$RUNNER_TEMP/xcodebuild.log"
 
-      - name: Find app
+      - name: Verify app and package unsigned IPA
         run: |
-          find . -name "*.app" -type d -print
+          APP="$RUNNER_TEMP/DerivedData/Build/Products/Release-iphoneos/J2MEEmulator.app"
+          if [ ! -d "$APP" ]; then
+            echo "ERROR: Built .app was not found. Available app bundles:"
+            find "$RUNNER_TEMP/DerivedData" -name '*.app' -type d -print || true
+            exit 1
+          fi
 
-      - name: Package IPA
-        run: |
-          APP=$(find . -name "*.app" -type d | head -n 1)
+          echo "Built app minimum OS:"
+          /usr/libexec/PlistBuddy -c 'Print :MinimumOSVersion' "$APP/Info.plist"
 
           mkdir -p Payload
-          cp -R "$APP" Payload/J2MEPlayer.app
+          ditto "$APP" Payload/J2MEPlayer.app
+          /usr/bin/zip -qry J2ME-iOS-unsigned.ipa Payload
+          test -s J2ME-iOS-unsigned.ipa
+          ls -lh J2ME-iOS-unsigned.ipa
 
-          zip -qry J2ME-iOS.ipa Payload
-
-      - name: Upload IPA
+      - name: Upload unsigned IPA
         uses: actions/upload-artifact@v4
         with:
-          name: J2ME-iOS-IPA
-          path: J2ME-iOS.ipa
+          name: J2ME-iOS-unsigned
+          path: J2ME-iOS-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: J2ME-iOS-build-log
+          path: ${{ runner.temp }}/xcodebuild.log
+          if-no-files-found: ignore
+          retention-days: 7
