@@ -24,6 +24,7 @@ jobs:
 
       - name: Verify project and bundled J2ME runtime
         run: |
+          set -e
           test -d J2MEEmulator.xcodeproj
           test -f J2MEEmulator/Resources/jars/j2me_api.jar
           test -f J2MEEmulator/Resources/jars/minijvm_rt.jar
@@ -31,10 +32,9 @@ jobs:
           ls -lh J2MEEmulator/Resources/jars/
           xcodebuild -list -project J2MEEmulator.xcodeproj
 
-      # The repository already contains minijvm_rt.jar and j2me_api.jar.
-      # Do not call the old shell builders here: their paths still point to
-      # miniJVM-2.0.0/ and J2MEEmulator/J2MEEmulator/, which do not exist
-      # in this repository layout.
+      # Runtime JARs are intentionally copied into the app bundle root below.
+      # jvm_bridge.c searches Bundle.main.resourcePath/minijvm_rt.jar and
+      # Bundle.main.resourcePath/j2me_api.jar.
       - name: Build iOS app for iOS 16.4+
         run: |
           set -o pipefail
@@ -52,9 +52,11 @@ jobs:
             CODE_SIGN_IDENTITY='' \
             build 2>&1 | tee "$RUNNER_TEMP/xcodebuild.log"
 
-      - name: Verify app and package unsigned IPA
+      - name: Verify app, copy MiniJVM runtime, and package unsigned IPA
         run: |
+          set -e
           APP="$RUNNER_TEMP/DerivedData/Build/Products/Release-iphoneos/JarBox.app"
+
           if [ ! -d "$APP" ]; then
             echo "ERROR: Built .app was not found. Available app bundles:"
             find "$RUNNER_TEMP/DerivedData" -name '*.app' -type d -print || true
@@ -62,12 +64,31 @@ jobs:
           fi
 
           echo "Built app minimum OS:"
-          /usr/libexec/PlistBuddy -c 'Print :MinimumOSVersion' "$APP/Info.plist"
+          MIN_OS=$(/usr/libexec/PlistBuddy -c 'Print :MinimumOSVersion' "$APP/Info.plist")
+          echo "$MIN_OS"
+          if [ "$MIN_OS" != "16.4" ]; then
+            echo "ERROR: Expected MinimumOSVersion 16.4, got $MIN_OS"
+            exit 1
+          fi
+
+          # The native JVM bridge expects these two files directly in
+          # Bundle.main.resourcePath, which is the app bundle root on iOS.
+          cp "J2MEEmulator/Resources/jars/minijvm_rt.jar" "$APP/minijvm_rt.jar"
+          cp "J2MEEmulator/Resources/jars/j2me_api.jar" "$APP/j2me_api.jar"
+
+          # Fail the workflow immediately if either runtime was not packaged.
+          test -s "$APP/minijvm_rt.jar"
+          test -s "$APP/j2me_api.jar"
+          echo "MiniJVM runtime files packaged:"
+          ls -lh "$APP/minijvm_rt.jar" "$APP/j2me_api.jar"
 
           mkdir -p Payload
           ditto "$APP" Payload/J2MEPlayer.app
           /usr/bin/zip -qry J2ME-iOS-unsigned.ipa Payload
           test -s J2ME-iOS-unsigned.ipa
+
+          echo "Verifying runtime files inside IPA:"
+          unzip -Z1 J2ME-iOS-unsigned.ipa | grep -E '^Payload/J2MEPlayer\.app/(minijvm_rt|j2me_api)\.jar$'
           ls -lh J2ME-iOS-unsigned.ipa
 
       - name: Upload unsigned IPA
