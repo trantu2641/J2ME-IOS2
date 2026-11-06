@@ -1,97 +1,102 @@
+//
+// J2MEVirtualKeypadView.swift
+// Portrait on-screen keypad for the J2ME emulator.
+// iOS 16.4 compatible.
+//
+
 import UIKit
 
 final class J2MEVirtualKeypadView: UIView {
 
     var onKeyEvent: ((Int32, Int32) -> Void)?
 
-    private struct Key {
+    private struct KeySpec {
         let title: String
         let codes: [Int32]
     }
 
-    private let leftRows: [[Key?]] = [
+    private let leftRows: [[KeySpec?]] = [
         [
-            Key(title: "1", codes: [49]),
-            Key(title: "2", codes: [50]),
-            Key(title: "3", codes: [51])
+            KeySpec(title: "1", codes: [49]),
+            KeySpec(title: "2", codes: [50]),
+            KeySpec(title: "3", codes: [51])
         ],
         [
-            Key(title: "4", codes: [52]),
-            Key(title: "5", codes: [53]),
-            Key(title: "6", codes: [54])
+            KeySpec(title: "4", codes: [52]),
+            KeySpec(title: "5", codes: [53]),
+            KeySpec(title: "6", codes: [54])
         ],
         [
-            Key(title: "7", codes: [55]),
-            Key(title: "8", codes: [56]),
-            Key(title: "9", codes: [57])
+            KeySpec(title: "7", codes: [55]),
+            KeySpec(title: "8", codes: [56]),
+            KeySpec(title: "9", codes: [57])
         ],
         [
-            Key(title: "*", codes: [42]),
-            Key(title: "0", codes: [48]),
-            Key(title: "#", codes: [35])
+            KeySpec(title: "*", codes: [42]),
+            KeySpec(title: "0", codes: [48]),
+            KeySpec(title: "#", codes: [35])
         ]
     ]
 
-    private let rightRows: [[Key?]] = [
+    // L / empty / R, then directional keys and FIRE.
+    private let rightRows: [[KeySpec?]] = [
         [
-            Key(title: "L", codes: [-6]),
+            KeySpec(title: "L", codes: [-6]),
             nil,
-            Key(title: "R", codes: [-7])
+            KeySpec(title: "R", codes: [-7])
         ],
         [
-            Key(title: "↖", codes: [-1, -3]),
-            Key(title: "↑", codes: [-1]),
-            Key(title: "↗", codes: [-1, -4])
+            KeySpec(title: "↖", codes: [-1, -3]),
+            KeySpec(title: "↑", codes: [-1]),
+            KeySpec(title: "↗", codes: [-1, -4])
         ],
         [
-            Key(title: "←", codes: [-3]),
-            Key(title: "F", codes: [-5]),
-            Key(title: "→", codes: [-4])
+            KeySpec(title: "←", codes: [-3]),
+            KeySpec(title: "F", codes: [-5]),
+            KeySpec(title: "→", codes: [-4])
         ],
         [
-            Key(title: "↙", codes: [-2, -3]),
-            Key(title: "↓", codes: [-2]),
-            Key(title: "↘", codes: [-2, -4])
+            KeySpec(title: "↙", codes: [-2, -3]),
+            KeySpec(title: "↓", codes: [-2]),
+            KeySpec(title: "↘", codes: [-2, -4])
         ]
     ]
 
     override init(frame: CGRect) {
         super.init(frame: frame)
-        setup()
+        backgroundColor = .clear
+        buildLayout()
     }
 
     required init?(coder: NSCoder) {
-        fatalError()
+        fatalError("init(coder:) has not been implemented")
     }
 
-    private func setup() {
-
+    private func buildLayout() {
         let leftGrid = makeGrid(rows: leftRows)
         let rightGrid = makeGrid(rows: rightRows)
 
-        let mainStack = UIStackView(
+        let stack = UIStackView(
             arrangedSubviews: [leftGrid, rightGrid]
         )
 
-        mainStack.axis = .horizontal
-        mainStack.alignment = .fill
-        mainStack.distribution = .fillEqually
-        mainStack.spacing = 10
+        stack.axis = .horizontal
+        stack.alignment = .fill
+        stack.distribution = .fillEqually
+        stack.spacing = 9
+        stack.translatesAutoresizingMaskIntoConstraints = false
 
-        mainStack.translatesAutoresizingMaskIntoConstraints = false
-
-        addSubview(mainStack)
+        addSubview(stack)
 
         NSLayoutConstraint.activate([
-            mainStack.topAnchor.constraint(equalTo: topAnchor),
-            mainStack.bottomAnchor.constraint(equalTo: bottomAnchor),
-            mainStack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 2),
-            mainStack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -2)
+            stack.topAnchor.constraint(equalTo: topAnchor),
+            stack.bottomAnchor.constraint(equalTo: bottomAnchor),
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 1),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -1)
         ])
     }
 
-    private func makeGrid(rows: [[Key?]]) -> UIStackView {
-
+    private func makeGrid(rows: [[KeySpec?]]) -> UIStackView {
         let column = UIStackView()
         column.axis = .vertical
         column.alignment = .fill
@@ -99,18 +104,15 @@ final class J2MEVirtualKeypadView: UIView {
         column.spacing = 3
 
         for row in rows {
-
             let rowStack = UIStackView()
             rowStack.axis = .horizontal
             rowStack.alignment = .fill
             rowStack.distribution = .fillEqually
             rowStack.spacing = 3
 
-            for key in row {
-
-                if let key {
-                    let button = makeButton(key)
-                    rowStack.addArrangedSubview(button)
+            for spec in row {
+                if let spec {
+                    rowStack.addArrangedSubview(makeButton(spec))
                 } else {
                     let spacer = UIView()
                     spacer.backgroundColor = .clear
@@ -124,11 +126,10 @@ final class J2MEVirtualKeypadView: UIView {
         return column
     }
 
-    private func makeButton(_ key: Key) -> UIButton {
-
+    private func makeButton(_ spec: KeySpec) -> UIButton {
         let button = J2MEKeyButton(
-            title: key.title,
-            codes: key.codes
+            title: spec.title,
+            codes: spec.codes
         )
 
         button.onKeyEvent = { [weak self] type, code in
@@ -139,20 +140,28 @@ final class J2MEVirtualKeypadView: UIView {
     }
 }
 
-// ============================================================
-// MARK: - Individual key button
-// ============================================================
-
 private final class J2MEKeyButton: UIButton {
 
     private let codes: [Int32]
-
     var onKeyEvent: ((Int32, Int32) -> Void)?
+    private var isPressed = false
+
+    private let normalColor = UIColor(
+        red: 0.89,
+        green: 0.89,
+        blue: 0.91,
+        alpha: 1
+    )
+
+    private let pressedColor = UIColor(
+        red: 0.72,
+        green: 0.75,
+        blue: 0.82,
+        alpha: 1
+    )
 
     init(title: String, codes: [Int32]) {
-
         self.codes = codes
-
         super.init(frame: .zero)
 
         setTitle(title, for: .normal)
@@ -162,55 +171,33 @@ private final class J2MEKeyButton: UIButton {
             for: .normal
         )
 
-        titleLabel?.font = .systemFont(
-            ofSize: 23,
-            weight: .medium
-        )
-
-        backgroundColor = UIColor(
-            red: 0.89,
-            green: 0.89,
-            blue: 0.91,
-            alpha: 1
-        )
-
-        layer.cornerRadius = 15
+        titleLabel?.font = .systemFont(ofSize: 23, weight: .medium)
+        backgroundColor = normalColor
         clipsToBounds = true
 
-        addTarget(
-            self,
-            action: #selector(keyDown),
-            for: .touchDown
-        )
+        addTarget(self, action: #selector(keyDown), for: .touchDown)
 
         addTarget(
             self,
             action: #selector(keyUp),
-            for: [
-                .touchUpInside,
-                .touchUpOutside,
-                .touchCancel
-            ]
+            for: [.touchUpInside, .touchUpOutside, .touchCancel]
         )
     }
 
     required init?(coder: NSCoder) {
-        fatalError()
+        fatalError("init(coder:) has not been implemented")
     }
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        layer.cornerRadius = min(bounds.height * 0.25, 18)
+        layer.cornerRadius = min(bounds.height * 0.24, 18)
     }
 
     @objc private func keyDown() {
+        guard !isPressed else { return }
 
-        backgroundColor = UIColor(
-            red: 0.72,
-            green: 0.75,
-            blue: 0.82,
-            alpha: 1
-        )
+        isPressed = true
+        backgroundColor = pressedColor
 
         for code in codes {
             onKeyEvent?(
@@ -221,13 +208,10 @@ private final class J2MEKeyButton: UIButton {
     }
 
     @objc private func keyUp() {
+        guard isPressed else { return }
 
-        backgroundColor = UIColor(
-            red: 0.89,
-            green: 0.89,
-            blue: 0.91,
-            alpha: 1
-        )
+        isPressed = false
+        backgroundColor = normalColor
 
         for code in codes {
             onKeyEvent?(
