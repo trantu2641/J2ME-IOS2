@@ -128,8 +128,15 @@ class AppsListViewController: UIViewController,
     // ============================================================
 
     private func addAppTapped() {
-        let jarType = UTType(filenameExtension: "jar") ?? .data
-        let picker = UIDocumentPickerViewController(forOpeningContentTypes: [jarType])
+        // JAR is a ZIP-based Java archive and is not consistently registered as
+        // a system UTType by every Files provider. Use .data so the picker can
+        // display it, then validate the .jar extension after selection.
+        // asCopy makes a local copy inside the app container and avoids many
+        // security-scoped URL issues with iCloud and third-party providers.
+        let picker = UIDocumentPickerViewController(
+            forOpeningContentTypes: [.data],
+            asCopy: true
+        )
         picker.delegate = self
         picker.allowsMultipleSelection = true
         present(picker, animated: true)
@@ -138,29 +145,85 @@ class AppsListViewController: UIViewController,
     func documentPicker(_ controller: UIDocumentPickerViewController,
                         didPickDocumentsAt urls: [URL]) {
         let fm = FileManager.default
-        var imported = 0
+        let gamesURL = URL(fileURLWithPath: Self.gamesDirectory, isDirectory: true)
+        var importedNames: [String] = []
+        var failures: [String] = []
 
-        for url in urls {
-            guard url.pathExtension.lowercased() == "jar" else { continue }
-            let accessing = url.startAccessingSecurityScopedResource()
-            defer { if accessing { url.stopAccessingSecurityScopedResource() } }
+        do {
+            try fm.createDirectory(at: gamesURL, withIntermediateDirectories: true)
+        } catch {
+            showImportResult(title: "Import Failed",
+                             message: "Cannot create the games folder. \(error.localizedDescription)")
+            return
+        }
 
-            let destURL = URL(fileURLWithPath: Self.gamesDirectory)
-                .appendingPathComponent(url.lastPathComponent)
+        for sourceURL in urls {
+            let fileName = sourceURL.lastPathComponent
 
-            // If file with same name exists, remove it (overwrite)
-            try? fm.removeItem(at: destURL)
+            // Accept both .jar and .JAR. Other data files are rejected clearly.
+            guard sourceURL.pathExtension.lowercased() == "jar" else {
+                failures.append("\(fileName): not a .jar file")
+                continue
+            }
+
+            let accessing = sourceURL.startAccessingSecurityScopedResource()
+            defer {
+                if accessing {
+                    sourceURL.stopAccessingSecurityScopedResource()
+                }
+            }
+
+            let destinationURL = gamesURL.appendingPathComponent(fileName)
+            let temporaryURL = gamesURL.appendingPathComponent(
+                ".import-\(UUID().uuidString).tmp"
+            )
 
             do {
-                try fm.copyItem(at: url, to: destURL)
-                imported += 1
+                // Copy to a temporary file first. The existing game is not
+                // removed unless the new copy has completed successfully.
+                try fm.copyItem(at: sourceURL, to: temporaryURL)
+
+                if fm.fileExists(atPath: destinationURL.path) {
+                    try fm.removeItem(at: destinationURL)
+                }
+                try fm.moveItem(at: temporaryURL, to: destinationURL)
+
+                importedNames.append(fileName)
+                print("[Swift] Imported JAR: \(fileName)")
             } catch {
-                print("[Swift] Failed to import \(url.lastPathComponent): \(error)")
+                try? fm.removeItem(at: temporaryURL)
+                failures.append("\(fileName): \(error.localizedDescription)")
+                print("[Swift] Failed to import \(fileName): \(error)")
             }
         }
 
-        if imported > 0 {
+        if !importedNames.isEmpty {
             scanApps()
+        }
+
+        var messageParts: [String] = []
+        if !importedNames.isEmpty {
+            messageParts.append("Imported \(importedNames.count) JAR file(s):\n" + importedNames.joined(separator: "\n"))
+        }
+        if !failures.isEmpty {
+            messageParts.append("Could not import:\n" + failures.joined(separator: "\n"))
+        }
+        if messageParts.isEmpty {
+            messageParts.append("No files were selected.")
+        }
+
+        let title = importedNames.isEmpty ? "No JAR Imported" : "Import Complete"
+        showImportResult(title: title, message: messageParts.joined(separator: "\n\n"))
+    }
+
+    private func showImportResult(title: String, message: String) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            let alert = UIAlertController(title: title,
+                                          message: message,
+                                          preferredStyle: .alert)
+            alert.addAction(UIAlertAction(title: "OK", style: .default))
+            self.present(alert, animated: true)
         }
     }
 
@@ -185,8 +248,9 @@ class AppsListViewController: UIViewController,
             var jarPaths: [(name: String, path: String)] = []
 
             if let files = try? FileManager.default.contentsOfDirectory(atPath: gamesDir) {
-                for file in files where file.hasSuffix(".jar") {
-                    jarPaths.append((name: String(file.dropLast(4)), path: gamesDir + "/" + file))
+                for file in files where URL(fileURLWithPath: file).pathExtension.lowercased() == "jar" {
+                    let name = URL(fileURLWithPath: file).deletingPathExtension().lastPathComponent
+                    jarPaths.append((name: name, path: gamesDir + "/" + file))
                 }
             }
 
