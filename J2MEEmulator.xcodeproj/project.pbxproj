@@ -57,7 +57,7 @@
 				Resources/jars/minijvm_rt.jar,
 				SupportingFiles/Info.plist,
 			);
-			target = 8A8184DD2F6C9DD500E5A952 /* J2MEEmulator */;
+			target = 8A8184DD2F6F18CB00E5A952 /* J2MEEmulator */;
 		};
 /* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
@@ -342,7 +342,7 @@
 		8A8184F42F6C9DD600E5A952 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				ALWAYS_SEARCH_USER_PATHS = NO;
+				ALWAYS_SEARCH_PATHS = NO;
 				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
 				CLANG_ANALYZER_NONNULL = YES;
 				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
@@ -377,7 +377,7 @@
 				DEVELOPMENT_TEAM = 864LF4QUVH;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
-				ENABLE_TESTING = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
 				GCC_C_LANGUAGE_STANDARD = gnu17;
 				GCC_DYNAMIC_NO_PIC = NO;
 				GCC_NO_COMMON_BLOCKS = YES;
@@ -409,7 +409,6 @@
 				ALWAYS_SEARCH_PATHS = NO;
 				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_EXTENSIONS = YES;
 				CLANG_ANALYZER_NONNULL = YES;
-				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
 				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
 				CLANG_ENABLE_MODULES = YES;
 				CLANG_ENABLE_OBJC_ARC = YES;
@@ -472,7 +471,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		8A8184F12F6C9DD600E5A952 /* Build configuration list for PBXNativeTarget "J2MEEmulator" */ = {
+		8A8184F12F6C9DD500E5A952 /* Build configuration list for PBXNativeTarget "J2MEEmulator" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				8A8184F22F6C9DD600E5A952 /* Debug */,
