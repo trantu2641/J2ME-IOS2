@@ -1,25 +1,14 @@
-//
-// EmulatorView.swift
-// J2ME framebuffer viewport: preserve the virtual canvas, fit the complete
-// image into the available iPhone area, and map touches back to JAR coordinates.
-// iOS 16.4+
-//
 
 import UIKit
 
 final class EmulatorView: UIView {
 
-    /// MIDP logical screen resolution selected for the running JAR.
     var canvasWidth: Int = 240 {
-        didSet {
-            setNeedsLayout()
-        }
+        didSet { setNeedsLayout() }
     }
 
     var canvasHeight: Int = 320 {
-        didSet {
-            setNeedsLayout()
-        }
+        didSet { setNeedsLayout() }
     }
 
     private let framebufferView = UIImageView()
@@ -58,67 +47,33 @@ final class EmulatorView: UIView {
         addSubview(framebufferView)
     }
 
-    /// Number of UIKit points used by one logical J2ME pixel after fit-to-screen.
-    /// Values below 1 mean that a high-resolution JAR is being rendered more
-    /// densely inside the same physical viewport.
     var effectiveDisplayScale: CGFloat {
-        guard canvasWidth > 0 else {
+        let width = max(
+            1,
+            framebufferPixelWidth > 0
+                ? framebufferPixelWidth
+                : canvasWidth
+        )
+
+        guard bounds.width > 0 else {
             return 0
         }
 
-        return fittedImageRect().width / CGFloat(canvasWidth)
+        return bounds.width / CGFloat(width)
     }
 
-    /// The outer EmulatorView stays full-size. Only this image rectangle changes.
-    private func fittedImageRect() -> CGRect {
-        let viewportWidth = bounds.width
-        let viewportHeight = bounds.height
-
-        guard viewportWidth > 0, viewportHeight > 0 else {
-            return .zero
-        }
-
-        let sourceWidth = CGFloat(
-            framebufferPixelWidth > 0
-                ? framebufferPixelWidth
-                : max(1, canvasWidth)
-        )
-
-        let sourceHeight = CGFloat(
-            framebufferPixelHeight > 0
-                ? framebufferPixelHeight
-                : max(1, canvasHeight)
-        )
-
-        // Uniform scale: never crop, stretch, or enlarge the viewport itself.
-        let scale = min(
-            viewportWidth / sourceWidth,
-            viewportHeight / sourceHeight
-        )
-
-        let displayedWidth = sourceWidth * scale
-        let displayedHeight = sourceHeight * scale
-
-        return CGRect(
-            x: (viewportWidth - displayedWidth) * 0.5,
-            y: (viewportHeight - displayedHeight) * 0.5,
-            width: displayedWidth,
-            height: displayedHeight
-        )
-    }
-
+    // Luôn phủ kín vùng hiển thị vật lý.
+    // Không aspectFit, không tạo vùng ảnh nhỏ ở giữa.
     override func layoutSubviews() {
         super.layoutSubviews()
-        framebufferView.frame = fittedImageRect()
+        framebufferView.frame = bounds
     }
 
-    // MARK: - Framebuffer
+    // MARK: Framebuffer
 
     func displayImage(_ cgImage: CGImage) {
         DispatchQueue.main.async { [weak self] in
-            guard let self else {
-                return
-            }
+            guard let self else { return }
 
             self.framebufferPixelWidth = cgImage.width
             self.framebufferPixelHeight = cgImage.height
@@ -129,8 +84,8 @@ final class EmulatorView: UIView {
                 orientation: .up
             )
 
+            self.framebufferView.frame = self.bounds
             self.setNeedsLayout()
-            self.layoutIfNeeded()
 
             self.onFrame?(cgImage)
 
@@ -145,58 +100,63 @@ final class EmulatorView: UIView {
         }
     }
 
-    // MARK: - Touch coordinate conversion
+    // MARK: Touch mapping
 
     private func virtualPoint(
         for point: CGPoint,
-        clampToImage: Bool
+        clampToViewport: Bool
     ) -> (Int, Int)? {
 
-        let rect = fittedImageRect()
+        let viewport = bounds
 
-        guard rect.width > 0,
-              rect.height > 0,
-              canvasWidth > 0,
-              canvasHeight > 0 else {
+        guard viewport.width > 0,
+              viewport.height > 0 else {
             return nil
         }
 
-        if !clampToImage && !rect.contains(point) {
-            // Ignore taps in the black bars around the fitted image.
+        let logicalWidth = max(
+            1,
+            framebufferPixelWidth > 0
+                ? framebufferPixelWidth
+                : canvasWidth
+        )
+
+        let logicalHeight = max(
+            1,
+            framebufferPixelHeight > 0
+                ? framebufferPixelHeight
+                : canvasHeight
+        )
+
+        if !clampToViewport && !viewport.contains(point) {
             return nil
         }
 
-        let maxX = rect.maxX.nextDown
-        let maxY = rect.maxY.nextDown
-
-        let x = min(
-            max(point.x, rect.minX),
-            maxX
+        let px = min(
+            max(point.x - viewport.minX, 0),
+            viewport.width.nextDown
         )
 
-        let y = min(
-            max(point.y, rect.minY),
-            maxY
+        let py = min(
+            max(point.y - viewport.minY, 0),
+            viewport.height.nextDown
         )
 
-        let normalizedX = (x - rect.minX) / rect.width
-        let normalizedY = (y - rect.minY) / rect.height
-
-        let virtualX = Int(
-            normalizedX * CGFloat(canvasWidth)
+        let x = Int(
+            (px / viewport.width) * CGFloat(logicalWidth)
         )
 
-        let virtualY = Int(
-            normalizedY * CGFloat(canvasHeight)
+        let y = Int(
+            (py / viewport.height) * CGFloat(logicalHeight)
         )
 
         return (
-            min(max(virtualX, 0), canvasWidth - 1),
-            min(max(virtualY, 0), canvasHeight - 1)
+            min(max(x, 0), logicalWidth - 1),
+            min(max(y, 0), logicalHeight - 1)
         )
     }
 
-    // MARK: - Touch events
+    // MARK: Touch events
 
     override func touchesBegan(
         _ touches: Set<UITouch>,
@@ -205,7 +165,7 @@ final class EmulatorView: UIView {
         for touch in touches {
             guard let (x, y) = virtualPoint(
                 for: touch.location(in: self),
-                clampToImage: false
+                clampToViewport: false
             ) else {
                 continue
             }
@@ -225,7 +185,7 @@ final class EmulatorView: UIView {
         for touch in touches {
             guard let (x, y) = virtualPoint(
                 for: touch.location(in: self),
-                clampToImage: true
+                clampToViewport: true
             ) else {
                 continue
             }
@@ -245,7 +205,7 @@ final class EmulatorView: UIView {
         for touch in touches {
             guard let (x, y) = virtualPoint(
                 for: touch.location(in: self),
-                clampToImage: true
+                clampToViewport: true
             ) else {
                 continue
             }
@@ -266,7 +226,7 @@ final class EmulatorView: UIView {
     }
 }
 
-// MARK: - Global framebuffer callback
+// MARK: Global framebuffer callback
 
 private weak var globalEmulatorView: EmulatorView?
 
