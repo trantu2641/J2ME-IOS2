@@ -1,3 +1,4 @@
+
 //
 // GameViewController.swift
 // J2ME portrait game screen with keyboard input, framebuffer viewport
@@ -73,6 +74,13 @@ final class GameViewController: UIViewController {
     private var keypadBottomConstraint: NSLayoutConstraint!
 
     private var keyboardIsVisible = false
+
+    // Chỉ hiện keypad khi đang ở màn hình chơi game.
+    private var isCanvasScreenVisible: Bool {
+        !emulatorView.isHidden &&
+        formView.isHidden &&
+        listView.isHidden
+    }
 
     private var gameStarted = false
     private var userRequestedExit = false
@@ -346,7 +354,7 @@ final class GameViewController: UIViewController {
 
         let safe = view.safeAreaLayoutGuide
 
-        // Keep the existing J2ME keyboard height.
+        // Giữ nguyên chiều cao bàn phím J2ME.
         keypadHeightConstraint =
             keypadView.heightAnchor.constraint(
                 equalTo: view.widthAnchor,
@@ -363,7 +371,8 @@ final class GameViewController: UIViewController {
 
         keypadCollapsedConstraint.priority = .required
 
-        // This constraint is moved upward when the iOS keyboard appears.
+        // Keypad luôn neo ở cạnh dưới màn hình.
+        // Khi bàn phím iPhone mở, keypad được thu gọn thay vì bị đẩy lên.
         keypadBottomConstraint =
             keypadView.bottomAnchor.constraint(
                 equalTo: safe.bottomAnchor,
@@ -525,38 +534,44 @@ final class GameViewController: UIViewController {
         ])
     }
 
-    // Toggle only the J2ME keyboard.
-    // Do not dismiss the iOS keyboard.
+    // Nút bật/tắt bàn phím J2ME.
+    // Không cho hiện keypad khi bàn phím iPhone đang mở.
     @objc private func toggleKeypad() {
+
+        guard !keyboardIsVisible else {
+            return
+        }
 
         let show = keypadView.isHidden
 
         setKeypadVisible(show)
     }
 
-    // Show the iOS keyboard without hiding the J2ME keyboard.
+    // Hiển thị bàn phím iPhone.
+    // Keypad J2ME được ẩn ngay khi iPhone nhận first responder.
     @objc private func showSystemKeyboard() {
 
         let becameFirstResponder =
             keyboardInput.becomeFirstResponder()
 
-        keyboardIsVisible = becameFirstResponder
-
-        if !becameFirstResponder {
+        guard becameFirstResponder else {
             print("[Keyboard] Could not become first responder")
+            return
         }
-    }
 
-    private func hideSystemKeyboard() {
-
-        keyboardInput.resignFirstResponder()
-        keyboardIsVisible = false
-
+        keyboardIsVisible = true
         keypadBottomConstraint.constant = -7
 
-        UIView.animate(withDuration: 0.25) {
-            self.view.layoutIfNeeded()
-        }
+        setKeypadVisible(
+            false,
+            duration: 0.18
+        )
+    }
+
+    // Đóng bàn phím iPhone.
+    // Chờ notification keyboardWillHide để hiện lại keypad J2ME.
+    private func hideSystemKeyboard() {
+        keyboardInput.resignFirstResponder()
     }
 
     // MARK: - Keyboard frame handling
@@ -572,38 +587,19 @@ final class GameViewController: UIViewController {
             return
         }
 
-        // Convert the keyboard frame into this controller's coordinates.
+        // Đổi tọa độ bàn phím sang tọa độ của GameViewController.
         let keyboardFrame = view.convert(
             screenFrame,
             from: nil
         )
 
-        // Only move the J2ME keypad for a docked keyboard.
-        // Floating keyboards should not move the entire game layout.
-        let isDockedKeyboard =
-            keyboardFrame.maxY >= view.bounds.maxY - 2 &&
-            keyboardFrame.width >= view.bounds.width * 0.7
+        // Kiểm tra bàn phím iPhone có đang nằm trên màn hình hay không.
+        let intersection = view.bounds.intersection(keyboardFrame)
 
-        if isDockedKeyboard {
-
-            let safeBottomY =
-                view.safeAreaLayoutGuide.layoutFrame.maxY
-
-            let targetBottomY = keyboardFrame.minY - 7
-
-            let newConstant = targetBottomY - safeBottomY
-
-            keypadBottomConstraint.constant = min(
-                -7,
-                newConstant
-            )
-
-            keyboardIsVisible = true
-
-        } else {
-
-            keypadBottomConstraint.constant = -7
-        }
+        let systemKeyboardVisible =
+            !intersection.isNull &&
+            intersection.width >= view.bounds.width * 0.5 &&
+            intersection.height > 80
 
         let duration = userInfo[
             UIResponder.keyboardAnimationDurationUserInfoKey
@@ -613,21 +609,49 @@ final class GameViewController: UIViewController {
             UIResponder.keyboardAnimationCurveUserInfoKey
         ] as? UInt ?? 7
 
-        let animationOptions = UIView.AnimationOptions(
-            rawValue: curve << 16
-        )
+        let animationOptions =
+            UIView.AnimationOptions(rawValue: curve << 16)
+                .union(.beginFromCurrentState)
 
-        UIView.animate(
-            withDuration: duration,
-            delay: 0,
-            options: [
-                animationOptions,
-                .beginFromCurrentState
-            ],
-            animations: {
-                self.view.layoutIfNeeded()
+        // Không di chuyển keypad lên trên bàn phím iPhone.
+        keypadBottomConstraint.constant = -7
+
+        if systemKeyboardVisible {
+
+            keyboardIsVisible = true
+
+            // Bàn phím iPhone mở: ẩn bàn phím J2ME.
+            setKeypadVisible(
+                false,
+                duration: duration,
+                animationOptions: animationOptions
+            )
+
+        } else {
+
+            keyboardIsVisible = false
+
+            // Bàn phím iPhone đóng: hiện lại bàn phím J2ME.
+            if isCanvasScreenVisible && !userRequestedExit {
+
+                setKeypadVisible(
+                    true,
+                    duration: duration,
+                    animationOptions: animationOptions
+                )
+
+            } else {
+
+                UIView.animate(
+                    withDuration: duration,
+                    delay: 0,
+                    options: animationOptions,
+                    animations: {
+                        self.view.layoutIfNeeded()
+                    }
+                )
             }
-        )
+        }
     }
 
     @objc private func handleKeyboardWillHide(
@@ -635,36 +659,83 @@ final class GameViewController: UIViewController {
     ) {
 
         keyboardIsVisible = false
-
-        // Restore the J2ME keyboard's original bottom position.
         keypadBottomConstraint.constant = -7
 
         let duration = notification.userInfo?[
             UIResponder.keyboardAnimationDurationUserInfoKey
         ] as? Double ?? 0.25
 
-        UIView.animate(
-            withDuration: duration,
-            delay: 0,
-            options: [.beginFromCurrentState],
-            animations: {
-                self.view.layoutIfNeeded()
-            }
-        )
+        let curve = notification.userInfo?[
+            UIResponder.keyboardAnimationCurveUserInfoKey
+        ] as? UInt ?? 7
+
+        let animationOptions =
+            UIView.AnimationOptions(rawValue: curve << 16)
+                .union(.beginFromCurrentState)
+
+        // Chỉ hiện lại keypad khi đang ở màn hình chơi game.
+        if isCanvasScreenVisible && !userRequestedExit {
+
+            setKeypadVisible(
+                true,
+                duration: duration,
+                animationOptions: animationOptions
+            )
+
+        } else {
+
+            UIView.animate(
+                withDuration: duration,
+                delay: 0,
+                options: animationOptions,
+                animations: {
+                    self.view.layoutIfNeeded()
+                }
+            )
+        }
     }
 
-    private func setKeypadVisible(_ visible: Bool) {
+    // MARK: - Keypad visibility
 
-        keypadView.isHidden = !visible
+    private func setKeypadVisible(
+        _ visible: Bool,
+        duration: TimeInterval = 0.18,
+        animationOptions: UIView.AnimationOptions = [.beginFromCurrentState]
+    ) {
 
-        keypadHeightConstraint.isActive = visible
-        keypadCollapsedConstraint.isActive = !visible
+        // Không cho keypad xuất hiện khi bàn phím iPhone đang mở
+        // hoặc khi người dùng đang thoát game.
+        let shouldShow =
+            visible &&
+            !keyboardIsVisible &&
+            !userRequestedExit
+
+        keypadView.isHidden = !shouldShow
+
+        keypadHeightConstraint.isActive = shouldShow
+        keypadCollapsedConstraint.isActive = !shouldShow
 
         toggleKeypadButton.tintColor =
-            visible ? .white : .systemGreen
+            shouldShow ? .white : .systemGreen
 
-        UIView.animate(withDuration: 0.18) {
+        let changes = {
             self.view.layoutIfNeeded()
+        }
+
+        if duration <= 0 {
+
+            UIView.performWithoutAnimation {
+                changes()
+            }
+
+        } else {
+
+            UIView.animate(
+                withDuration: duration,
+                delay: 0,
+                options: animationOptions,
+                animations: changes
+            )
         }
     }
 
@@ -993,13 +1064,15 @@ final class GameViewController: UIViewController {
     func showCanvasView() {
 
         emulatorView.isHidden = false
-        keypadView.isHidden = false
-
-        keypadHeightConstraint.isActive = true
-        keypadCollapsedConstraint.isActive = false
 
         formView.isHidden = true
         listView.isHidden = true
+
+        // Nếu bàn phím iPhone đang mở thì vẫn giữ keypad J2ME ẩn.
+        setKeypadVisible(
+            !keyboardIsVisible,
+            duration: 0
+        )
     }
 
     func showFormView() {
