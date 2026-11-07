@@ -19,6 +19,10 @@ typedef void (*j2me_flush_callback)(void *cgImage, int width, int height);
 /// Set the callback for receiving rendered frames.
 void j2me_render_set_flush_callback(j2me_flush_callback callback);
 
+/// Set maximum framebuffer export rate.
+/// Values <= 0 or > 45 are normalized to 45 FPS.
+void j2me_render_set_fps_limit(int fps);
+
 /// Signal render subsystem to stop (all acquire calls return NULL).
 /// Must be called before cleanup to protect against zombie threads.
 void j2me_render_stop(void);
