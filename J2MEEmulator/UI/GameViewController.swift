@@ -1,4 +1,3 @@
-
 //
 // GameViewController.swift
 // J2ME portrait game screen with keyboard input, framebuffer viewport
@@ -97,7 +96,7 @@ final class GameViewController: UIViewController {
         canvasWidth: Int = 240,
         canvasHeight: Int = 320,
         render3dScale: Int = 1,
-        fpsLimit: Int = 60
+        fpsLimit: Int = 45
     ) {
         self.jarPath = jarPath
         self.appName = appName
@@ -105,7 +104,11 @@ final class GameViewController: UIViewController {
         self.canvasWidth = min(max(1, canvasWidth), 4096)
         self.canvasHeight = min(max(1, canvasHeight), 4096)
         self.render3dScale = max(1, render3dScale)
-        self.fpsLimit = max(0, fpsLimit)
+
+        // Never allow Unlimited or a value above 45 FPS.
+        self.fpsLimit = fpsLimit > 0
+            ? min(fpsLimit, 45)
+            : 45
 
         super.init(nibName: nil, bundle: nil)
 
@@ -166,7 +169,6 @@ final class GameViewController: UIViewController {
 
         placeholderIconView = iconView
 
-        // Hide startup icon only after receiving the first framebuffer.
         emulatorView.onFirstFrame = { [weak self] in
 
             guard let self,
@@ -174,7 +176,6 @@ final class GameViewController: UIViewController {
                 return
             }
 
-            // First frame received. Cancel startup diagnostic timer.
             self.startupWatchdog?.cancel()
             self.startupWatchdog = nil
 
@@ -191,6 +192,10 @@ final class GameViewController: UIViewController {
         }
 
         setGlobalEmulatorView(emulatorView)
+
+        // Apply the selected FPS limit in the native renderer.
+        // This happens before the MIDlet starts drawing.
+        j2me_render_set_fps_limit(Int32(self.fpsLimit))
 
         j2me_render_set_flush_callback(flushCallback)
         j2me_ui_set_callback(gameUICallback)
@@ -332,10 +337,12 @@ final class GameViewController: UIViewController {
 
         let safe = view.safeAreaLayoutGuide
 
+        // Increase keypad height by 20 points.
         keypadHeightConstraint =
             keypadView.heightAnchor.constraint(
                 equalTo: view.widthAnchor,
-                multiplier: 0.45
+                multiplier: 0.45,
+                constant: 20
             )
 
         keypadHeightConstraint.priority =
@@ -458,8 +465,6 @@ final class GameViewController: UIViewController {
         keyboardInput.isSecureTextEntry = false
 
         keyboardInput.onDeleteBackward = { [weak self] in
-
-            // MIDP Canvas.KEY_CLEAR
             self?.sendKeyPulse(-8)
         }
 
@@ -604,9 +609,6 @@ final class GameViewController: UIViewController {
 
     private func startGame() {
 
-        // Start a 20-second watchdog.
-        // If no framebuffer arrives, display the MiniJVM log.
-
         let watchdog = DispatchWorkItem { [weak self] in
 
             guard let self,
@@ -618,7 +620,6 @@ final class GameViewController: UIViewController {
 
             print("[JVM] Startup watchdog triggered")
 
-            // Read current log while MiniJVM is running.
             self.loadJVMLog()
 
             let details: String
@@ -667,7 +668,6 @@ final class GameViewController: UIViewController {
             execute: watchdog
         )
 
-        // Run MIDlet on background thread.
         DispatchQueue.global(
             qos: .userInitiated
         ).async { [weak self] in
@@ -684,7 +684,6 @@ final class GameViewController: UIViewController {
                     return
                 }
 
-                // Cancel watchdog when MIDlet exits.
                 self.startupWatchdog?.cancel()
                 self.startupWatchdog = nil
 
