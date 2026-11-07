@@ -1,4 +1,3 @@
-
 #include "miniz.h"
 #include "miniz_wrapper.h"
 
@@ -8,7 +7,10 @@ s32 zip_loadfile(char const *jarpath, char const *filename, ByteBuf *buf) {
     mz_zip_archive zipArchive = {0};
     mz_zip_archive_file_stat file_stat = {0};
 
-    /* Skip the first '/' */
+    if (!buf) {
+        return -1;
+    }
+
     if (filename && filename[0] == '/') {
         filename += 1;
     }
@@ -18,12 +20,6 @@ s32 zip_loadfile(char const *jarpath, char const *filename, ByteBuf *buf) {
     if (mz_zip_reader_init_file(&zipArchive, jarpath, 0) == MZ_FALSE) {
         ret = -1;
     } else {
-        /*
-         * IMPORTANT:
-         * Java class names are case-sensitive.
-         * A JAR may contain both dH.class and dh.class.
-         * Never use flags=0 here because it allows case-insensitive lookup.
-         */
         file_index = mz_zip_reader_locate_file(
             &zipArchive,
             filename,
@@ -37,21 +33,30 @@ s32 zip_loadfile(char const *jarpath, char const *filename, ByteBuf *buf) {
         } else {
             size_t uncompressed_size = (size_t)file_stat.m_uncomp_size;
 
-            if (!bytebuf_expand(buf, (s32)uncompressed_size)) {
+            if (uncompressed_size > 0x7FFFFFFF) {
                 ret = -1;
             } else {
-                mz_bool p = mz_zip_reader_extract_file_to_mem(
-                    &zipArchive,
-                    file_stat.m_filename,
-                    buf->buf,
-                    uncompressed_size,
-                    MZ_ZIP_FLAG_CASE_SENSITIVE
-                );
+                if (buf->_alloc_size < (u32)uncompressed_size) {
+                    bytebuf_expand(buf, (u32)uncompressed_size);
+                }
 
-                if (p == MZ_FALSE) {
+                if (!buf->buf ||
+                    buf->_alloc_size < (u32)uncompressed_size) {
                     ret = -1;
                 } else {
-                    buf->wp = (s32)uncompressed_size;
+                    mz_bool result = mz_zip_reader_extract_file_to_mem(
+                        &zipArchive,
+                        file_stat.m_filename,
+                        buf->buf,
+                        uncompressed_size,
+                        MZ_ZIP_FLAG_CASE_SENSITIVE
+                    );
+
+                    if (result == MZ_FALSE) {
+                        ret = -1;
+                    } else {
+                        buf->wp = (s32)uncompressed_size;
+                    }
                 }
             }
         }
@@ -73,7 +78,10 @@ s32 zip_loadfile_to_mem(
     mz_zip_archive zipArchive = {0};
     mz_zip_archive_file_stat file_stat = {0};
 
-    /* Skip the first '/' */
+    if (!buf || bufsize < 0) {
+        return -1;
+    }
+
     if (filename && filename[0] == '/') {
         filename += 1;
     }
@@ -99,15 +107,15 @@ s32 zip_loadfile_to_mem(
             if ((s64)uncompressed_size > bufsize) {
                 ret = -1;
             } else {
-                mz_bool op = mz_zip_reader_extract_file_to_mem(
+                mz_bool result = mz_zip_reader_extract_file_to_mem(
                     &zipArchive,
                     file_stat.m_filename,
                     buf,
-                    bufsize,
+                    uncompressed_size,
                     MZ_ZIP_FLAG_CASE_SENSITIVE
                 );
 
-                if (!op) {
+                if (result == MZ_FALSE) {
                     ret = -1;
                 }
             }
@@ -125,7 +133,6 @@ s64 zip_get_file_unzip_size(char const *jarpath, char const *filename) {
     mz_zip_archive zipArchive = {0};
     mz_zip_archive_file_stat file_stat = {0};
 
-    /* Skip the first '/' */
     if (filename && filename[0] == '/') {
         filename += 1;
     }
@@ -161,7 +168,6 @@ s32 zip_get_file_index(char const *jarpath, char const *filename) {
     mz_zip_archive zipArchive = {0};
     mz_zip_archive_file_stat file_stat = {0};
 
-    /* Skip the first '/' */
     if (filename && filename[0] == '/') {
         filename += 1;
     }
@@ -200,7 +206,6 @@ s32 zip_savefile_mem(
 ) {
     mz_zip_archive zipArchive = {0};
 
-    /* Skip the first '/' */
     if (filename && filename[0] == '/') {
         filename += 1;
     }
@@ -374,21 +379,30 @@ s32 zip_extract(char *zip_data, int size, ByteBuf *data) {
         } else {
             size_t uncompressed_size = (size_t)file_stat.m_uncomp_size;
 
-            if (!bytebuf_expand(data, (s32)uncompressed_size)) {
+            if (uncompressed_size > 0x7FFFFFFF) {
                 ret = -1;
             } else {
-                mz_bool p = mz_zip_reader_extract_to_mem(
-                    &zipArchive,
-                    0,
-                    data->buf,
-                    uncompressed_size,
-                    0
-                );
+                if (data->_alloc_size < (u32)uncompressed_size) {
+                    bytebuf_expand(data, (u32)uncompressed_size);
+                }
 
-                if (p == MZ_FALSE) {
+                if (!data->buf ||
+                    data->_alloc_size < (u32)uncompressed_size) {
                     ret = -1;
                 } else {
-                    data->wp = (s32)uncompressed_size;
+                    mz_bool result = mz_zip_reader_extract_to_mem(
+                        &zipArchive,
+                        0,
+                        data->buf,
+                        uncompressed_size,
+                        0
+                    );
+
+                    if (result == MZ_FALSE) {
+                        ret = -1;
+                    } else {
+                        data->wp = (s32)uncompressed_size;
+                    }
                 }
             }
         }
@@ -457,7 +471,6 @@ s32 gzip_compress(char *data, int size, ByteBuf *gzip_data) {
         size
     );
 
-    /* Reserve 10 bytes for the header and 8 bytes for the footer. */
     mz_ulong compressed_size = mz_compressBound(size) + 18;
 
     unsigned char *compressed_data =
@@ -467,7 +480,6 @@ s32 gzip_compress(char *data, int size, ByteBuf *gzip_data) {
         return -1;
     }
 
-    /* GZIP header */
     compressed_data[0] = 0x1F;
     compressed_data[1] = 0x8B;
     compressed_data[2] = 0x08;
@@ -510,7 +522,6 @@ s32 gzip_compress(char *data, int size, ByteBuf *gzip_data) {
 
     mz_deflateEnd(&stream);
 
-    /* GZIP footer */
     unsigned char *footer = compressed_data + 10 + compressed_len;
 
     *(mz_uint32 *)footer = crc;
@@ -540,7 +551,6 @@ s32 gzip_extract(char *gzip_data, int size, ByteBuf *data) {
     mz_stream stream = {0};
     int status;
 
-    /* Read original size and expected CRC from the footer. */
     mz_uint32 original_size =
         *(mz_uint32 *)(gzip_data + size - 4);
 
@@ -579,7 +589,6 @@ s32 gzip_extract(char *gzip_data, int size, ByteBuf *data) {
         return -1;
     }
 
-    /* Verify CRC32. */
     mz_uint32 computed_crc = mz_crc32(
         MZ_CRC32_INIT,
         uncompressed_data,
