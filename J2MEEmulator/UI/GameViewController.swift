@@ -70,8 +70,8 @@ final class GameViewController: UIViewController {
 
     private var keypadHeightConstraint: NSLayoutConstraint!
     private var keypadCollapsedConstraint: NSLayoutConstraint!
+    private var keypadBottomConstraint: NSLayoutConstraint!
 
-    private var keypadWasVisibleBeforeKeyboard = true
     private var keyboardIsVisible = false
 
     private var gameStarted = false
@@ -203,6 +203,13 @@ final class GameViewController: UIViewController {
         j2me_ui_set_callback(gameUICallback)
 
         activeGameViewController = self
+
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleKeyboardWillChangeFrame(_:)),
+            name: UIResponder.keyboardWillChangeFrameNotification,
+            object: nil
+        )
 
         NotificationCenter.default.addObserver(
             self,
@@ -339,8 +346,7 @@ final class GameViewController: UIViewController {
 
         let safe = view.safeAreaLayoutGuide
 
-        // The previous value was 20.
-        // Increase by another 30 points to bring the keypad up to the red line.
+        // Keep the existing J2ME keyboard height.
         keypadHeightConstraint =
             keypadView.heightAnchor.constraint(
                 equalTo: view.widthAnchor,
@@ -356,6 +362,13 @@ final class GameViewController: UIViewController {
             )
 
         keypadCollapsedConstraint.priority = .required
+
+        // This constraint is moved upward when the iOS keyboard appears.
+        keypadBottomConstraint =
+            keypadView.bottomAnchor.constraint(
+                equalTo: safe.bottomAnchor,
+                constant: -7
+            )
 
         NSLayoutConstraint.activate([
 
@@ -406,11 +419,7 @@ final class GameViewController: UIViewController {
                 constant: -2
             ),
 
-            keypadView.bottomAnchor.constraint(
-                equalTo: safe.bottomAnchor,
-                constant: -7
-            ),
-
+            keypadBottomConstraint,
             keypadHeightConstraint
         ])
     }
@@ -516,26 +525,17 @@ final class GameViewController: UIViewController {
         ])
     }
 
+    // Toggle only the J2ME keyboard.
+    // Do not dismiss the iOS keyboard.
     @objc private func toggleKeypad() {
-
-        if keyboardIsVisible {
-
-            keypadWasVisibleBeforeKeyboard = false
-
-            keyboardInput.resignFirstResponder()
-            keyboardIsVisible = false
-        }
 
         let show = keypadView.isHidden
 
         setKeypadVisible(show)
     }
 
+    // Show the iOS keyboard without hiding the J2ME keyboard.
     @objc private func showSystemKeyboard() {
-
-        keypadWasVisibleBeforeKeyboard = !keypadView.isHidden
-
-        setKeypadVisible(false)
 
         let becameFirstResponder =
             keyboardInput.becomeFirstResponder()
@@ -543,10 +543,7 @@ final class GameViewController: UIViewController {
         keyboardIsVisible = becameFirstResponder
 
         if !becameFirstResponder {
-
             print("[Keyboard] Could not become first responder")
-
-            restoreKeypadAfterKeyboardIfNeeded()
         }
     }
 
@@ -555,7 +552,82 @@ final class GameViewController: UIViewController {
         keyboardInput.resignFirstResponder()
         keyboardIsVisible = false
 
-        restoreKeypadAfterKeyboardIfNeeded()
+        keypadBottomConstraint.constant = -7
+
+        UIView.animate(withDuration: 0.25) {
+            self.view.layoutIfNeeded()
+        }
+    }
+
+    // MARK: - Keyboard frame handling
+
+    @objc private func handleKeyboardWillChangeFrame(
+        _ notification: Notification
+    ) {
+
+        guard let userInfo = notification.userInfo,
+              let screenFrame = userInfo[
+                UIResponder.keyboardFrameEndUserInfoKey
+              ] as? CGRect else {
+            return
+        }
+
+        // Convert the keyboard frame into this controller's coordinates.
+        let keyboardFrame = view.convert(
+            screenFrame,
+            from: nil
+        )
+
+        // Only move the J2ME keypad for a docked keyboard.
+        // Floating keyboards should not move the entire game layout.
+        let isDockedKeyboard =
+            keyboardFrame.maxY >= view.bounds.maxY - 2 &&
+            keyboardFrame.width >= view.bounds.width * 0.7
+
+        if isDockedKeyboard {
+
+            let safeBottomY =
+                view.safeAreaLayoutGuide.layoutFrame.maxY
+
+            let targetBottomY = keyboardFrame.minY - 7
+
+            let newConstant = targetBottomY - safeBottomY
+
+            keypadBottomConstraint.constant = min(
+                -7,
+                newConstant
+            )
+
+            keyboardIsVisible = true
+
+        } else {
+
+            keypadBottomConstraint.constant = -7
+        }
+
+        let duration = userInfo[
+            UIResponder.keyboardAnimationDurationUserInfoKey
+        ] as? Double ?? 0.25
+
+        let curve = userInfo[
+            UIResponder.keyboardAnimationCurveUserInfoKey
+        ] as? UInt ?? 7
+
+        let animationOptions = UIView.AnimationOptions(
+            rawValue: curve << 16
+        )
+
+        UIView.animate(
+            withDuration: duration,
+            delay: 0,
+            options: [
+                animationOptions,
+                .beginFromCurrentState
+            ],
+            animations: {
+                self.view.layoutIfNeeded()
+            }
+        )
     }
 
     @objc private func handleKeyboardWillHide(
@@ -564,19 +636,21 @@ final class GameViewController: UIViewController {
 
         keyboardIsVisible = false
 
-        restoreKeypadAfterKeyboardIfNeeded()
-    }
+        // Restore the J2ME keyboard's original bottom position.
+        keypadBottomConstraint.constant = -7
 
-    private func restoreKeypadAfterKeyboardIfNeeded() {
+        let duration = notification.userInfo?[
+            UIResponder.keyboardAnimationDurationUserInfoKey
+        ] as? Double ?? 0.25
 
-        guard keypadWasVisibleBeforeKeyboard,
-              !userRequestedExit else {
-            return
-        }
-
-        keypadWasVisibleBeforeKeyboard = false
-
-        setKeypadVisible(true)
+        UIView.animate(
+            withDuration: duration,
+            delay: 0,
+            options: [.beginFromCurrentState],
+            animations: {
+                self.view.layoutIfNeeded()
+            }
+        )
     }
 
     private func setKeypadVisible(_ visible: Bool) {
@@ -901,14 +975,14 @@ final class GameViewController: UIViewController {
 
         userRequestedExit = true
 
-        keypadWasVisibleBeforeKeyboard = false
-
         startupWatchdog?.cancel()
         startupWatchdog = nil
 
         keyboardInput.resignFirstResponder()
 
         keyboardIsVisible = false
+        keypadBottomConstraint.constant = -7
+
         exitButton.isEnabled = false
 
         jvm_bridge_request_stop()
