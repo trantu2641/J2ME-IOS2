@@ -1,8 +1,9 @@
+
 //
 //  AppsListViewController.swift
 //  JarBox
 //
-//  JAR launcher with hide, rename, custom icon and duplicate install.
+//  JAR launcher with rename, custom icon and duplicate install.
 //
 
 import UIKit
@@ -23,7 +24,6 @@ class AppsListViewController: UIViewController,
 
     // MARK: - Toolbar
 
-    private var hiddenAppsBarButtonItem: UIBarButtonItem!
     private var duplicateInstallBarButtonItem: UIBarButtonItem!
 
     // When this value is not nil, the document picker is selecting an icon.
@@ -83,10 +83,6 @@ class AppsListViewController: UIViewController,
         "jarbox_display_name_\(id)"
     }
 
-    private static func hiddenKey(_ id: String) -> String {
-        "jarbox_hidden_\(id)"
-    }
-
     private static func customIconPath(for id: String) -> String {
         iconsDirectory + "/\(id).png"
     }
@@ -94,12 +90,6 @@ class AppsListViewController: UIViewController,
     private static func hasCustomIcon(for app: AppInfo) -> Bool {
         FileManager.default.fileExists(
             atPath: customIconPath(for: gameId(for: app))
-        )
-    }
-
-    private static func isHidden(_ app: AppInfo) -> Bool {
-        UserDefaults.standard.bool(
-            forKey: hiddenKey(gameId(for: app))
         )
     }
 
@@ -164,31 +154,9 @@ class AppsListViewController: UIViewController,
         duplicateInstallBarButtonItem.accessibilityLabel =
             "Install another copy of a JAR"
 
-        hiddenAppsBarButtonItem = UIBarButtonItem(
-            image: UIImage(systemName: "eye.slash"),
-            style: .plain,
-            target: nil,
-            action: nil
-        )
-
-        hiddenAppsBarButtonItem.accessibilityLabel = "Hidden JARs"
-
-        hiddenAppsBarButtonItem.menu = UIMenu(
-            title: "Hidden JARs",
-            children: [
-                UIAction(
-                    title: "No hidden JARs",
-                    attributes: .disabled
-                ) { _ in }
-            ]
-        )
-
-        // Add is at the far right.
-        // Duplicate and hidden management are outside the app grid.
         navigationItem.rightBarButtonItems = [
             addButton,
-            duplicateInstallBarButtonItem,
-            hiddenAppsBarButtonItem
+            duplicateInstallBarButtonItem
         ]
     }
 
@@ -668,16 +636,14 @@ class AppsListViewController: UIViewController,
                     return
                 }
 
+                // All installed JARs are shown.
+                // There is no hidden-JAR filter anymore.
                 self.allApps = scannedApps
-
-                self.apps = scannedApps.filter {
-                    !Self.isHidden($0)
-                }
+                self.apps = scannedApps
 
                 self.springboardCollectionView.reloadData()
 
                 self.updateEmptyState()
-                self.updateHiddenAppsMenu()
 
                 print(
                     "[Swift] Found \(scannedApps.count) JAR installations"
@@ -692,107 +658,9 @@ class AppsListViewController: UIViewController,
 
             emptyStateLabel.text =
                 "No Games Yet\nTap + to add a .jar file"
-
-        } else if apps.isEmpty {
-
-            emptyStateLabel.text =
-                "All JARs are hidden\nTap the eye button to show them"
-
         }
 
         emptyStateLabel.isHidden = !apps.isEmpty
-    }
-
-    // MARK: - Hidden JAR management
-
-    private func setHidden(
-        _ hidden: Bool,
-        for app: AppInfo
-    ) {
-
-        let id = Self.gameId(for: app)
-
-        if hidden {
-            UserDefaults.standard.set(
-                true,
-                forKey: Self.hiddenKey(id)
-            )
-        } else {
-            UserDefaults.standard.removeObject(
-                forKey: Self.hiddenKey(id)
-            )
-        }
-
-        scanApps()
-    }
-
-    private func updateHiddenAppsMenu() {
-
-        guard hiddenAppsBarButtonItem != nil else {
-            return
-        }
-
-        let hiddenApps = allApps.filter {
-            Self.isHidden($0)
-        }
-
-        var actions: [UIAction] = []
-
-        if hiddenApps.isEmpty {
-
-            actions.append(
-                UIAction(
-                    title: "No hidden JARs",
-                    image: UIImage(systemName: "checkmark.circle"),
-                    attributes: .disabled
-                ) { _ in }
-            )
-
-        } else {
-
-            for app in hiddenApps {
-
-                let action = UIAction(
-                    title: "\(app.name)  [\(app.fileName)]",
-                    image: UIImage(systemName: "eye")
-                ) { [weak self] _ in
-
-                    self?.setHidden(
-                        false,
-                        for: app
-                    )
-                }
-
-                actions.append(action)
-            }
-
-            actions.append(
-                UIAction(
-                    title: "Show All Hidden",
-                    image: UIImage(systemName: "eye.fill")
-                ) { [weak self] _ in
-
-                    self?.showAllHiddenApps()
-                }
-            )
-        }
-
-        hiddenAppsBarButtonItem.menu = UIMenu(
-            title: "Hidden JARs (\(hiddenApps.count))",
-            children: actions
-        )
-    }
-
-    private func showAllHiddenApps() {
-
-        for app in allApps {
-
-            UserDefaults.standard.removeObject(
-                forKey: Self.hiddenKey(Self.gameId(for: app))
-            )
-        }
-
-        scanApps()
     }
 
     // MARK: - Duplicate installation
@@ -1363,18 +1231,6 @@ class AppsListViewController: UIViewController,
                     ]
                 }
 
-                // Hide from the home screen.
-                let hide = UIAction(
-                    title: "Hide JAR",
-                    image: UIImage(systemName: "eye.slash")
-                ) { _ in
-
-                    self?.setHidden(
-                        true,
-                        for: app
-                    )
-                }
-
                 // Install another copy.
                 let duplicate = UIAction(
                     title: "Duplicate Install",
@@ -1388,7 +1244,6 @@ class AppsListViewController: UIViewController,
                     title: "Manage JAR",
                     image: UIImage(systemName: "app"),
                     children: iconActions + [
-                        hide,
                         duplicate
                     ]
                 )
@@ -1790,10 +1645,6 @@ class AppsListViewController: UIViewController,
 
                 UserDefaults.standard.removeObject(
                     forKey: Self.displayNameKey(id)
-                )
-
-                UserDefaults.standard.removeObject(
-                    forKey: Self.hiddenKey(id)
                 )
 
                 UserDefaults.standard.removeObject(
