@@ -637,9 +637,8 @@ class AppsListViewController: UIViewController,
                 }
             }
 
-            // FPS menu is moved out of the nested settings menu.
-            // This avoids the deeper nested context-menu path that can crash
-            // while opening FPS Limit on some iOS 16 builds.
+            // Keep FPS menu separate from Screen Resolution.
+            // This avoids deeply nested context-menu presentation.
             let fpsMenu = UIMenu(
                 title: "FPS Limit",
                 image: UIImage(systemName: "speedometer"),
@@ -735,7 +734,9 @@ class AppsListViewController: UIViewController,
         UserDefaults.standard.set(h, forKey: "resH_\(gameID)")
     }
 
+    // 0 means Unlimited. Positive values are capped at 45 FPS.
     private static let fpsLimitOptions: [(label: String, value: Int)] = [
+        ("Không giới hạn", 0),
         ("15 FPS", 15),
         ("20 FPS", 20),
         ("30 FPS", 30),
@@ -748,15 +749,17 @@ class AppsListViewController: UIViewController,
         guard let saved = UserDefaults.standard.object(
             forKey: key
         ) as? Int else {
-            return 45
+            // A lower default helps reduce heat on older iPhones.
+            return 30
         }
 
-        // Migrate old Unlimited, 0 FPS and 60 FPS settings to 45 FPS.
         switch saved {
-        case 15, 20, 30, 45:
+        case 0, 15, 20, 30, 45:
             return saved
+
         default:
-            return 45
+            // Migrate old unsupported values to the cooler default.
+            return 30
         }
     }
 
@@ -766,7 +769,7 @@ class AppsListViewController: UIViewController,
     ) {
         let safeFPS = fpsLimitOptions.contains {
             $0.value == fps
-        } ? fps : 45
+        } ? fps : 30
 
         UserDefaults.standard.set(
             safeFPS,
