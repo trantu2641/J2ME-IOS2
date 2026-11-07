@@ -1,34 +1,49 @@
 //
 // EmulatorView.swift
-// J2ME framebuffer viewport with aspect-fit rendering and accurate touch mapping.
+// Optimized J2ME framebuffer rendering.
+// Direct CGImage -> CALayer rendering.
 // iOS 16.4+
 //
 
 import UIKit
+import QuartzCore
 
 final class EmulatorView: UIView {
 
-    /// Logical MIDP canvas dimensions for the selected JAR.
+    // MARK: - Virtual resolution
+
     var canvasWidth: Int = 240 {
-        didSet { setNeedsLayout() }
+        didSet {
+            setNeedsLayout()
+        }
     }
 
     var canvasHeight: Int = 320 {
-        didSet { setNeedsLayout() }
+        didSet {
+            setNeedsLayout()
+        }
     }
 
-    private let framebufferView = UIImageView()
+    // MARK: - Direct Core Animation rendering
+
+    private let framebufferLayer = CALayer()
+
     private var framebufferPixelWidth = 0
     private var framebufferPixelHeight = 0
+
     private var hasDisplayedFirstFrame = false
 
-    // Keep only the newest image while the main queue is busy.
+    // MARK: - Frame coalescing
+
     private let frameLock = NSLock()
+
     private var pendingFrame: CGImage?
     private var frameDeliveryScheduled = false
 
     var onFirstFrame: (() -> Void)?
     var onFrame: ((CGImage) -> Void)?
+
+    // MARK: - Initialization
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -41,42 +56,66 @@ final class EmulatorView: UIView {
     }
 
     private func setup() {
+
         backgroundColor = .black
+
+        isOpaque = true
         clipsToBounds = true
+
         isMultipleTouchEnabled = true
         isUserInteractionEnabled = true
 
-        framebufferView.translatesAutoresizingMaskIntoConstraints = false
-        framebufferView.backgroundColor = .black
-        framebufferView.contentMode = .scaleAspectFit
-        framebufferView.clipsToBounds = true
-        framebufferView.isUserInteractionEnabled = false
-        framebufferView.layer.magnificationFilter = .nearest
-        framebufferView.layer.minificationFilter = .nearest
-        framebufferView.layer.contentsGravity = .resizeAspect
+        // Use a dedicated CALayer instead of UIImageView.
+        framebufferLayer.backgroundColor = UIColor.black.cgColor
 
-        addSubview(framebufferView)
+        framebufferLayer.contentsGravity = kCAGravityResizeAspect
 
-        NSLayoutConstraint.activate([
-            framebufferView.topAnchor.constraint(equalTo: topAnchor),
-            framebufferView.leadingAnchor.constraint(equalTo: leadingAnchor),
-            framebufferView.trailingAnchor.constraint(equalTo: trailingAnchor),
-            framebufferView.bottomAnchor.constraint(equalTo: bottomAnchor)
-        ])
+        framebufferLayer.magnificationFilter = .nearest
+        framebufferLayer.minificationFilter = .nearest
+
+        framebufferLayer.contentsScale = UIScreen.main.scale
+
+        framebufferLayer.isOpaque = true
+
+        framebufferLayer.contents = nil
+
+        layer.addSublayer(framebufferLayer)
     }
 
-    /// UIKit points occupied by one logical J2ME pixel after aspect fitting.
+    // MARK: - Layout
+
+    override func layoutSubviews() {
+
+        super.layoutSubviews()
+
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+
+        framebufferLayer.frame = bounds
+
+        CATransaction.commit()
+    }
+
+    // MARK: - Aspect fit
+
     var effectiveDisplayScale: CGFloat {
-        guard canvasWidth > 0 else { return 0 }
-        return fittedImageRect().width / CGFloat(canvasWidth)
+
+        guard canvasWidth > 0 else {
+            return 0
+        }
+
+        return fittedImageRect().width /
+            CGFloat(canvasWidth)
     }
 
-    /// Image rectangle inside the full-size UIImageView.
     private func fittedImageRect() -> CGRect {
+
         let viewWidth = bounds.width
         let viewHeight = bounds.height
 
-        guard viewWidth > 0, viewHeight > 0 else {
+        guard viewWidth > 0,
+              viewHeight > 0 else {
+
             return .zero
         }
 
@@ -107,18 +146,16 @@ final class EmulatorView: UIView {
         )
     }
 
-    override func layoutSubviews() {
-        super.layoutSubviews()
-        framebufferView.frame = bounds
-    }
+    // MARK: - Framebuffer submission
 
-    // MARK: - Framebuffer
-
+    /// Called from the native J2ME rendering thread.
+    ///
+    /// Only the newest pending frame is retained.
+    /// At most one main-queue delivery is scheduled at a time.
     func displayImage(_ cgImage: CGImage) {
 
         frameLock.lock()
 
-        // Replace any older frame that has not reached the screen yet.
         pendingFrame = cgImage
 
         let shouldSchedule = !frameDeliveryScheduled
@@ -134,11 +171,20 @@ final class EmulatorView: UIView {
         }
 
         DispatchQueue.main.async { [weak self] in
+
             self?.displayPendingFrame()
         }
     }
 
+    /// Must execute on the main thread.
+    ///
+    /// Directly commits CGImage to CALayer.
+    /// No UIImage allocation and no forced Auto Layout pass.
     private func displayPendingFrame() {
+
+        dispatchPrecondition(
+            condition: .onQueue(.main)
+        )
 
         frameLock.lock()
 
@@ -153,21 +199,27 @@ final class EmulatorView: UIView {
             return
         }
 
+        // Update dimensions for correct touch mapping.
         framebufferPixelWidth = cgImage.width
         framebufferPixelHeight = cgImage.height
 
-        framebufferView.image = UIImage(
-            cgImage: cgImage,
-            scale: 1.0,
-            orientation: .up
-        )
+        // Avoid implicit Core Animation animations.
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
 
-        setNeedsLayout()
-        layoutIfNeeded()
+        // Direct native image assignment.
+        framebufferLayer.contents = cgImage
+
+        CATransaction.commit()
+
+        // Do not call setNeedsLayout() or layoutIfNeeded()
+        // for every frame. The layer already fills the view.
 
         onFrame?(cgImage)
 
+        // First frame notification.
         if !hasDisplayedFirstFrame {
+
             hasDisplayedFirstFrame = true
 
             let callback = onFirstFrame
@@ -190,6 +242,7 @@ final class EmulatorView: UIView {
               rect.height > 0,
               canvasWidth > 0,
               canvasHeight > 0 else {
+
             return nil
         }
 
@@ -197,11 +250,21 @@ final class EmulatorView: UIView {
             return nil
         }
 
-        let x = min(max(point.x, rect.minX), rect.maxX.nextDown)
-        let y = min(max(point.y, rect.minY), rect.maxY.nextDown)
+        let x = min(
+            max(point.x, rect.minX),
+            rect.maxX.nextDown
+        )
 
-        let normalizedX = (x - rect.minX) / rect.width
-        let normalizedY = (y - rect.minY) / rect.height
+        let y = min(
+            max(point.y, rect.minY),
+            rect.maxY.nextDown
+        )
+
+        let normalizedX =
+            (x - rect.minX) / rect.width
+
+        let normalizedY =
+            (y - rect.minY) / rect.height
 
         let virtualX = Int(
             normalizedX * CGFloat(canvasWidth)
@@ -217,13 +280,15 @@ final class EmulatorView: UIView {
         )
     }
 
-    // MARK: - Touch events
+    // MARK: - Pointer input
 
     override func touchesBegan(
         _ touches: Set<UITouch>,
         with event: UIEvent?
     ) {
+
         for touch in touches {
+
             guard let (x, y) = virtualPoint(
                 for: touch.location(in: self),
                 clampToImage: false
@@ -243,7 +308,9 @@ final class EmulatorView: UIView {
         _ touches: Set<UITouch>,
         with event: UIEvent?
     ) {
+
         for touch in touches {
+
             guard let (x, y) = virtualPoint(
                 for: touch.location(in: self),
                 clampToImage: true
@@ -263,7 +330,9 @@ final class EmulatorView: UIView {
         _ touches: Set<UITouch>,
         with event: UIEvent?
     ) {
+
         for touch in touches {
+
             guard let (x, y) = virtualPoint(
                 for: touch.location(in: self),
                 clampToImage: true
@@ -283,6 +352,7 @@ final class EmulatorView: UIView {
         _ touches: Set<UITouch>,
         with event: UIEvent?
     ) {
+
         touchesEnded(touches, with: event)
     }
 }
@@ -301,7 +371,9 @@ let flushCallback: @convention(c) (
     Int32
 ) -> Void = { cgImagePointer, _, _ in
 
-    guard let cgImagePointer else { return }
+    guard let cgImagePointer else {
+        return
+    }
 
     let cgImage = Unmanaged<CGImage>
         .fromOpaque(cgImagePointer)
