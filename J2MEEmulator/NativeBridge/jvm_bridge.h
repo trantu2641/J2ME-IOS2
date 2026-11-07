@@ -9,6 +9,10 @@ extern "C" {
 /// Set by jvm_bridge_init, read by j2me_m3g_jni.c and MC3D via system property.
 extern int g_render_3d_scale;
 
+/// Register the calling thread as the iOS main UI thread for CPU profiling.
+/// Call from the main thread before starting a MIDlet.
+void jvm_bridge_register_main_thread(void);
+
 /// Initialize miniJVM with the given resource and save directories.
 /// @param res_root         Path to directory containing runtime JARs
 /// @param save_root        Path to writable directory for app data
