@@ -92,7 +92,7 @@ final class GameViewController: UIViewController {
         canvasWidth: Int = 240,
         canvasHeight: Int = 320,
         render3dScale: Int = 1,
-        fpsLimit: Int = 30
+        fpsLimit: Int = 0
     ) {
         self.jarPath = jarPath
         self.appName = appName
@@ -101,12 +101,9 @@ final class GameViewController: UIViewController {
         self.canvasHeight = min(max(1, canvasHeight), 4096)
         self.render3dScale = max(1, render3dScale)
 
-        // 0 = Unlimited. Positive values are capped at 45 FPS.
-        if fpsLimit <= 0 {
-            self.fpsLimit = 0
-        } else {
-            self.fpsLimit = min(fpsLimit, 45)
-        }
+        // This build always runs with unlimited FPS.
+        // Keep the parameter for compatibility with existing callers.
+        self.fpsLimit = 0
 
         super.init(nibName: nil, bundle: nil)
 
@@ -194,13 +191,15 @@ final class GameViewController: UIViewController {
         j2me_render_stop()
         j2me_render_cleanup()
 
-        if fpsLimit > 0 {
-            j2me_render_set_fps_limit(Int32(fpsLimit))
-        } else {
-            print("[FPS] Unlimited mode enabled")
-        }
+        // FPS = 0 means unlimited.
+        // Set this after cleanup because cleanup resets render timing.
+        j2me_render_set_fps_limit(0)
 
+        // The ready callback prevents native code from creating
+        // another CGImage while the previous frame is waiting.
+        j2me_render_set_flush_ready_callback(flushReadyCallback)
         j2me_render_set_flush_callback(flushCallback)
+
         j2me_ui_set_callback(gameUICallback)
 
         activeGameViewController = self
@@ -349,7 +348,6 @@ final class GameViewController: UIViewController {
                 constant: 50
             )
 
-        // Required priority ensures Auto Layout does not discard this height.
         keypadHeightConstraint.priority = .required
 
         keypadCollapsedConstraint =
@@ -778,7 +776,7 @@ final class GameViewController: UIViewController {
         print("[JVM] MIDlet JAR: \(jarPath)")
         print("[JVM] Virtual resolution: \(canvasWidth)x\(canvasHeight)")
         print("[JVM] Diagnostic log: \(lastJVMLogPath)")
-        print("[JVM] FPS limit: \(fpsLimit == 0 ? "Unlimited" : "\(fpsLimit)")")
+        print("[JVM] FPS limit: Unlimited")
 
         let initResult = jvm_bridge_init(
             resourceRoot,
@@ -787,7 +785,7 @@ final class GameViewController: UIViewController {
             Int32(canvasWidth),
             Int32(canvasHeight),
             Int32(render3dScale),
-            Int32(fpsLimit)
+            0
         )
 
         guard initResult == 0 else {
