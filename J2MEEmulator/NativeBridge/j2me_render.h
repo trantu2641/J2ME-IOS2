@@ -16,11 +16,18 @@ void j2me_render_reg_natives(MiniJVM *jvm);
 /// @param height  Image height
 typedef void (*j2me_flush_callback)(void *cgImage, int width, int height);
 
+/// Called before creating a framebuffer snapshot.
+/// Return non-zero when the UI can accept another frame.
+typedef int (*j2me_flush_ready_callback)(void);
+
 /// Set the callback for receiving rendered frames.
 void j2me_render_set_flush_callback(j2me_flush_callback callback);
 
+/// Set the callback used to avoid creating frames that cannot be displayed.
+void j2me_render_set_flush_ready_callback(j2me_flush_ready_callback callback);
+
 /// Set maximum framebuffer export rate.
-/// Values <= 0 or > 45 are normalized to 45 FPS.
+/// Values <= 0 mean unlimited. Positive values are capped at 45 FPS.
 void j2me_render_set_fps_limit(int fps);
 
 /// Signal render subsystem to stop (all acquire calls return NULL).
