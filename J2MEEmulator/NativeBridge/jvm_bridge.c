@@ -16,6 +16,11 @@
 #include <stdatomic.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <pthread.h>
+#include <time.h>
+
+#include <mach/mach.h>
+#include <mach/thread_info.h>
 
 static MiniJVM *g_jvm = NULL;
 static atomic_int g_jvm_stop_requested = 0;
@@ -26,9 +31,284 @@ static int g_log_redirected = 0;
 
 int g_render_3d_scale = 1;
 
-/*
- * Redirect MiniJVM stdout/stderr into the game's writable save folder.
- */
+// ============================================================
+// CPU profiler
+// ============================================================
+
+#define CPU_PROFILE_TOP_THREADS 8
+#define CPU_PROFILE_INTERVAL_SECONDS 5
+
+typedef struct CPUThreadSample {
+    double cpu_percent;
+    mach_port_t thread_port;
+    char name[64];
+} CPUThreadSample;
+
+static pthread_t g_cpu_profiler_thread;
+static atomic_int g_cpu_profiler_running = 0;
+static int g_cpu_profiler_started = 0;
+
+static void *cpu_profiler_main(void *argument) {
+
+    (void)argument;
+
+    pthread_setname_np("JarBoxCPUProfiler");
+
+    while (atomic_load_explicit(
+        &g_cpu_profiler_running,
+        memory_order_relaxed
+    )) {
+
+        // Sleep in one-second pieces so shutdown is responsive.
+        for (
+            int i = 0;
+            i < CPU_PROFILE_INTERVAL_SECONDS;
+            i++
+        ) {
+
+            if (!atomic_load_explicit(
+                &g_cpu_profiler_running,
+                memory_order_relaxed
+            )) {
+                break;
+            }
+
+            struct timespec delay;
+            delay.tv_sec = 1;
+            delay.tv_nsec = 0;
+
+            nanosleep(&delay, NULL);
+        }
+
+        if (!atomic_load_explicit(
+            &g_cpu_profiler_running,
+            memory_order_relaxed
+        )) {
+            break;
+        }
+
+        thread_act_array_t thread_list = NULL;
+        mach_msg_type_number_t thread_count = 0;
+
+        kern_return_t result = task_threads(
+            mach_task_self(),
+            &thread_list,
+            &thread_count
+        );
+
+        if (result != KERN_SUCCESS) {
+
+            printf(
+                "[CPU Profiler] task_threads failed: %d\n",
+                result
+            );
+
+            continue;
+        }
+
+        CPUThreadSample top[CPU_PROFILE_TOP_THREADS] = {0};
+
+        double total_cpu = 0.0;
+        int active_threads = 0;
+
+        for (
+            mach_msg_type_number_t i = 0;
+            i < thread_count;
+            i++
+        ) {
+
+            thread_basic_info_data_t info;
+            mach_msg_type_number_t info_count =
+                THREAD_BASIC_INFO_COUNT;
+
+            kern_return_t info_result = thread_info(
+                thread_list[i],
+                THREAD_BASIC_INFO,
+                (thread_info_t)&info,
+                &info_count
+            );
+
+            if (info_result != KERN_SUCCESS) {
+                mach_port_deallocate(
+                    mach_task_self(),
+                    thread_list[i]
+                );
+                continue;
+            }
+
+            double cpu_percent =
+                ((double)info.cpu_usage * 100.0)
+                / (double)TH_USAGE_SCALE;
+
+            if (cpu_percent > 0.1) {
+
+                total_cpu += cpu_percent;
+                active_threads++;
+
+                CPUThreadSample sample = {0};
+
+                sample.cpu_percent = cpu_percent;
+                sample.thread_port = thread_list[i];
+
+                pthread_t native_thread =
+                    pthread_from_mach_thread_np(thread_list[i]);
+
+                if (native_thread != NULL) {
+                    pthread_getname_np(
+                        native_thread,
+                        sample.name,
+                        sizeof(sample.name)
+                    );
+                }
+
+                if (sample.name[0] == '\0') {
+                    snprintf(
+                        sample.name,
+                        sizeof(sample.name),
+                        "thread-%u",
+                        (unsigned int)thread_list[i]
+                    );
+                }
+
+                // Keep the highest CPU threads in descending order.
+                for (
+                    int position = 0;
+                    position < CPU_PROFILE_TOP_THREADS;
+                    position++
+                ) {
+
+                    if (
+                        cpu_percent >
+                        top[position].cpu_percent
+                    ) {
+
+                        for (
+                            int shift = CPU_PROFILE_TOP_THREADS - 1;
+                            shift > position;
+                            shift--
+                        ) {
+                            top[shift] = top[shift - 1];
+                        }
+
+                        top[position] = sample;
+                        break;
+                    }
+                }
+            }
+
+            mach_port_deallocate(
+                mach_task_self(),
+                thread_list[i]
+            );
+        }
+
+        if (thread_list != NULL) {
+            vm_deallocate(
+                mach_task_self(),
+                (vm_address_t)thread_list,
+                (vm_size_t)(thread_count * sizeof(thread_t))
+            );
+        }
+
+        printf(
+            "[CPU] total=%.1f%% active=%d threads=%u",
+            total_cpu,
+            active_threads,
+            thread_count
+        );
+
+        for (
+            int i = 0;
+            i < CPU_PROFILE_TOP_THREADS;
+            i++
+        ) {
+
+            if (top[i].cpu_percent <= 0.1) {
+                break;
+            }
+
+            printf(
+                " | %s=%.1f%%",
+                top[i].name,
+                top[i].cpu_percent
+            );
+        }
+
+        printf("\n");
+    }
+
+    return NULL;
+}
+
+static void cpu_profiler_start(void) {
+
+    if (g_cpu_profiler_started) {
+        return;
+    }
+
+    atomic_store_explicit(
+        &g_cpu_profiler_running,
+        1,
+        memory_order_relaxed
+    );
+
+    int result = pthread_create(
+        &g_cpu_profiler_thread,
+        NULL,
+        cpu_profiler_main,
+        NULL
+    );
+
+    if (result != 0) {
+
+        atomic_store_explicit(
+            &g_cpu_profiler_running,
+            0,
+            memory_order_relaxed
+        );
+
+        printf(
+            "[CPU Profiler] pthread_create failed: %d\n",
+            result
+        );
+
+        return;
+    }
+
+    g_cpu_profiler_started = 1;
+
+    printf(
+        "[CPU Profiler] Started. Sampling every %d seconds.\n",
+        CPU_PROFILE_INTERVAL_SECONDS
+    );
+}
+
+static void cpu_profiler_stop(void) {
+
+    if (!g_cpu_profiler_started) {
+        return;
+    }
+
+    atomic_store_explicit(
+        &g_cpu_profiler_running,
+        0,
+        memory_order_relaxed
+    );
+
+    pthread_join(
+        g_cpu_profiler_thread,
+        NULL
+    );
+
+    g_cpu_profiler_started = 0;
+
+    printf("[CPU Profiler] Stopped.\n");
+}
+
+// ============================================================
+// Runtime log
+// ============================================================
+
 static void start_runtime_log(const char *save_root) {
 
     if (!save_root || !save_root[0]) {
@@ -51,11 +331,13 @@ static void start_runtime_log(const char *save_root) {
     );
 
     if (fd < 0) {
+
         fprintf(
             stderr,
             "[JVM Bridge] Cannot open diagnostic log: %s\n",
             path
         );
+
         return;
     }
 
@@ -70,8 +352,10 @@ static void start_runtime_log(const char *save_root) {
         g_saved_stderr = dup(STDERR_FILENO);
     }
 
-    if (dup2(fd, STDOUT_FILENO) < 0 ||
-        dup2(fd, STDERR_FILENO) < 0) {
+    if (
+        dup2(fd, STDOUT_FILENO) < 0 ||
+        dup2(fd, STDERR_FILENO) < 0
+    ) {
 
         close(fd);
         return;
@@ -100,14 +384,18 @@ static void stop_runtime_log(void) {
     fflush(stderr);
 
     if (g_saved_stdout >= 0) {
+
         dup2(g_saved_stdout, STDOUT_FILENO);
         close(g_saved_stdout);
+
         g_saved_stdout = -1;
     }
 
     if (g_saved_stderr >= 0) {
+
         dup2(g_saved_stderr, STDERR_FILENO);
         close(g_saved_stderr);
+
         g_saved_stderr = -1;
     }
 
@@ -117,9 +405,10 @@ static void stop_runtime_log(void) {
     g_log_redirected = 0;
 }
 
-/*
- * Read META-INF/MANIFEST.MF using MiniJVM's native ZIP reader.
- */
+// ============================================================
+// Manifest
+// ============================================================
+
 static char *load_midlet_manifest(const char *jar_path) {
 
     if (!jar_path || !jar_path[0]) {
@@ -132,8 +421,10 @@ static char *load_midlet_manifest(const char *jar_path) {
         "META-INF/MANIFEST.MF"
     );
 
-    if (manifest_size <= 0 ||
-        manifest_size > 1024 * 1024) {
+    if (
+        manifest_size <= 0 ||
+        manifest_size > 1024 * 1024
+    ) {
 
         printf(
             "[JVM Bridge] ERROR: Invalid or missing MIDlet manifest, size=%lld\n",
@@ -166,7 +457,9 @@ static char *load_midlet_manifest(const char *jar_path) {
     );
 
     if (result != 0) {
+
         printf("[JVM Bridge] ERROR: Cannot extract MIDlet manifest\n");
+
         free(manifest);
         return NULL;
     }
@@ -180,6 +473,10 @@ static char *load_midlet_manifest(const char *jar_path) {
 
     return manifest;
 }
+
+// ============================================================
+// JVM init
+// ============================================================
 
 int jvm_bridge_init(
     const char *res_root,
@@ -230,7 +527,9 @@ int jvm_bridge_init(
     g_jvm = jvm_create();
 
     if (!g_jvm) {
+
         printf("[JVM Bridge] ERROR: jvm_create() failed\n");
+
         stop_runtime_log();
         return -2;
     }
@@ -238,8 +537,18 @@ int jvm_bridge_init(
     g_jvm->jdwp_enable = 0;
     g_jvm->jdwp_suspend_on_start = 0;
     g_jvm->max_heap_size = 128 * 1024 * 1024;
-    g_jvm->garbage_collect_period_ms = 500;
+
+    // Previously 500ms, causing very frequent full GC cycles.
+    // Increase to 2000ms while keeping heap pressure collection enabled.
+    g_jvm->garbage_collect_period_ms = 2000;
+
     g_jvm->heap_overload_percent = 70;
+
+    printf(
+        "[JVM Bridge] GC interval: %d ms, heap threshold: %d%%\n",
+        g_jvm->garbage_collect_period_ms,
+        g_jvm->heap_overload_percent
+    );
 
     s32 ret = jvm_init(
         g_jvm,
@@ -332,8 +641,15 @@ int jvm_bridge_init(
 
     printf("[JVM Bridge] JVM initialized successfully\n");
 
+    // Start thread CPU profiler after JVM initialization.
+    cpu_profiler_start();
+
     return 0;
 }
+
+// ============================================================
+// Run MIDlet
+// ============================================================
 
 int jvm_bridge_run_midlet(const char *midlet_jar_path) {
 
@@ -350,7 +666,9 @@ int jvm_bridge_run_midlet(const char *midlet_jar_path) {
     char *manifest = load_midlet_manifest(midlet_jar_path);
 
     if (!manifest) {
-        printf("[JVM Bridge] ERROR: Manifest extraction failed\n");
+
+        printf("[JVM Bridge] ERROR: Manifest extraction failed");
+
         return -4;
     }
 
@@ -390,7 +708,14 @@ int jvm_bridge_run_midlet(const char *midlet_jar_path) {
     return ret;
 }
 
+// ============================================================
+// Destroy
+// ============================================================
+
 void jvm_bridge_destroy(void) {
+
+    // Stop and join the profiler before destroying the JVM.
+    cpu_profiler_stop();
 
     if (g_jvm) {
 
@@ -424,6 +749,10 @@ void jvm_bridge_destroy(void) {
 
     stop_runtime_log();
 }
+
+// ============================================================
+// Stop request
+// ============================================================
 
 void jvm_bridge_request_stop(void) {
 
