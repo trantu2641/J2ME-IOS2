@@ -1,21 +1,58 @@
 //
 // GameViewController.swift
-// Portrait J2ME runtime screen.
-// iOS 16.4 compatible.
+// J2ME portrait game screen with a real UIKeyInput responder and a fit-to-screen
+// framebuffer viewport. Compatible with iOS 16.4+.
 //
 
 import UIKit
 
-/// UITextField riêng để bắt phím Backspace kể cả khi ô nhập không có nội dung.
-private final class J2MEKeyboardInputField: UITextField {
+/// Real software-keyboard responder. Unlike a 1-pixel UITextField, UIKeyInput
+/// receives deleteBackward() directly and does not need a sentinel character.
+private final class J2MEKeyboardInputView: UIView, UIKeyInput {
+
+    var onInsertText: ((String) -> Void)?
     var onDeleteBackward: (() -> Void)?
 
-    override func deleteBackward() {
+    override var canBecomeFirstResponder: Bool { true }
+
+    /// Return true so the iOS software keyboard keeps Backspace enabled even
+    /// though this responder forwards text instead of storing it locally.
+    var hasText: Bool { true }
+
+    // UITextInputTraits
+    var keyboardType: UIKeyboardType = .default
+    var keyboardAppearance: UIKeyboardAppearance = .dark
+    var autocorrectionType: UITextAutocorrectionType = .no
+    var spellCheckingType: UITextSpellCheckingType = .no
+    var smartQuotesType: UITextSmartQuotesType = .no
+    var smartDashesType: UITextSmartDashesType = .no
+    var autocapitalizationType: UITextAutocapitalizationType = .none
+    var returnKeyType: UIReturnKeyType = .done
+    var enablesReturnKeyAutomatically: Bool = false
+    var isSecureTextEntry: Bool = false
+    var textContentType: UITextContentType? = nil
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        backgroundColor = .clear
+        isAccessibilityElement = false
+        accessibilityElementsHidden = true
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func insertText(_ text: String) {
+        onInsertText?(text)
+    }
+
+    func deleteBackward() {
         onDeleteBackward?()
     }
 }
 
-final class GameViewController: UIViewController, UITextFieldDelegate {
+final class GameViewController: UIViewController {
 
     let jarPath: String
     let appName: String
@@ -35,12 +72,12 @@ final class GameViewController: UIViewController, UITextFieldDelegate {
     private let toggleKeypadButton = UIButton(type: .system)
     private let systemKeyboardButton = UIButton(type: .system)
     private let exitButton = UIButton(type: .system)
-    private let keyboardInput = J2MEKeyboardInputField()
+    private let keyboardInput = J2MEKeyboardInputView(frame: .zero)
 
     private var keypadHeightConstraint: NSLayoutConstraint!
     private var keypadCollapsedConstraint: NSLayoutConstraint!
-    private var keyboardIsVisible = false
     private var keypadWasVisibleBeforeKeyboard = true
+    private var keyboardIsVisible = false
     private var gameStarted = false
     private var userRequestedExit = false
 
@@ -50,24 +87,23 @@ final class GameViewController: UIViewController, UITextFieldDelegate {
     private(set) var placeholderIconView: UIImageView?
     private var alertTimeoutWork: DispatchWorkItem?
 
-    init(jarPath: String,
-         appName: String,
-         appIcon: UIImage,
-         canvasWidth: Int = 240,
-         canvasHeight: Int = 320,
-         render3dScale: Int = 1,
-         fpsLimit: Int = 60) {
-
+    init(
+        jarPath: String,
+        appName: String,
+        appIcon: UIImage,
+        canvasWidth: Int = 240,
+        canvasHeight: Int = 320,
+        render3dScale: Int = 1,
+        fpsLimit: Int = 60
+    ) {
         self.jarPath = jarPath
         self.appName = appName
         self.appIcon = appIcon
-        self.canvasWidth = max(1, canvasWidth)
-        self.canvasHeight = max(1, canvasHeight)
+        self.canvasWidth = min(max(1, canvasWidth), 4096)
+        self.canvasHeight = min(max(1, canvasHeight), 4096)
         self.render3dScale = max(1, render3dScale)
         self.fpsLimit = max(0, fpsLimit)
-
         super.init(nibName: nil, bundle: nil)
-
         modalPresentationStyle = .fullScreen
     }
 
@@ -77,12 +113,11 @@ final class GameViewController: UIViewController, UITextFieldDelegate {
 
     deinit {
         alertTimeoutWork?.cancel()
+        NotificationCenter.default.removeObserver(self)
         setGlobalEmulatorView(nil)
     }
 
-    override var prefersStatusBarHidden: Bool {
-        true
-    }
+    override var prefersStatusBarHidden: Bool { true }
 
     override var supportedInterfaceOrientations: UIInterfaceOrientationMask {
         .portrait
@@ -90,7 +125,6 @@ final class GameViewController: UIViewController, UITextFieldDelegate {
 
     override func viewDidLoad() {
         super.viewDidLoad()
-
         view.backgroundColor = .black
 
         emulatorView.canvasWidth = canvasWidth
@@ -102,30 +136,19 @@ final class GameViewController: UIViewController, UITextFieldDelegate {
         buildOverlays()
 
         let iconView = UIImageView(image: appIcon)
-
         iconView.contentMode = .center
         iconView.translatesAutoresizingMaskIntoConstraints = false
-
         view.addSubview(iconView)
 
         NSLayoutConstraint.activate([
-            iconView.centerXAnchor.constraint(
-                equalTo: emulatorView.centerXAnchor
-            ),
-            iconView.centerYAnchor.constraint(
-                equalTo: emulatorView.centerYAnchor
-            )
+            iconView.centerXAnchor.constraint(equalTo: emulatorView.centerXAnchor),
+            iconView.centerYAnchor.constraint(equalTo: emulatorView.centerYAnchor)
         ])
 
         placeholderIconView = iconView
 
         emulatorView.onFirstFrame = { [weak self] in
-
-            guard let self,
-                  let icon = self.placeholderIconView else {
-                return
-            }
-
+            guard let self, let icon = self.placeholderIconView else { return }
             UIView.animate(withDuration: 0.2, animations: {
                 icon.alpha = 0
             }, completion: { _ in
@@ -135,39 +158,33 @@ final class GameViewController: UIViewController, UITextFieldDelegate {
         }
 
         setGlobalEmulatorView(emulatorView)
-
         j2me_render_set_flush_callback(flushCallback)
         j2me_ui_set_callback(gameUICallback)
-
         activeGameViewController = self
+
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleKeyboardWillHide(_:)),
+            name: UIResponder.keyboardWillHideNotification,
+            object: nil
+        )
     }
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
-
-        guard !gameStarted else {
-            return
-        }
-
+        guard !gameStarted else { return }
         gameStarted = true
         startGame()
     }
 
-    // MARK: - Header controls
+    // MARK: - Header
 
     private func buildHeader() {
-
         titleLabel.text = appName
         titleLabel.textColor = .white
-        titleLabel.font = .systemFont(
-            ofSize: 15,
-            weight: .semibold
-        )
+        titleLabel.font = .systemFont(ofSize: 15, weight: .semibold)
         titleLabel.lineBreakMode = .byTruncatingTail
-        titleLabel.setContentHuggingPriority(
-            .defaultLow,
-            for: .horizontal
-        )
+        titleLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
 
         configureHeaderButton(
             toggleKeypadButton,
@@ -216,7 +233,6 @@ final class GameViewController: UIViewController, UITextFieldDelegate {
         headerStack.addArrangedSubview(exitButton)
 
         headerStack.translatesAutoresizingMaskIntoConstraints = false
-
         view.addSubview(headerStack)
     }
 
@@ -225,18 +241,9 @@ final class GameViewController: UIViewController, UITextFieldDelegate {
         symbol: String,
         accessibility: String
     ) {
-
-        button.setImage(
-            UIImage(systemName: symbol),
-            for: .normal
-        )
-
+        button.setImage(UIImage(systemName: symbol), for: .normal)
         button.tintColor = .white
-        button.backgroundColor = UIColor(
-            white: 0.16,
-            alpha: 1
-        )
-
+        button.backgroundColor = UIColor(white: 0.16, alpha: 1)
         button.layer.cornerRadius = 9
         button.accessibilityLabel = accessibility
         button.translatesAutoresizingMaskIntoConstraints = false
@@ -247,16 +254,12 @@ final class GameViewController: UIViewController, UITextFieldDelegate {
         ])
     }
 
-    // MARK: - Game and keypad layout
+    // MARK: - Viewport and keypad layout
 
     private func buildGameLayout() {
-
         emulatorView.translatesAutoresizingMaskIntoConstraints = false
         emulatorView.backgroundColor = .black
-        emulatorView.layer.cornerRadius = 0
-        emulatorView.layer.borderWidth = 0
         emulatorView.clipsToBounds = true
-
         view.addSubview(emulatorView)
 
         keypadView.translatesAutoresizingMaskIntoConstraints = false
@@ -268,15 +271,6 @@ final class GameViewController: UIViewController, UITextFieldDelegate {
         view.addSubview(keypadView)
 
         let safe = view.safeAreaLayoutGuide
-
-        let aspect = CGFloat(canvasHeight) / CGFloat(canvasWidth)
-
-        let canvasAspect = emulatorView.heightAnchor.constraint(
-            equalTo: emulatorView.widthAnchor,
-            multiplier: aspect
-        )
-
-        canvasAspect.priority = UILayoutPriority(999)
 
         keypadHeightConstraint = keypadView.heightAnchor.constraint(
             equalTo: view.widthAnchor,
@@ -292,7 +286,6 @@ final class GameViewController: UIViewController, UITextFieldDelegate {
         keypadCollapsedConstraint.priority = .required
 
         NSLayoutConstraint.activate([
-
             headerStack.topAnchor.constraint(
                 equalTo: safe.topAnchor,
                 constant: 3
@@ -312,6 +305,9 @@ final class GameViewController: UIViewController, UITextFieldDelegate {
                 equalToConstant: 36
             ),
 
+            // The viewport occupies all available device area.
+            // Do not constrain its height to the JAR aspect ratio.
+            // The framebuffer image is scaled inside EmulatorView instead.
             emulatorView.topAnchor.constraint(
                 equalTo: headerStack.bottomAnchor,
                 constant: 5
@@ -325,10 +321,8 @@ final class GameViewController: UIViewController, UITextFieldDelegate {
                 equalTo: view.trailingAnchor
             ),
 
-            canvasAspect,
-
             emulatorView.bottomAnchor.constraint(
-                lessThanOrEqualTo: keypadView.topAnchor,
+                equalTo: keypadView.topAnchor,
                 constant: -8
             ),
 
@@ -352,29 +346,39 @@ final class GameViewController: UIViewController, UITextFieldDelegate {
     }
 
     private func buildOverlays() {
-
         for overlay in [formView, listView] {
-
             overlay.translatesAutoresizingMaskIntoConstraints = false
             view.addSubview(overlay)
 
             NSLayoutConstraint.activate([
-                overlay.topAnchor.constraint(equalTo: view.topAnchor),
-                overlay.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-                overlay.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-                overlay.bottomAnchor.constraint(equalTo: view.bottomAnchor)
+                overlay.topAnchor.constraint(
+                    equalTo: view.topAnchor
+                ),
+
+                overlay.leadingAnchor.constraint(
+                    equalTo: view.leadingAnchor
+                ),
+
+                overlay.trailingAnchor.constraint(
+                    equalTo: view.trailingAnchor
+                ),
+
+                overlay.bottomAnchor.constraint(
+                    equalTo: view.bottomAnchor
+                )
             ])
 
             overlay.isHidden = true
         }
     }
 
-    // MARK: - iPhone keyboard
+    // MARK: - Real iOS software keyboard input
 
     private func buildKeyboardInput() {
+        keyboardInput.translatesAutoresizingMaskIntoConstraints = false
+        keyboardInput.alpha = 0.02
 
-        keyboardInput.delegate = self
-        keyboardInput.keyboardType = .asciiCapable
+        keyboardInput.keyboardType = .default
         keyboardInput.keyboardAppearance = .dark
         keyboardInput.autocorrectionType = .no
         keyboardInput.spellCheckingType = .no
@@ -382,22 +386,33 @@ final class GameViewController: UIViewController, UITextFieldDelegate {
         keyboardInput.smartDashesType = .no
         keyboardInput.autocapitalizationType = .none
         keyboardInput.returnKeyType = .done
+        keyboardInput.enablesReturnKeyAutomatically = false
+        keyboardInput.isSecureTextEntry = false
 
-        // Keep a hidden character so the input remains positioned at the end.
-        keyboardInput.text = " "
-
-        // The Backspace key is handled separately from the text delegate.
         keyboardInput.onDeleteBackward = { [weak self] in
+            // MIDP Canvas.KEY_CLEAR
             self?.sendKeyPulse(-8)
         }
 
-        keyboardInput.alpha = 0.015
-        keyboardInput.translatesAutoresizingMaskIntoConstraints = false
+        keyboardInput.onInsertText = { [weak self] text in
+            guard let self else { return }
+
+            if text == "\n" || text == "\r" {
+                self.sendKeyPulse(-5)
+                self.hideSystemKeyboard()
+                return
+            }
+
+            for scalar in text.unicodeScalars {
+                if scalar.value <= 0xFFFF {
+                    self.sendKeyPulse(Int32(scalar.value))
+                }
+            }
+        }
 
         view.addSubview(keyboardInput)
 
         NSLayoutConstraint.activate([
-
             keyboardInput.leadingAnchor.constraint(
                 equalTo: view.leadingAnchor,
                 constant: 1
@@ -408,128 +423,73 @@ final class GameViewController: UIViewController, UITextFieldDelegate {
                 constant: 1
             ),
 
-            keyboardInput.widthAnchor.constraint(equalToConstant: 1),
-            keyboardInput.heightAnchor.constraint(equalToConstant: 1)
+            keyboardInput.widthAnchor.constraint(
+                equalToConstant: 2
+            ),
+
+            keyboardInput.heightAnchor.constraint(
+                equalToConstant: 2
+            )
         ])
-
-        let toolbar = UIToolbar()
-        toolbar.sizeToFit()
-
-        let flex = UIBarButtonItem(
-            barButtonSystemItem: .flexibleSpace,
-            target: nil,
-            action: nil
-        )
-
-        let done = UIBarButtonItem(
-            title: "Done",
-            style: .done,
-            target: self,
-            action: #selector(hideSystemKeyboard)
-        )
-
-        toolbar.items = [flex, done]
-        keyboardInput.inputAccessoryView = toolbar
     }
 
     @objc private func toggleKeypad() {
-
         if keyboardIsVisible {
-            hideSystemKeyboard()
+            keypadWasVisibleBeforeKeyboard = false
+            keyboardInput.resignFirstResponder()
+            keyboardIsVisible = false
         }
 
         let show = keypadView.isHidden
-
-        keypadView.isHidden = !show
-
-        keypadHeightConstraint.isActive = show
-        keypadCollapsedConstraint.isActive = !show
-
-        toggleKeypadButton.tintColor = show
-            ? .white
-            : .systemGreen
-
-        view.layoutIfNeeded()
+        setKeypadVisible(show)
     }
 
     @objc private func showSystemKeyboard() {
-
         keypadWasVisibleBeforeKeyboard = !keypadView.isHidden
+        setKeypadVisible(false)
 
-        keypadView.isHidden = true
-        keypadHeightConstraint.isActive = false
-        keypadCollapsedConstraint.isActive = true
+        let becameFirstResponder = keyboardInput.becomeFirstResponder()
+        keyboardIsVisible = becameFirstResponder
 
-        keyboardInput.text = " "
-
-        view.layoutIfNeeded()
-
-        keyboardInput.becomeFirstResponder()
-
-        let end = keyboardInput.endOfDocument
-
-        keyboardInput.selectedTextRange =
-            keyboardInput.textRange(from: end, to: end)
+        if !becameFirstResponder {
+            print("[Keyboard] Could not become first responder")
+            restoreKeypadAfterKeyboardIfNeeded()
+        }
     }
 
-    @objc private func hideSystemKeyboard() {
+    private func hideSystemKeyboard() {
         keyboardInput.resignFirstResponder()
-    }
-
-    func textField(
-        _ textField: UITextField,
-        shouldChangeCharactersIn range: NSRange,
-        replacementString string: String
-    ) -> Bool {
-
-        // Backspace is routed by J2MEKeyboardInputField.deleteBackward().
-        if string.isEmpty {
-            return false
-        }
-
-        if string == "\n" {
-            sendKeyPulse(-5)
-            return false
-        }
-
-        for scalar in string.unicodeScalars {
-            if scalar.value >= 32 && scalar.value <= 126 {
-                sendKeyPulse(Int32(scalar.value))
-            }
-        }
-
-        return false
-    }
-
-    func textFieldShouldReturn(_ textField: UITextField) -> Bool {
-        sendKeyPulse(-5)
-        hideSystemKeyboard()
-        return false
-    }
-
-    func textFieldDidBeginEditing(_ textField: UITextField) {
-        keyboardIsVisible = true
-    }
-
-    func textFieldDidEndEditing(_ textField: UITextField) {
-
         keyboardIsVisible = false
+        restoreKeypadAfterKeyboardIfNeeded()
+    }
 
-        if keypadWasVisibleBeforeKeyboard {
+    @objc private func handleKeyboardWillHide(_ notification: Notification) {
+        keyboardIsVisible = false
+        restoreKeypadAfterKeyboardIfNeeded()
+    }
 
-            keypadView.isHidden = false
+    private func restoreKeypadAfterKeyboardIfNeeded() {
+        guard keypadWasVisibleBeforeKeyboard, !userRequestedExit else {
+            return
+        }
 
-            keypadHeightConstraint.isActive = true
-            keypadCollapsedConstraint.isActive = false
+        keypadWasVisibleBeforeKeyboard = false
+        setKeypadVisible(true)
+    }
 
-            toggleKeypadButton.tintColor = .white
+    private func setKeypadVisible(_ visible: Bool) {
+        keypadView.isHidden = !visible
+        keypadHeightConstraint.isActive = visible
+        keypadCollapsedConstraint.isActive = !visible
 
-            view.layoutIfNeeded()
+        toggleKeypadButton.tintColor = visible ? .white : .systemGreen
+
+        UIView.animate(withDuration: 0.18) {
+            self.view.layoutIfNeeded()
         }
     }
 
     private func sendKeyPulse(_ code: Int32) {
-
         j2me_input_post_key(
             Int32(J2ME_INPUT_KEY_PRESSED),
             code
@@ -544,23 +504,18 @@ final class GameViewController: UIViewController, UITextFieldDelegate {
     // MARK: - Game lifecycle
 
     private func startGame() {
-
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-
             guard let self else { return }
 
             let result = self.runMIDlet()
 
             DispatchQueue.main.async { [weak self] in
-
                 guard let self else { return }
 
                 if self.userRequestedExit {
                     self.dismiss(animated: true)
-
                 } else if result == 0 {
                     self.dismiss(animated: true)
-
                 } else {
                     self.showLaunchError(result)
                 }
@@ -569,7 +524,6 @@ final class GameViewController: UIViewController, UITextFieldDelegate {
     }
 
     private func runMIDlet() -> Int {
-
         guard let resourceRoot = Bundle.main.resourcePath else {
             return -100
         }
@@ -577,7 +531,6 @@ final class GameViewController: UIViewController, UITextFieldDelegate {
         let fm = FileManager.default
 
         for file in ["minijvm_rt.jar", "j2me_api.jar"] {
-
             let path = (resourceRoot as NSString)
                 .appendingPathComponent(file)
 
@@ -597,9 +550,9 @@ final class GameViewController: UIViewController, UITextFieldDelegate {
             true
         ).first ?? NSTemporaryDirectory()
 
-        let baseName = URL(
-            fileURLWithPath: jarPath
-        ).deletingPathExtension().lastPathComponent
+        let baseName = URL(fileURLWithPath: jarPath)
+            .deletingPathExtension()
+            .lastPathComponent
 
         let gameID = baseName.replacingOccurrences(
             of: "[^a-zA-Z0-9._-]",
@@ -607,9 +560,8 @@ final class GameViewController: UIViewController, UITextFieldDelegate {
             options: .regularExpression
         )
 
-        let saveRoot = (docs as NSString).appendingPathComponent(
-            "Games Data/\(gameID)"
-        )
+        let saveRoot = (docs as NSString)
+            .appendingPathComponent("Games Data/\(gameID)")
 
         do {
             try fm.createDirectory(
@@ -625,7 +577,6 @@ final class GameViewController: UIViewController, UITextFieldDelegate {
             .appendingPathComponent("minijvm.log")
 
         lastJVMLog = ""
-
         try? fm.removeItem(atPath: lastJVMLogPath)
 
         print("[JVM] Resource root: \(resourceRoot)")
@@ -654,18 +605,20 @@ final class GameViewController: UIViewController, UITextFieldDelegate {
         print("[JVM] jvm_bridge_run_midlet returned: \(runResult)")
 
         jvm_bridge_destroy()
-
         loadJVMLog()
 
         return Int(runResult)
     }
 
     private func loadJVMLog() {
-
         guard !lastJVMLogPath.isEmpty,
-              let data = FileManager.default.contents(atPath: lastJVMLogPath),
-              let text = String(data: data, encoding: .utf8) else {
-
+              let data = FileManager.default.contents(
+                atPath: lastJVMLogPath
+              ),
+              let text = String(
+                data: data,
+                encoding: .utf8
+              ) else {
             lastJVMLog = "No MiniJVM log was created."
             return
         }
@@ -674,11 +627,9 @@ final class GameViewController: UIViewController, UITextFieldDelegate {
     }
 
     private func showLaunchError(_ code: Int) {
-
         let baseText: String
 
         switch code {
-
         case -100:
             baseText = "Cannot locate the app resource directory."
 
@@ -695,8 +646,7 @@ final class GameViewController: UIViewController, UITextFieldDelegate {
             baseText = "MiniJVM returned error code \(code). The diagnostic log is shown below."
         }
 
-        let logExcerpt = String(lastJVMLog.suffix(2400))
-        let message = baseText + "\n\n" + logExcerpt
+        let message = baseText + "\n\n" + String(lastJVMLog.suffix(2400))
 
         let alert = UIAlertController(
             title: "Cannot Start Game",
@@ -720,20 +670,19 @@ final class GameViewController: UIViewController, UITextFieldDelegate {
     }
 
     @objc private func backTapped() {
-
         userRequestedExit = true
+        keypadWasVisibleBeforeKeyboard = false
 
         keyboardInput.resignFirstResponder()
-
+        keyboardIsVisible = false
         exitButton.isEnabled = false
 
         jvm_bridge_request_stop()
     }
 
-    // MARK: - J2ME view transitions
+    // MARK: - MIDP view transitions
 
     func showCanvasView() {
-
         emulatorView.isHidden = false
         keypadView.isHidden = false
 
@@ -745,7 +694,6 @@ final class GameViewController: UIViewController, UITextFieldDelegate {
     }
 
     func showFormView() {
-
         formView.buildFromNativeData()
         formView.isHidden = false
 
@@ -759,7 +707,6 @@ final class GameViewController: UIViewController, UITextFieldDelegate {
     }
 
     func showListView() {
-
         listView.buildFromNativeData()
         listView.isHidden = false
 
@@ -773,7 +720,6 @@ final class GameViewController: UIViewController, UITextFieldDelegate {
     }
 
     func showAlert() {
-
         let title = String(cString: j2me_ui_get_form_title())
         let message = String(cString: j2me_ui_get_alert_text())
 
@@ -789,21 +735,16 @@ final class GameViewController: UIViewController, UITextFieldDelegate {
         let count = j2me_ui_get_command_count()
 
         if count == 0 {
-
             alert.addAction(
                 UIAlertAction(title: "OK", style: .default) { _ in
-
                     j2me_input_post_key(
                         Int32(J2ME_UI_ALERT_DISMISSED),
                         0
                     )
                 }
             )
-
         } else {
-
             for index in 0..<count {
-
                 let label = String(
                     cString: j2me_ui_get_command_label(Int32(index))
                 )
@@ -812,7 +753,6 @@ final class GameViewController: UIViewController, UITextFieldDelegate {
 
                 alert.addAction(
                     UIAlertAction(title: label, style: .default) { _ in
-
                         j2me_input_post_key(
                             Int32(J2ME_UI_COMMAND_ACTION),
                             commandID
@@ -827,11 +767,8 @@ final class GameViewController: UIViewController, UITextFieldDelegate {
         let timeout = j2me_ui_get_alert_timeout()
 
         if timeout > 0 {
-
             let work = DispatchWorkItem { [weak alert] in
-
                 alert?.dismiss(animated: true) {
-
                     j2me_input_post_key(
                         Int32(J2ME_UI_ALERT_DISMISSED),
                         0
@@ -859,13 +796,11 @@ let gameUICallback: @convention(c) (
 ) -> Void = { action, data in
 
     DispatchQueue.main.async {
-
         guard let controller = activeGameViewController else {
             return
         }
 
         switch action {
-
         case Int32(J2ME_UI_ACTION_SHOW_CANVAS):
             controller.showCanvasView()
 
