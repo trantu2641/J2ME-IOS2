@@ -13,14 +13,21 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 #include <stdatomic.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <pthread.h>
 #include <time.h>
+#include <dlfcn.h>
 
 #include <mach/mach.h>
+#include <mach/mach_vm.h>
 #include <mach/thread_info.h>
+
+#if defined(__arm64__)
+#include <mach/arm/thread_status.h>
+#endif
 
 static MiniJVM *g_jvm = NULL;
 static atomic_int g_jvm_stop_requested = 0;
@@ -31,22 +38,583 @@ static int g_log_redirected = 0;
 
 int g_render_3d_scale = 1;
 
+// Main MIDlet worker thread.
+static pthread_t g_midlet_runner_pthread;
+static int g_midlet_runner_pthread_valid = 0;
+
+
 // ============================================================
-// CPU profiler
+// CPU PROFILER
 // ============================================================
 
 #define CPU_PROFILE_TOP_THREADS 8
+#define CPU_PROFILE_PRINT_TOP 4
 #define CPU_PROFILE_INTERVAL_SECONDS 5
 
+#define CPU_PROFILE_JAVA_STACK_FRAMES 8
+#define CPU_PROFILE_NATIVE_STACK_FRAMES 8
+
+#define CPU_PROFILE_TEXT 1024
+#define CPU_PROFILE_SYMBOL 192
+#define CPU_PROFILE_NAME 64
+
+
 typedef struct CPUThreadSample {
+
     double cpu_percent;
+
     mach_port_t thread_port;
-    char name[64];
+
+    char native_name[CPU_PROFILE_NAME];
+
+    char vm_role[24];
+
+    int vm_status;
+    int vm_blocking;
+    int vm_matched;
+
+    char java_stack[CPU_PROFILE_TEXT];
+
+    char native_pc[CPU_PROFILE_SYMBOL];
+
+    char native_stack[CPU_PROFILE_TEXT];
+
 } CPUThreadSample;
 
+
+typedef struct NativeFrameRecord {
+
+    uint64_t previous_fp;
+    uint64_t return_address;
+
+} NativeFrameRecord;
+
+
 static pthread_t g_cpu_profiler_thread;
+
 static atomic_int g_cpu_profiler_running = 0;
+
 static int g_cpu_profiler_started = 0;
+
+
+// ============================================================
+// Helper
+// ============================================================
+
+static int cpu_profiler_pthread_is_zero(pthread_t value) {
+
+    pthread_t zero_value;
+
+    memset(&zero_value, 0, sizeof(zero_value));
+
+    return memcmp(
+        &value,
+        &zero_value,
+        sizeof(value)
+    ) == 0;
+}
+
+
+static void cpu_profiler_append(
+    char *destination,
+    size_t capacity,
+    const char *addition
+) {
+
+    if (!destination || !addition || capacity == 0) {
+        return;
+    }
+
+    size_t used = strlen(destination);
+
+    if (used >= capacity - 1) {
+        return;
+    }
+
+    snprintf(
+        destination + used,
+        capacity - used,
+        "%s",
+        addition
+    );
+}
+
+
+static const char *cpu_profiler_vm_role(int type) {
+
+    switch (type) {
+
+        case THREAD_TYPE_NORMAL:
+            return "normal";
+
+        case THREAD_TYPE_GC:
+            return "gc";
+
+        case THREAD_TYPE_JDWP:
+            return "jdwp";
+
+        default:
+            return "unknown";
+    }
+}
+
+
+// ============================================================
+// MiniJVM Java Stack
+// ============================================================
+
+static void cpu_profiler_copy_java_stack(
+    JavaThreadInfo *thread_info,
+    CPUThreadSample *sample
+) {
+
+    if (!thread_info || !sample) {
+        return;
+    }
+
+    Runtime *leaf = thread_info->top_runtime;
+
+    int guard = 0;
+
+    while (leaf && leaf->son && guard < 64) {
+
+        leaf = leaf->son;
+        guard++;
+    }
+
+    int frames = 0;
+
+    for (
+        Runtime *frame = leaf;
+        frame && frames < CPU_PROFILE_JAVA_STACK_FRAMES;
+        frame = frame->parent
+    ) {
+
+        MethodInfo *method = frame->method;
+
+        if (
+            !method ||
+            !method->name ||
+            !method->_this_class ||
+            !method->_this_class->name
+        ) {
+            continue;
+        }
+
+        const char *class_name =
+            utf8_cstr(method->_this_class->name);
+
+        const char *method_name =
+            utf8_cstr(method->name);
+
+        if (!class_name || !method_name) {
+            continue;
+        }
+
+        long long bytecode_offset = -1;
+
+        if (method->converted_code && frame->pc) {
+
+            uintptr_t code_address =
+                (uintptr_t)method->converted_code->code;
+
+            uintptr_t pc_address =
+                (uintptr_t)frame->pc;
+
+            if (pc_address >= code_address) {
+
+                bytecode_offset =
+                    (long long)(pc_address - code_address);
+            }
+        }
+
+        char line[256];
+
+        snprintf(
+            line,
+            sizeof(line),
+            "%s%s.%s@bc+%lld",
+            frames == 0 ? "" : " <- ",
+            class_name,
+            method_name,
+            bytecode_offset
+        );
+
+        cpu_profiler_append(
+            sample->java_stack,
+            sizeof(sample->java_stack),
+            line
+        );
+
+        frames++;
+    }
+
+    if (frames == 0) {
+
+        snprintf(
+            sample->java_stack,
+            sizeof(sample->java_stack),
+            "Java Runtime present, no active MethodInfo"
+        );
+    }
+}
+
+
+// ============================================================
+// Match Mach Thread to MiniJVM Runtime
+// ============================================================
+
+static void cpu_profiler_attach_vm_context(
+    pthread_t native_thread,
+    CPUThreadSample *sample
+) {
+
+    if (!g_jvm || !g_jvm->thread_list || !sample) {
+        return;
+    }
+
+    spin_lock(&g_jvm->thread_list->spinlock);
+
+    for (
+        int i = 0;
+        i < g_jvm->thread_list->length;
+        i++
+    ) {
+
+        Runtime *runtime = (Runtime *)
+            arraylist_get_value_unsafe(
+                g_jvm->thread_list,
+                i
+            );
+
+        if (!runtime || !runtime->thrd_info) {
+            continue;
+        }
+
+        JavaThreadInfo *thread_info = runtime->thrd_info;
+
+        int matched = 0;
+
+        if (!cpu_profiler_pthread_is_zero(
+            thread_info->pthread
+        )) {
+
+            matched = pthread_equal(
+                thread_info->pthread,
+                native_thread
+            );
+        }
+
+        // Main MIDlet Runtime:
+        // thread_boundle() does not currently initialize pthread.
+        // Bind it to the known GameViewController worker thread.
+        if (
+            !matched &&
+            g_midlet_runner_pthread_valid &&
+            pthread_equal(
+                g_midlet_runner_pthread,
+                native_thread
+            ) &&
+            cpu_profiler_pthread_is_zero(
+                thread_info->pthread
+            ) &&
+            thread_info->type == THREAD_TYPE_NORMAL
+        ) {
+
+            thread_info->pthread = native_thread;
+            matched = 1;
+        }
+
+        if (!matched) {
+            continue;
+        }
+
+        sample->vm_matched = 1;
+
+        snprintf(
+            sample->vm_role,
+            sizeof(sample->vm_role),
+            "%s",
+            cpu_profiler_vm_role(thread_info->type)
+        );
+
+        sample->vm_status = thread_info->thread_status;
+
+        sample->vm_blocking = thread_info->is_blocking;
+
+        cpu_profiler_copy_java_stack(
+            thread_info,
+            sample
+        );
+
+        break;
+    }
+
+    spin_unlock(&g_jvm->thread_list->spinlock);
+}
+
+
+// ============================================================
+// Native Symbol Resolver
+// ============================================================
+
+static void cpu_profiler_resolve_symbol(
+    uint64_t address,
+    char *destination,
+    size_t capacity
+) {
+
+    if (!destination || capacity == 0) {
+        return;
+    }
+
+    uintptr_t lookup_address =
+        (uintptr_t)(
+            address & 0x0000FFFFFFFFFFFFULL
+        );
+
+    Dl_info symbol_info;
+
+    memset(
+        &symbol_info,
+        0,
+        sizeof(symbol_info)
+    );
+
+    if (
+        lookup_address != 0 &&
+        dladdr(
+            (const void *)lookup_address,
+            &symbol_info
+        ) != 0 &&
+        symbol_info.dli_sname
+    ) {
+
+        uintptr_t symbol_address =
+            (uintptr_t)symbol_info.dli_saddr;
+
+        unsigned long long offset =
+            lookup_address >= symbol_address
+            ? (unsigned long long)(
+                lookup_address - symbol_address
+            )
+            : 0ULL;
+
+        snprintf(
+            destination,
+            capacity,
+            "%s+0x%llx [0x%llx]",
+            symbol_info.dli_sname,
+            offset,
+            (unsigned long long)lookup_address
+        );
+
+    } else {
+
+        snprintf(
+            destination,
+            capacity,
+            "0x%llx",
+            (unsigned long long)lookup_address
+        );
+    }
+}
+
+
+// ============================================================
+// ARM64 Stack Reader
+// ============================================================
+
+#if defined(__arm64__)
+
+static int cpu_profiler_read_frame(
+    uint64_t frame_pointer,
+    NativeFrameRecord *record
+) {
+
+    if (
+        !record ||
+        frame_pointer < 0x1000 ||
+        (frame_pointer & 0x7) != 0
+    ) {
+        return 0;
+    }
+
+    mach_vm_size_t bytes_read = 0;
+
+    kern_return_t result = mach_vm_read_overwrite(
+        mach_task_self(),
+        (mach_vm_address_t)frame_pointer,
+        (mach_vm_size_t)sizeof(*record),
+        (mach_vm_address_t)record,
+        &bytes_read
+    );
+
+    return (
+        result == KERN_SUCCESS &&
+        bytes_read == sizeof(*record)
+    );
+}
+
+#endif
+
+
+// ============================================================
+// Capture Native Stack
+// ============================================================
+
+static void cpu_profiler_capture_native_stack(
+    CPUThreadSample *sample
+) {
+
+    if (!sample) {
+        return;
+    }
+
+#if defined(__arm64__)
+
+    arm_thread_state64_t state;
+
+    memset(
+        &state,
+        0,
+        sizeof(state)
+    );
+
+    mach_msg_type_number_t state_count =
+        ARM_THREAD_STATE64_COUNT;
+
+    kern_return_t result = thread_get_state(
+        sample->thread_port,
+        ARM_THREAD_STATE64,
+        (thread_state_t)&state,
+        &state_count
+    );
+
+    if (result != KERN_SUCCESS) {
+
+        snprintf(
+            sample->native_pc,
+            sizeof(sample->native_pc),
+            "thread_get_state failed: %d",
+            result
+        );
+
+        snprintf(
+            sample->native_stack,
+            sizeof(sample->native_stack),
+            "Native stack unavailable"
+        );
+
+        return;
+    }
+
+    uint64_t pc = (uint64_t)state.__pc;
+
+    uint64_t frame_pointer =
+        (uint64_t)state.__fp;
+
+    cpu_profiler_resolve_symbol(
+        pc,
+        sample->native_pc,
+        sizeof(sample->native_pc)
+    );
+
+    for (
+        int depth = 0;
+        depth < CPU_PROFILE_NATIVE_STACK_FRAMES;
+        depth++
+    ) {
+
+        NativeFrameRecord record = {0};
+
+        if (!cpu_profiler_read_frame(
+            frame_pointer,
+            &record
+        )) {
+            break;
+        }
+
+        uint64_t return_address =
+            record.return_address & 0x0000FFFFFFFFFFFFULL;
+
+        if (return_address == 0) {
+            break;
+        }
+
+        uint64_t lookup_address =
+            return_address >= 4
+            ? return_address - 4
+            : return_address;
+
+        char symbol[CPU_PROFILE_SYMBOL];
+
+        cpu_profiler_resolve_symbol(
+            lookup_address,
+            symbol,
+            sizeof(symbol)
+        );
+
+        char line[256];
+
+        snprintf(
+            line,
+            sizeof(line),
+            "%s#%d %s",
+            depth == 0 ? "" : " | ",
+            depth + 1,
+            symbol
+        );
+
+        cpu_profiler_append(
+            sample->native_stack,
+            sizeof(sample->native_stack),
+            line
+        );
+
+        uint64_t next_frame =
+            record.previous_fp;
+
+        if (
+            next_frame <= frame_pointer ||
+            next_frame - frame_pointer > 1024 * 1024
+        ) {
+            break;
+        }
+
+        frame_pointer = next_frame;
+    }
+
+    if (sample->native_stack[0] == '\0') {
+
+        snprintf(
+            sample->native_stack,
+            sizeof(sample->native_stack),
+            "PC captured; frame-pointer chain unavailable"
+        );
+    }
+
+#else
+
+    snprintf(
+        sample->native_pc,
+        sizeof(sample->native_pc),
+        "ARM64 PC sampling unavailable"
+    );
+
+    snprintf(
+        sample->native_stack,
+        sizeof(sample->native_stack),
+        "ARM64 stack sampling unavailable"
+    );
+
+#endif
+}
+
+
+// ============================================================
+// CPU Profiler Thread
+// ============================================================
 
 static void *cpu_profiler_main(void *argument) {
 
@@ -59,7 +627,6 @@ static void *cpu_profiler_main(void *argument) {
         memory_order_relaxed
     )) {
 
-        // Sleep in one-second pieces so shutdown is responsive.
         for (
             int i = 0;
             i < CPU_PROFILE_INTERVAL_SECONDS;
@@ -74,6 +641,7 @@ static void *cpu_profiler_main(void *argument) {
             }
 
             struct timespec delay;
+
             delay.tv_sec = 1;
             delay.tv_nsec = 0;
 
@@ -88,6 +656,7 @@ static void *cpu_profiler_main(void *argument) {
         }
 
         thread_act_array_t thread_list = NULL;
+
         mach_msg_type_number_t thread_count = 0;
 
         kern_return_t result = task_threads(
@@ -109,6 +678,7 @@ static void *cpu_profiler_main(void *argument) {
         CPUThreadSample top[CPU_PROFILE_TOP_THREADS] = {0};
 
         double total_cpu = 0.0;
+
         int active_threads = 0;
 
         for (
@@ -118,6 +688,7 @@ static void *cpu_profiler_main(void *argument) {
         ) {
 
             thread_basic_info_data_t info;
+
             mach_msg_type_number_t info_count =
                 THREAD_BASIC_INFO_COUNT;
 
@@ -129,89 +700,114 @@ static void *cpu_profiler_main(void *argument) {
             );
 
             if (info_result != KERN_SUCCESS) {
-                mach_port_deallocate(
-                    mach_task_self(),
-                    thread_list[i]
-                );
                 continue;
             }
 
             double cpu_percent =
-                ((double)info.cpu_usage * 100.0)
-                / (double)TH_USAGE_SCALE;
+                ((double)info.cpu_usage * 100.0) /
+                (double)TH_USAGE_SCALE;
 
-            if (cpu_percent > 0.1) {
-
-                total_cpu += cpu_percent;
-                active_threads++;
-
-                CPUThreadSample sample = {0};
-
-                sample.cpu_percent = cpu_percent;
-                sample.thread_port = thread_list[i];
-
-                pthread_t native_thread =
-                    pthread_from_mach_thread_np(thread_list[i]);
-
-                if (native_thread != NULL) {
-                    pthread_getname_np(
-                        native_thread,
-                        sample.name,
-                        sizeof(sample.name)
-                    );
-                }
-
-                if (sample.name[0] == '\0') {
-                    snprintf(
-                        sample.name,
-                        sizeof(sample.name),
-                        "thread-%u",
-                        (unsigned int)thread_list[i]
-                    );
-                }
-
-                // Keep the highest CPU threads in descending order.
-                for (
-                    int position = 0;
-                    position < CPU_PROFILE_TOP_THREADS;
-                    position++
-                ) {
-
-                    if (
-                        cpu_percent >
-                        top[position].cpu_percent
-                    ) {
-
-                        for (
-                            int shift = CPU_PROFILE_TOP_THREADS - 1;
-                            shift > position;
-                            shift--
-                        ) {
-                            top[shift] = top[shift - 1];
-                        }
-
-                        top[position] = sample;
-                        break;
-                    }
-                }
+            if (cpu_percent <= 0.1) {
+                continue;
             }
 
-            mach_port_deallocate(
-                mach_task_self(),
-                thread_list[i]
+            total_cpu += cpu_percent;
+
+            active_threads++;
+
+            CPUThreadSample sample = {0};
+
+            sample.cpu_percent = cpu_percent;
+
+            sample.thread_port = thread_list[i];
+
+            sample.vm_status = -1;
+
+            snprintf(
+                sample.vm_role,
+                sizeof(sample.vm_role),
+                "unmapped"
             );
+
+            for (
+                int position = 0;
+                position < CPU_PROFILE_TOP_THREADS;
+                position++
+            ) {
+
+                if (
+                    cpu_percent >
+                    top[position].cpu_percent
+                ) {
+
+                    for (
+                        int shift = CPU_PROFILE_TOP_THREADS - 1;
+                        shift > position;
+                        shift--
+                    ) {
+                        top[shift] = top[shift - 1];
+                    }
+
+                    top[position] = sample;
+
+                    break;
+                }
+            }
         }
 
-        if (thread_list != NULL) {
-            vm_deallocate(
-                mach_task_self(),
-                (vm_address_t)thread_list,
-                (vm_size_t)(thread_count * sizeof(thread_t))
-            );
+        // Inspect only the four busiest threads.
+        for (
+            int i = 0;
+            i < CPU_PROFILE_PRINT_TOP;
+            i++
+        ) {
+
+            if (top[i].cpu_percent <= 0.1) {
+                break;
+            }
+
+            pthread_t native_thread =
+                pthread_from_mach_thread_np(
+                    top[i].thread_port
+                );
+
+            if (native_thread != NULL) {
+
+                if (
+                    pthread_getname_np(
+                        native_thread,
+                        top[i].native_name,
+                        sizeof(top[i].native_name)
+                    ) != 0 ||
+                    top[i].native_name[0] == '\0'
+                ) {
+
+                    snprintf(
+                        top[i].native_name,
+                        sizeof(top[i].native_name),
+                        "unnamed"
+                    );
+                }
+
+                cpu_profiler_attach_vm_context(
+                    native_thread,
+                    &top[i]
+                );
+
+            } else {
+
+                snprintf(
+                    top[i].native_name,
+                    sizeof(top[i].native_name),
+                    "no-pthread"
+                );
+            }
+
+            cpu_profiler_capture_native_stack(&top[i]);
         }
 
         printf(
-            "[CPU] total=%.1f%% active=%d threads=%u",
+            "[CPU] total=%.1f%% active=%d threads=%u\n",
             total_cpu,
             active_threads,
             thread_count
@@ -219,7 +815,7 @@ static void *cpu_profiler_main(void *argument) {
 
         for (
             int i = 0;
-            i < CPU_PROFILE_TOP_THREADS;
+            i < CPU_PROFILE_PRINT_TOP;
             i++
         ) {
 
@@ -228,17 +824,74 @@ static void *cpu_profiler_main(void *argument) {
             }
 
             printf(
-                " | %s=%.1f%%",
-                top[i].name,
-                top[i].cpu_percent
+                "[CPU Thread] mach=%u cpu=%.1f%% name=%s vm=%s status=%d blocking=%d\n",
+                (unsigned int)top[i].thread_port,
+                top[i].cpu_percent,
+                top[i].native_name,
+                top[i].vm_role,
+                top[i].vm_status,
+                top[i].vm_blocking
+            );
+
+            printf(
+                "[CPU Native PC] mach=%u %s\n",
+                (unsigned int)top[i].thread_port,
+                top[i].native_pc
+            );
+
+            printf(
+                "[CPU Native Stack] mach=%u %s\n",
+                (unsigned int)top[i].thread_port,
+                top[i].native_stack
+            );
+
+            if (top[i].vm_matched) {
+
+                printf(
+                    "[CPU Java Stack] mach=%u %s\n",
+                    (unsigned int)top[i].thread_port,
+                    top[i].java_stack
+                );
+
+            } else {
+
+                printf(
+                    "[CPU Java Stack] mach=%u no MiniJVM Runtime match\n",
+                    (unsigned int)top[i].thread_port
+                );
+            }
+        }
+
+        // Release the Mach thread ports returned by task_threads().
+        for (
+            mach_msg_type_number_t i = 0;
+            i < thread_count;
+            i++
+        ) {
+
+            mach_port_deallocate(
+                mach_task_self(),
+                thread_list[i]
             );
         }
 
-        printf("\n");
+        if (thread_list != NULL) {
+
+            vm_deallocate(
+                mach_task_self(),
+                (vm_address_t)thread_list,
+                (vm_size_t)(thread_count * sizeof(thread_t))
+            );
+        }
     }
 
     return NULL;
 }
+
+
+// ============================================================
+// Start / Stop Profiler
+// ============================================================
 
 static void cpu_profiler_start(void) {
 
@@ -278,10 +931,12 @@ static void cpu_profiler_start(void) {
     g_cpu_profiler_started = 1;
 
     printf(
-        "[CPU Profiler] Started. Sampling every %d seconds.\n",
+        "[CPU Profiler] Started. Sampling top %d threads every %d seconds.\n",
+        CPU_PROFILE_PRINT_TOP,
         CPU_PROFILE_INTERVAL_SECONDS
     );
 }
+
 
 static void cpu_profiler_stop(void) {
 
@@ -304,6 +959,7 @@ static void cpu_profiler_stop(void) {
 
     printf("[CPU Profiler] Stopped.\n");
 }
+
 
 // ============================================================
 // Runtime log
@@ -374,6 +1030,7 @@ static void start_runtime_log(const char *save_root) {
     );
 }
 
+
 static void stop_runtime_log(void) {
 
     if (!g_log_redirected) {
@@ -404,6 +1061,7 @@ static void stop_runtime_log(void) {
 
     g_log_redirected = 0;
 }
+
 
 // ============================================================
 // Manifest
@@ -474,6 +1132,7 @@ static char *load_midlet_manifest(const char *jar_path) {
     return manifest;
 }
 
+
 // ============================================================
 // JVM init
 // ============================================================
@@ -492,6 +1151,12 @@ int jvm_bridge_init(
         printf("[JVM Bridge] JVM already initialized\n");
         return -1;
     }
+
+    // GameViewController invokes init and MIDlet execution on the same
+    // background worker. Keep its pthread ID for main-Runtime correlation.
+    g_midlet_runner_pthread = pthread_self();
+    g_midlet_runner_pthread_valid = 1;
+    pthread_setname_np("J2ME-MIDlet");
 
     start_runtime_log(save_root);
 
@@ -538,8 +1203,7 @@ int jvm_bridge_init(
     g_jvm->jdwp_suspend_on_start = 0;
     g_jvm->max_heap_size = 128 * 1024 * 1024;
 
-    // Previously 500ms, causing very frequent full GC cycles.
-    // Increase to 2000ms while keeping heap pressure collection enabled.
+    // Keep the existing 2000ms GC interval.
     g_jvm->garbage_collect_period_ms = 2000;
 
     g_jvm->heap_overload_percent = 70;
@@ -641,11 +1305,11 @@ int jvm_bridge_init(
 
     printf("[JVM Bridge] JVM initialized successfully\n");
 
-    // Start thread CPU profiler after JVM initialization.
     cpu_profiler_start();
 
     return 0;
 }
+
 
 // ============================================================
 // Run MIDlet
@@ -698,6 +1362,7 @@ int jvm_bridge_run_midlet(const char *midlet_jar_path) {
     );
 
     arraylist_destroy(java_para);
+
     free(manifest);
 
     printf(
@@ -708,13 +1373,13 @@ int jvm_bridge_run_midlet(const char *midlet_jar_path) {
     return ret;
 }
 
+
 // ============================================================
 // Destroy
 // ============================================================
 
 void jvm_bridge_destroy(void) {
 
-    // Stop and join the profiler before destroying the JVM.
     cpu_profiler_stop();
 
     if (g_jvm) {
@@ -747,8 +1412,11 @@ void jvm_bridge_destroy(void) {
         );
     }
 
+    g_midlet_runner_pthread_valid = 0;
+
     stop_runtime_log();
 }
+
 
 // ============================================================
 // Stop request
