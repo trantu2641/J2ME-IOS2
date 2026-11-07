@@ -22,7 +22,7 @@
 #include <dlfcn.h>
 
 #include <mach/mach.h>
-#include <mach/mach_vm.h>
+#include <mach/vm_map.h>
 #include <mach/thread_info.h>
 
 #if defined(__arm64__)
@@ -440,13 +440,14 @@ static int cpu_profiler_read_frame(
         return 0;
     }
 
-    mach_vm_size_t bytes_read = 0;
+    // iOS uses vm_map.h APIs rather than mach_vm.h.
+    vm_size_t bytes_read = 0;
 
-    kern_return_t result = mach_vm_read_overwrite(
+    kern_return_t result = vm_read_overwrite(
         mach_task_self(),
-        (mach_vm_address_t)frame_pointer,
-        (mach_vm_size_t)sizeof(*record),
-        (mach_vm_address_t)record,
+        (vm_address_t)frame_pointer,
+        (vm_size_t)sizeof(*record),
+        (vm_address_t)record,
         &bytes_read
     );
 
