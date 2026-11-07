@@ -17,27 +17,39 @@ class AppsListViewController: UIViewController,
     private let emptyStateLabel = UILabel()
     private var lastLayoutWidth: CGFloat = 0
 
+    // Reference to animated home background.
+    private var animatedBackgroundView: AnimatedBackgroundView?
+
     /// Directory where imported JARs are stored
     private static var gamesDirectory: String {
         documentsDirectory + "/games"
     }
 
-    override var preferredStatusBarStyle: UIStatusBarStyle { .lightContent }
-    override var supportedInterfaceOrientations: UIInterfaceOrientationMask { .portrait }
+    override var preferredStatusBarStyle: UIStatusBarStyle {
+        .lightContent
+    }
+
+    override var supportedInterfaceOrientations: UIInterfaceOrientationMask {
+        .portrait
+    }
 
     override func viewDidLoad() {
         super.viewDidLoad()
+
         view.backgroundColor = .black
 
         let bg = AnimatedBackgroundView()
         bg.translatesAutoresizingMaskIntoConstraints = false
+
+        animatedBackgroundView = bg
+
         view.addSubview(bg)
 
         NSLayoutConstraint.activate([
             bg.topAnchor.constraint(equalTo: view.topAnchor),
             bg.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             bg.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            bg.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            bg.bottomAnchor.constraint(equalTo: view.bottomAnchor)
         ])
 
         navigationItem.rightBarButtonItem = UIBarButtonItem(
@@ -77,7 +89,7 @@ class AppsListViewController: UIViewController,
             springboardCollectionView.topAnchor.constraint(equalTo: view.topAnchor),
             springboardCollectionView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             springboardCollectionView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            springboardCollectionView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            springboardCollectionView.bottomAnchor.constraint(equalTo: view.bottomAnchor)
         ])
 
         emptyStateLabel.text = "No Games Yet\nTap + to add a .jar file"
@@ -99,7 +111,7 @@ class AppsListViewController: UIViewController,
             emptyStateLabel.leadingAnchor.constraint(
                 greaterThanOrEqualTo: view.leadingAnchor,
                 constant: 40
-            ),
+            )
         ])
 
         try? FileManager.default.createDirectory(
@@ -110,8 +122,13 @@ class AppsListViewController: UIViewController,
         scanApps()
     }
 
+    // MARK: - Background animation lifecycle
+
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
+
+        // Restart background after returning from a game.
+        animatedBackgroundView?.resumeAnimations()
 
         NotificationCenter.default.addObserver(
             self,
@@ -119,6 +136,13 @@ class AppsListViewController: UIViewController,
             name: UIApplication.didBecomeActiveNotification,
             object: nil
         )
+    }
+
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+
+        // Stop animations and blur before opening a game.
+        animatedBackgroundView?.pauseAnimations()
     }
 
     override func viewDidDisappear(_ animated: Bool) {
@@ -156,7 +180,10 @@ class AppsListViewController: UIViewController,
             return
         }
 
-        layout.itemSize = CGSize(width: cellWidth, height: 96)
+        layout.itemSize = CGSize(
+            width: cellWidth,
+            height: 96
+        )
 
         layout.sectionInset = UIEdgeInsets(
             top: 20,
@@ -300,7 +327,9 @@ class AppsListViewController: UIViewController,
         message: String
     ) {
         DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
+            guard let self else {
+                return
+            }
 
             let alert = UIAlertController(
                 title: title,
@@ -394,7 +423,9 @@ class AppsListViewController: UIViewController,
             }
 
             DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
+                guard let self else {
+                    return
+                }
 
                 self.apps = scannedApps
                 self.springboardCollectionView.reloadData()
@@ -454,11 +485,18 @@ class AppsListViewController: UIViewController,
         index: Int
     ) -> UIImage {
 
-        let size = CGSize(width: iconSize, height: iconSize)
+        let size = CGSize(
+            width: iconSize,
+            height: iconSize
+        )
+
         let renderer = UIGraphicsImageRenderer(size: size)
 
         return renderer.image { context in
-            let rect = CGRect(origin: .zero, size: size)
+            let rect = CGRect(
+                origin: .zero,
+                size: size
+            )
 
             UIBezierPath(
                 roundedRect: rect,
@@ -486,7 +524,10 @@ class AppsListViewController: UIViewController,
                     cgContext.drawLinearGradient(
                         gradient,
                         start: .zero,
-                        end: CGPoint(x: iconSize, y: iconSize),
+                        end: CGPoint(
+                            x: iconSize,
+                            y: iconSize
+                        ),
                         options: []
                     )
                 }
@@ -546,7 +587,10 @@ class AppsListViewController: UIViewController,
         ) as! SpringboardCell
 
         let app = apps[indexPath.item]
-        cell.configure(name: app.name, icon: app.icon)
+        cell.configure(
+            name: app.name,
+            icon: app.icon
+        )
 
         return cell
     }
@@ -577,7 +621,10 @@ class AppsListViewController: UIViewController,
                 image: UIImage(systemName: "cube"),
                 state: ssEnabled ? .on : .off
             ) { _ in
-                Self.set3DSupersampling(!ssEnabled, for: app)
+                Self.set3DSupersampling(
+                    !ssEnabled,
+                    for: app
+                )
             }
 
             let clearData = UIAction(
@@ -633,12 +680,13 @@ class AppsListViewController: UIViewController,
                     title: option.label,
                     state: option.value == currentFps ? .on : .off
                 ) { _ in
-                    Self.setFpsLimit(option.value, for: app)
+                    Self.setFpsLimit(
+                        option.value,
+                        for: app
+                    )
                 }
             }
 
-            // Keep FPS menu separate from Screen Resolution.
-            // This avoids deeply nested context-menu presentation.
             let fpsMenu = UIMenu(
                 title: "FPS Limit",
                 image: UIImage(systemName: "speedometer"),
@@ -683,7 +731,10 @@ class AppsListViewController: UIViewController,
         ) as? Bool ?? false
     }
 
-    static func set3DSupersampling(_ enabled: Bool, for app: AppInfo) {
+    static func set3DSupersampling(
+        _ enabled: Bool,
+        for app: AppInfo
+    ) {
         UserDefaults.standard.set(
             enabled,
             forKey: "ss3d_\(gameId(for: app))"
@@ -730,8 +781,15 @@ class AppsListViewController: UIViewController,
     ) {
         let gameID = gameId(for: app)
 
-        UserDefaults.standard.set(w, forKey: "resW_\(gameID)")
-        UserDefaults.standard.set(h, forKey: "resH_\(gameID)")
+        UserDefaults.standard.set(
+            w,
+            forKey: "resW_\(gameID)"
+        )
+
+        UserDefaults.standard.set(
+            h,
+            forKey: "resH_\(gameID)"
+        )
     }
 
     // 0 means Unlimited. Positive values are capped at 45 FPS.
@@ -749,7 +807,6 @@ class AppsListViewController: UIViewController,
         guard let saved = UserDefaults.standard.object(
             forKey: key
         ) as? Int else {
-            // A lower default helps reduce heat on older iPhones.
             return 30
         }
 
@@ -758,7 +815,6 @@ class AppsListViewController: UIViewController,
             return saved
 
         default:
-            // Migrate old unsupported values to the cooler default.
             return 30
         }
     }
@@ -894,7 +950,9 @@ class AppsListViewController: UIViewController,
         alert.addAction(
             UIAlertAction(title: "Delete", style: .destructive) { [weak self] _ in
 
-                guard let self else { return }
+                guard let self else {
+                    return
+                }
 
                 let gid = Self.gameId(for: app)
 
