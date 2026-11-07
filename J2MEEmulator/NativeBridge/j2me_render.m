@@ -1,8 +1,11 @@
 //
-// j2me_render.m — Core Graphics rendering bridge for J2ME LCDUI
+// j2me_render.m
+// Core Graphics rendering bridge for J2ME LCDUI.
 //
-// Maps J2ME Graphics operations to iOS Core Graphics (CGContext).
-// Analogous to J2ME-Loader's mapping of Graphics → Android Canvas (Skia).
+// Optimizations:
+// - Unlimited FPS when the FPS setting is 0.
+// - Cache immutable JAR images instead of snapshotting them on every draw.
+// - Skip framebuffer snapshots while the UI already has a frame waiting.
 //
 
 #import <CoreGraphics/CoreGraphics.h>
@@ -40,6 +43,7 @@ typedef struct RenderContext {
 
 typedef struct RenderImage {
     CGContextRef ctx;
+    CGImageRef cachedImage;
     int width;
     int height;
     int isMutable;
@@ -48,10 +52,11 @@ typedef struct RenderImage {
 } RenderImage;
 
 static j2me_flush_callback g_flush_callback = NULL;
+static j2me_flush_ready_callback g_flush_ready_callback = NULL;
 static CGColorSpaceRef g_colorSpace = NULL;
 
 // FPS limiter applies before creating a framebuffer snapshot.
-// It never sleeps or pauses the MIDlet/game simulation thread.
+// A zero interval means unlimited frame export.
 static _Atomic uint64_t g_frame_interval_ticks = 0;
 static _Atomic uint64_t g_last_frame_ticks = 0;
 
@@ -348,7 +353,14 @@ static inline void img_release(RenderImage *img) {
         int pixels = img->width * img->height * 4;
 
         CGContextRef ctx = img->ctx;
+        CGImageRef cachedImage = img->cachedImage;
+
         img->ctx = NULL;
+        img->cachedImage = NULL;
+
+        if (cachedImage) {
+            CGImageRelease(cachedImage);
+        }
 
         if (ctx) {
             CGContextRelease(ctx);
@@ -385,9 +397,33 @@ void j2me_render_set_flush_callback(
     g_flush_callback = callback;
 }
 
+void j2me_render_set_flush_ready_callback(
+    j2me_flush_ready_callback callback
+) {
+    g_flush_ready_callback = callback;
+}
+
 void j2me_render_set_fps_limit(int fps) {
 
-    if (fps <= 0 || fps > 45) {
+    // Zero or a negative value means unlimited.
+    if (fps <= 0) {
+
+        atomic_store_explicit(
+            &g_frame_interval_ticks,
+            0,
+            memory_order_relaxed
+        );
+
+        atomic_store_explicit(
+            &g_last_frame_ticks,
+            0,
+            memory_order_relaxed
+        );
+
+        return;
+    }
+
+    if (fps > 45) {
         fps = 45;
     }
 
@@ -445,7 +481,7 @@ static int j2me_render_frame_due(void) {
         memory_order_relaxed
     );
 
-    // A zero interval means no valid timebase was available.
+    // A zero interval means unlimited.
     if (interval == 0) {
         return 1;
     }
@@ -705,10 +741,47 @@ static RenderImage *createImageFromData(
 
     CGImageRelease(cgImage);
 
+    // Immutable JAR image data never changes after loading.
+    // Keep one CGImage snapshot and reuse it for drawImage/drawRegion.
+    img->cachedImage = CGBitmapContextCreateImage(img->ctx);
+
     track_img(img);
     native_heap_add(img->width * img->height * 4);
 
     return img;
+}
+
+/// Returns a cached image for immutable assets.
+/// Mutable images still get a fresh snapshot so updates remain visible.
+/// Set releaseAfterUse when the returned image is owned by the caller.
+static CGImageRef drawingImageFor(
+    RenderImage *img,
+    int *releaseAfterUse
+) {
+
+    if (releaseAfterUse) {
+        *releaseAfterUse = 0;
+    }
+
+    if (!img) {
+        return NULL;
+    }
+
+    if (!img->isMutable && img->cachedImage) {
+        return img->cachedImage;
+    }
+
+    if (!img->ctx) {
+        return NULL;
+    }
+
+    CGImageRef image = CGBitmapContextCreateImage(img->ctx);
+
+    if (image && releaseAfterUse) {
+        *releaseAfterUse = 1;
+    }
+
+    return image;
 }
 
 static void destroyImage(RenderImage *img) {
@@ -774,9 +847,16 @@ static s32 n_flushToScreen(
 
     process_dead_shells();
 
-    // Skip the expensive CGImage snapshot when the next frame
-    // would exceed the selected FPS limit.
+    // First skip frames blocked by the FPS limiter.
     if (!g_flush_callback || !j2me_render_frame_due()) {
+        return RUNTIME_STATUS_NORMAL;
+    }
+
+    // Do not create a costly framebuffer snapshot when Swift
+    // already has a frame waiting for the next display refresh.
+    if (g_flush_ready_callback &&
+        !g_flush_ready_callback()) {
+
         return RUNTIME_STATUS_NORMAL;
     }
 
@@ -1809,7 +1889,12 @@ static s32 n_drawImage(
     if (anchor & 2) y -= imgH / 2;
     if (anchor & 32) y -= imgH;
 
-    CGImageRef cgImage = CGBitmapContextCreateImage(img->ctx);
+    int releaseImage = 0;
+
+    CGImageRef cgImage = drawingImageFor(
+        img,
+        &releaseImage
+    );
 
     if (cgImage) {
 
@@ -1831,7 +1916,9 @@ static s32 n_drawImage(
 
         CGContextRestoreGState(rc->ctx);
 
-        CGImageRelease(cgImage);
+        if (releaseImage) {
+            CGImageRelease(cgImage);
+        }
     }
 
     img_release(img);
@@ -1889,7 +1976,6 @@ static s32 n_drawRegion(
     }
 
     CGContextRef rctx = rc->ctx;
-    CGContextRef ictx = img->ctx;
 
     int outW = wSrc;
     int outH = hSrc;
@@ -1908,7 +1994,12 @@ static s32 n_drawRegion(
     if (anchor & 2) yDst -= outH / 2;
     if (anchor & 32) yDst -= outH;
 
-    CGImageRef fullImage = CGBitmapContextCreateImage(ictx);
+    int releaseFullImage = 0;
+
+    CGImageRef fullImage = drawingImageFor(
+        img,
+        &releaseFullImage
+    );
 
     if (!fullImage) {
         img_release(img);
@@ -1921,7 +2012,9 @@ static s32 n_drawRegion(
         CGRectMake(xSrc, ySrc, wSrc, hSrc)
     );
 
-    CGImageRelease(fullImage);
+    if (releaseFullImage) {
+        CGImageRelease(fullImage);
+    }
 
     if (!subImage) {
         img_release(img);
@@ -2636,6 +2729,11 @@ void j2me_render_cleanup(void) {
 
         RenderImage *img = g_live_img[i];
 
+        if (img->cachedImage) {
+            CGImageRelease(img->cachedImage);
+            img->cachedImage = NULL;
+        }
+
         if (img->ctx) {
             CGContextRelease(img->ctx);
             img->ctx = NULL;
@@ -2673,6 +2771,7 @@ void j2me_render_cleanup(void) {
     );
 
     // Reset FPS timing for the next game session.
+    // The controller sets FPS to unlimited after cleanup.
     atomic_store_explicit(
         &g_frame_interval_ticks,
         0,
@@ -2684,6 +2783,10 @@ void j2me_render_cleanup(void) {
         0,
         memory_order_relaxed
     );
+
+    // Clear callbacks before a new session registers its callbacks.
+    g_flush_callback = NULL;
+    g_flush_ready_callback = NULL;
 
     // Stop haptic engine.
     if (@available(iOS 13.0, *)) {
