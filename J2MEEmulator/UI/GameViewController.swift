@@ -96,7 +96,7 @@ final class GameViewController: UIViewController {
         canvasWidth: Int = 240,
         canvasHeight: Int = 320,
         render3dScale: Int = 1,
-        fpsLimit: Int = 45
+        fpsLimit: Int = 30
     ) {
         self.jarPath = jarPath
         self.appName = appName
@@ -105,10 +105,12 @@ final class GameViewController: UIViewController {
         self.canvasHeight = min(max(1, canvasHeight), 4096)
         self.render3dScale = max(1, render3dScale)
 
-        // Never allow Unlimited or a value above 45 FPS.
-        self.fpsLimit = fpsLimit > 0
-            ? min(fpsLimit, 45)
-            : 45
+        // 0 = Unlimited. Positive values are capped at 45 FPS.
+        if fpsLimit <= 0 {
+            self.fpsLimit = 0
+        } else {
+            self.fpsLimit = min(fpsLimit, 45)
+        }
 
         super.init(nibName: nil, bundle: nil)
 
@@ -193,9 +195,19 @@ final class GameViewController: UIViewController {
 
         setGlobalEmulatorView(emulatorView)
 
-        // Apply the selected FPS limit in the native renderer.
-        // This happens before the MIDlet starts drawing.
-        j2me_render_set_fps_limit(Int32(self.fpsLimit))
+        // Reset native rendering state before starting a new game.
+        // This also clears a previous game's FPS interval.
+        //
+        // j2me_render_cleanup() resets g_frame_interval_ticks to zero.
+        // Therefore zero FPS below genuinely means Unlimited.
+        j2me_render_stop()
+        j2me_render_cleanup()
+
+        if fpsLimit > 0 {
+            j2me_render_set_fps_limit(Int32(fpsLimit))
+        } else {
+            print("[FPS] Unlimited mode enabled")
+        }
 
         j2me_render_set_flush_callback(flushCallback)
         j2me_ui_set_callback(gameUICallback)
@@ -337,7 +349,8 @@ final class GameViewController: UIViewController {
 
         let safe = view.safeAreaLayoutGuide
 
-        // Increase keypad height by 20 points.
+        // Add 20 real points to the keyboard container.
+        // Required priority prevents Auto Layout from ignoring the height.
         keypadHeightConstraint =
             keypadView.heightAnchor.constraint(
                 equalTo: view.widthAnchor,
@@ -345,8 +358,7 @@ final class GameViewController: UIViewController {
                 constant: 20
             )
 
-        keypadHeightConstraint.priority =
-            UILayoutPriority(750)
+        keypadHeightConstraint.priority = .required
 
         keypadCollapsedConstraint =
             keypadView.heightAnchor.constraint(
@@ -774,6 +786,7 @@ final class GameViewController: UIViewController {
         print("[JVM] MIDlet JAR: \(jarPath)")
         print("[JVM] Virtual resolution: \(canvasWidth)x\(canvasHeight)")
         print("[JVM] Diagnostic log: \(lastJVMLogPath)")
+        print("[JVM] FPS limit: \(fpsLimit == 0 ? "Unlimited" : "\(fpsLimit)")")
 
         let initResult = jvm_bridge_init(
             resourceRoot,
