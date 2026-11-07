@@ -22,6 +22,11 @@ final class EmulatorView: UIView {
     private var framebufferPixelHeight = 0
     private var hasDisplayedFirstFrame = false
 
+    // Keep only the newest image while the main queue is busy.
+    private let frameLock = NSLock()
+    private var pendingFrame: CGImage?
+    private var frameDeliveryScheduled = false
+
     var onFirstFrame: (() -> Void)?
     var onFrame: ((CGImage) -> Void)?
 
@@ -110,31 +115,65 @@ final class EmulatorView: UIView {
     // MARK: - Framebuffer
 
     func displayImage(_ cgImage: CGImage) {
+
+        frameLock.lock()
+
+        // Replace any older frame that has not reached the screen yet.
+        pendingFrame = cgImage
+
+        let shouldSchedule = !frameDeliveryScheduled
+
+        if shouldSchedule {
+            frameDeliveryScheduled = true
+        }
+
+        frameLock.unlock()
+
+        guard shouldSchedule else {
+            return
+        }
+
         DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
+            self?.displayPendingFrame()
+        }
+    }
 
-            self.framebufferPixelWidth = cgImage.width
-            self.framebufferPixelHeight = cgImage.height
+    private func displayPendingFrame() {
 
-            self.framebufferView.image = UIImage(
-                cgImage: cgImage,
-                scale: 1.0,
-                orientation: .up
-            )
+        frameLock.lock()
 
-            self.setNeedsLayout()
-            self.layoutIfNeeded()
+        let cgImage = pendingFrame
 
-            self.onFrame?(cgImage)
+        pendingFrame = nil
+        frameDeliveryScheduled = false
 
-            if !self.hasDisplayedFirstFrame {
-                self.hasDisplayedFirstFrame = true
+        frameLock.unlock()
 
-                let callback = self.onFirstFrame
-                self.onFirstFrame = nil
+        guard let cgImage else {
+            return
+        }
 
-                callback?()
-            }
+        framebufferPixelWidth = cgImage.width
+        framebufferPixelHeight = cgImage.height
+
+        framebufferView.image = UIImage(
+            cgImage: cgImage,
+            scale: 1.0,
+            orientation: .up
+        )
+
+        setNeedsLayout()
+        layoutIfNeeded()
+
+        onFrame?(cgImage)
+
+        if !hasDisplayedFirstFrame {
+            hasDisplayedFirstFrame = true
+
+            let callback = onFirstFrame
+            onFirstFrame = nil
+
+            callback?()
         }
     }
 
