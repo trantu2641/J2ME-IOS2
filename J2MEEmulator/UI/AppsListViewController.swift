@@ -935,7 +935,7 @@ class AppsListViewController: UIViewController,
 
             // Copy display/per-game configuration,
             // but deliberately keep saved game data separate.
-            copyGameSettings(
+            Self.copyGameSettings(
                 from: oldID,
                 to: newID
             )
