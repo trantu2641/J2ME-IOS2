@@ -1,29 +1,109 @@
 //
 //  AppsListViewController.swift
-//  J2MEEmulator
+//  JarBox
 //
-//  Springboard-style home screen with app grid.
+//  JAR launcher with hide, rename, custom icon and duplicate install.
 //
 
 import UIKit
 import UniformTypeIdentifiers
 
 class AppsListViewController: UIViewController,
-                      UICollectionViewDataSource,
-                      UICollectionViewDelegate,
-                      UIDocumentPickerDelegate {
+                              UICollectionViewDataSource,
+                              UICollectionViewDelegate,
+                              UIDocumentPickerDelegate {
+
+    // MARK: - Views
 
     private var springboardCollectionView: UICollectionView!
     private let emptyStateLabel = UILabel()
     private var lastLayoutWidth: CGFloat = 0
 
-    // Reference to animated home background.
     private var animatedBackgroundView: AnimatedBackgroundView?
 
-    /// Directory where imported JARs are stored
+    // MARK: - Toolbar
+
+    private var hiddenAppsBarButtonItem: UIBarButtonItem!
+    private var duplicateInstallBarButtonItem: UIBarButtonItem!
+
+    // When this value is not nil, the document picker is selecting an icon.
+    // Otherwise, it is importing JAR files.
+    private var pendingIconAppID: String?
+
+    // MARK: - App data
+
+    struct AppInfo {
+        let name: String
+        let path: String
+        let fileName: String
+        let version: String?
+        let vendor: String?
+        let icon: UIImage
+    }
+
+    private var allApps: [AppInfo] = []
+    private var apps: [AppInfo] = []
+
+    // MARK: - Directories
+
+    private static var documentsDirectory: String {
+        FileManager.default.urls(
+            for: .documentDirectory,
+            in: .userDomainMask
+        ).first!.path
+    }
+
     private static var gamesDirectory: String {
         documentsDirectory + "/games"
     }
+
+    private static var iconsDirectory: String {
+        documentsDirectory + "/Game Icons"
+    }
+
+    // MARK: - UserDefaults keys
+
+    private static func gameId(forPath path: String) -> String {
+        let name = URL(fileURLWithPath: path)
+            .deletingPathExtension()
+            .lastPathComponent
+
+        return name.replacingOccurrences(
+            of: "[^a-zA-Z0-9._-]",
+            with: "_",
+            options: .regularExpression
+        )
+    }
+
+    private static func gameId(for app: AppInfo) -> String {
+        gameId(forPath: app.path)
+    }
+
+    private static func displayNameKey(_ id: String) -> String {
+        "jarbox_display_name_\(id)"
+    }
+
+    private static func hiddenKey(_ id: String) -> String {
+        "jarbox_hidden_\(id)"
+    }
+
+    private static func customIconPath(for id: String) -> String {
+        iconsDirectory + "/\(id).png"
+    }
+
+    private static func hasCustomIcon(for app: AppInfo) -> Bool {
+        FileManager.default.fileExists(
+            atPath: customIconPath(for: gameId(for: app))
+        )
+    }
+
+    private static func isHidden(_ app: AppInfo) -> Bool {
+        UserDefaults.standard.bool(
+            forKey: hiddenKey(gameId(for: app))
+        )
+    }
+
+    // MARK: - View controller
 
     override var preferredStatusBarStyle: UIStatusBarStyle {
         .lightContent
@@ -38,26 +118,81 @@ class AppsListViewController: UIViewController,
 
         view.backgroundColor = .black
 
-        let bg = AnimatedBackgroundView()
-        bg.translatesAutoresizingMaskIntoConstraints = false
+        setupBackground()
+        setupToolbar()
+        setupCollectionView()
+        setupEmptyState()
+        createDirectories()
 
-        animatedBackgroundView = bg
+        scanApps()
+    }
 
-        view.addSubview(bg)
+    private func setupBackground() {
+        let background = AnimatedBackgroundView()
+        background.translatesAutoresizingMaskIntoConstraints = false
+
+        animatedBackgroundView = background
+
+        view.addSubview(background)
 
         NSLayoutConstraint.activate([
-            bg.topAnchor.constraint(equalTo: view.topAnchor),
-            bg.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            bg.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            bg.bottomAnchor.constraint(equalTo: view.bottomAnchor)
+            background.topAnchor.constraint(equalTo: view.topAnchor),
+            background.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            background.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            background.bottomAnchor.constraint(equalTo: view.bottomAnchor)
         ])
+    }
 
-        navigationItem.rightBarButtonItem = UIBarButtonItem(
+    private func setupToolbar() {
+
+        let addButton = UIBarButtonItem(
             systemItem: .add,
             primaryAction: UIAction { [weak self] _ in
                 self?.addAppTapped()
             }
         )
+
+        addButton.accessibilityLabel = "Import JAR"
+
+        duplicateInstallBarButtonItem = UIBarButtonItem(
+            image: UIImage(systemName: "doc.on.doc"),
+            style: .plain,
+            target: self,
+            action: #selector(duplicateInstalledJARTapped)
+        )
+
+        duplicateInstallBarButtonItem.accessibilityLabel =
+            "Install another copy of a JAR"
+
+        hiddenAppsBarButtonItem = UIBarButtonItem(
+            image: UIImage(systemName: "eye.slash"),
+            style: .plain,
+            target: nil,
+            action: nil
+        )
+
+        hiddenAppsBarButtonItem.accessibilityLabel = "Hidden JARs"
+
+        hiddenAppsBarButtonItem.menu = UIMenu(
+            title: "Hidden JARs",
+            children: [
+                UIAction(
+                    title: "No hidden JARs",
+                    attributes: .disabled
+                ) { _ in }
+            ]
+        )
+
+        // Add is at the far right.
+        // Duplicate and hidden management are outside the app grid.
+        navigationItem.rightBarButtonItems = [
+            addButton,
+            duplicateInstallBarButtonItem,
+            hiddenAppsBarButtonItem
+        ]
+    }
+
+    private func setupCollectionView() {
 
         let layout = UICollectionViewFlowLayout()
         layout.scrollDirection = .vertical
@@ -86,11 +221,22 @@ class AppsListViewController: UIViewController,
         view.addSubview(springboardCollectionView)
 
         NSLayoutConstraint.activate([
-            springboardCollectionView.topAnchor.constraint(equalTo: view.topAnchor),
-            springboardCollectionView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            springboardCollectionView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            springboardCollectionView.bottomAnchor.constraint(equalTo: view.bottomAnchor)
+            springboardCollectionView.topAnchor.constraint(
+                equalTo: view.topAnchor
+            ),
+            springboardCollectionView.leadingAnchor.constraint(
+                equalTo: view.leadingAnchor
+            ),
+            springboardCollectionView.trailingAnchor.constraint(
+                equalTo: view.trailingAnchor
+            ),
+            springboardCollectionView.bottomAnchor.constraint(
+                equalTo: view.bottomAnchor
+            )
         ])
+    }
+
+    private func setupEmptyState() {
 
         emptyStateLabel.text = "No Games Yet\nTap + to add a .jar file"
         emptyStateLabel.textColor = .secondaryLabel
@@ -103,7 +249,9 @@ class AppsListViewController: UIViewController,
         view.addSubview(emptyStateLabel)
 
         NSLayoutConstraint.activate([
-            emptyStateLabel.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            emptyStateLabel.centerXAnchor.constraint(
+                equalTo: view.centerXAnchor
+            ),
             emptyStateLabel.centerYAnchor.constraint(
                 equalTo: view.centerYAnchor,
                 constant: -40
@@ -113,21 +261,26 @@ class AppsListViewController: UIViewController,
                 constant: 40
             )
         ])
+    }
+
+    private func createDirectories() {
 
         try? FileManager.default.createDirectory(
             atPath: Self.gamesDirectory,
             withIntermediateDirectories: true
         )
 
-        scanApps()
+        try? FileManager.default.createDirectory(
+            atPath: Self.iconsDirectory,
+            withIntermediateDirectories: true
+        )
     }
 
-    // MARK: - Background animation lifecycle
+    // MARK: - Background lifecycle
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
 
-        // Restart background after returning from a game.
         animatedBackgroundView?.resumeAnimations()
 
         NotificationCenter.default.addObserver(
@@ -141,7 +294,6 @@ class AppsListViewController: UIViewController,
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
 
-        // Stop animations and blur before opening a game.
         animatedBackgroundView?.pauseAnimations()
     }
 
@@ -193,11 +345,12 @@ class AppsListViewController: UIViewController,
         )
     }
 
-    // ============================================================
-    // MARK: - Import JAR from Files
-    // ============================================================
+    // MARK: - Import JAR
 
     private func addAppTapped() {
+
+        pendingIconAppID = nil
+
         let picker = UIDocumentPickerViewController(
             forOpeningContentTypes: [.data],
             asCopy: true
@@ -213,6 +366,36 @@ class AppsListViewController: UIViewController,
         _ controller: UIDocumentPickerViewController,
         didPickDocumentsAt urls: [URL]
     ) {
+
+        // Icon selection mode.
+        if let appID = pendingIconAppID {
+
+            pendingIconAppID = nil
+
+            guard let imageURL = urls.first else {
+                return
+            }
+
+            saveCustomIcon(
+                from: imageURL,
+                for: appID
+            )
+
+            return
+        }
+
+        // Normal JAR import mode.
+        importJARFiles(urls)
+    }
+
+    func documentPickerWasCancelled(
+        _ controller: UIDocumentPickerViewController
+    ) {
+        pendingIconAppID = nil
+    }
+
+    private func importJARFiles(_ urls: [URL]) {
+
         let fm = FileManager.default
 
         let gamesURL = URL(
@@ -237,6 +420,7 @@ class AppsListViewController: UIViewController,
         }
 
         for sourceURL in urls {
+
             let fileName = sourceURL.lastPathComponent
 
             guard sourceURL.pathExtension.lowercased() == "jar" else {
@@ -252,32 +436,35 @@ class AppsListViewController: UIViewController,
                 }
             }
 
-            let destinationURL = gamesURL.appendingPathComponent(fileName)
+            // Never overwrite an existing JAR.
+            // Re-importing an identical filename creates a new installation.
+            let destinationURL = uniqueJARDestination(
+                for: fileName,
+                in: gamesURL
+            )
 
             let temporaryURL = gamesURL.appendingPathComponent(
                 ".import-\(UUID().uuidString).tmp"
             )
 
             do {
+
                 try fm.copyItem(
                     at: sourceURL,
                     to: temporaryURL
                 )
-
-                if fm.fileExists(atPath: destinationURL.path) {
-                    try fm.removeItem(at: destinationURL)
-                }
 
                 try fm.moveItem(
                     at: temporaryURL,
                     to: destinationURL
                 )
 
-                importedNames.append(fileName)
+                importedNames.append(destinationURL.lastPathComponent)
 
-                print("[Swift] Imported JAR: \(fileName)")
+                print("[Swift] Imported JAR: \(destinationURL.lastPathComponent)")
 
             } catch {
+
                 try? fm.removeItem(at: temporaryURL)
 
                 failures.append(
@@ -312,21 +499,49 @@ class AppsListViewController: UIViewController,
             messageParts.append("No files were selected.")
         }
 
-        let title = importedNames.isEmpty
-            ? "No JAR Imported"
-            : "Import Complete"
-
         showImportResult(
-            title: title,
+            title: importedNames.isEmpty
+                ? "No JAR Imported"
+                : "Import Complete",
             message: messageParts.joined(separator: "\n\n")
         )
     }
+
+    // Returns the original name if available.
+    // If it already exists, creates a different internal installation name.
+    private func uniqueJARDestination(
+        for fileName: String,
+        in directory: URL
+    ) -> URL {
+
+        let original = directory.appendingPathComponent(fileName)
+
+        guard FileManager.default.fileExists(
+            atPath: original.path
+        ) else {
+            return original
+        }
+
+        let originalURL = URL(fileURLWithPath: fileName)
+        let stem = originalURL.deletingPathExtension().lastPathComponent
+        let ext = originalURL.pathExtension.isEmpty
+            ? "jar"
+            : originalURL.pathExtension
+
+        let uniqueName = "\(stem)__install_\(UUID().uuidString).\(ext)"
+
+        return directory.appendingPathComponent(uniqueName)
+    }
+
+    // MARK: - Import result
 
     private func showImportResult(
         title: String,
         message: String
     ) {
+
         DispatchQueue.main.async { [weak self] in
+
             guard let self else {
                 return
             }
@@ -345,22 +560,10 @@ class AppsListViewController: UIViewController,
         }
     }
 
-    // ============================================================
-    // MARK: - App scanning
-    // ============================================================
-
-    struct AppInfo {
-        let name: String
-        let path: String
-        let fileName: String
-        let version: String?
-        let vendor: String?
-        let icon: UIImage
-    }
-
-    private var apps: [AppInfo] = []
+    // MARK: - Scan installed JARs
 
     private func scanApps() {
+
         let gamesDir = Self.gamesDirectory
 
         DispatchQueue.global(qos: .userInitiated).async {
@@ -370,6 +573,7 @@ class AppsListViewController: UIViewController,
             if let files = try? FileManager.default.contentsOfDirectory(
                 atPath: gamesDir
             ) {
+
                 for file in files
                 where URL(fileURLWithPath: file)
                     .pathExtension.lowercased() == "jar" {
@@ -386,12 +590,22 @@ class AppsListViewController: UIViewController,
             }
 
             let unsorted = jarPaths.map {
-                jar -> (String, String, String, String?, String?, UIImage?) in
+                jar -> (
+                    String,
+                    String,
+                    String,
+                    String?,
+                    String?,
+                    UIImage?
+                ) in
 
                 let meta = JARMetadata.read(from: jar.path)
                 let jarIcon = meta?.readIcon(from: jar.path)
 
-                let fileName = URL(fileURLWithPath: jar.path).lastPathComponent
+                let fileName = URL(
+                    fileURLWithPath: jar.path
+                ).lastPathComponent
+
                 let appName = meta?.midletName ?? jar.name
 
                 return (
@@ -402,45 +616,532 @@ class AppsListViewController: UIViewController,
                     meta?.vendor,
                     jarIcon
                 )
+
             }.sorted {
                 $0.0.localizedCaseInsensitiveCompare($1.0)
                     == .orderedAscending
             }
 
-            let scannedApps = unsorted.enumerated().map { index, item in
-                AppInfo(
-                    name: item.0,
+            let scannedApps = unsorted.enumerated().map {
+                index, item -> AppInfo in
+
+                let id = Self.gameId(forPath: item.1)
+
+                let savedName = UserDefaults.standard.string(
+                    forKey: Self.displayNameKey(id)
+                )
+
+                let displayName: String
+
+                if let savedName,
+                   !savedName.trimmingCharacters(
+                    in: .whitespacesAndNewlines
+                   ).isEmpty {
+                    displayName = savedName
+                } else {
+                    displayName = item.0
+                }
+
+                let customIcon = UIImage(
+                    contentsOfFile: Self.customIconPath(for: id)
+                )
+
+                let finalIcon = Self.springboardIcon(
+                    customIcon ?? item.5,
+                    name: displayName,
+                    index: index
+                )
+
+                return AppInfo(
+                    name: displayName,
                     path: item.1,
                     fileName: item.2,
                     version: item.3,
                     vendor: item.4,
-                    icon: Self.springboardIcon(
-                        item.5,
-                        name: item.0,
-                        index: index
-                    )
+                    icon: finalIcon
                 )
             }
 
             DispatchQueue.main.async { [weak self] in
+
                 guard let self else {
                     return
                 }
 
-                self.apps = scannedApps
+                self.allApps = scannedApps
+
+                self.apps = scannedApps.filter {
+                    !Self.isHidden($0)
+                }
+
                 self.springboardCollectionView.reloadData()
-                self.emptyStateLabel.isHidden = !scannedApps.isEmpty
+
+                self.updateEmptyState()
+                self.updateHiddenAppsMenu()
 
                 print(
-                    "[Swift] Found \(scannedApps.count) MIDlet JARs in \(gamesDir)"
+                    "[Swift] Found \(scannedApps.count) JAR installations"
                 )
             }
         }
     }
 
-    // ============================================================
+    private func updateEmptyState() {
+
+        if allApps.isEmpty {
+
+            emptyStateLabel.text =
+                "No Games Yet\nTap + to add a .jar file"
+
+        } else if apps.isEmpty {
+
+            emptyStateLabel.text =
+                "All JARs are hidden\nTap the eye button to show them"
+
+        }
+
+        emptyStateLabel.isHidden = !apps.isEmpty
+    }
+
+    // MARK: - Hidden JAR management
+
+    private func setHidden(
+        _ hidden: Bool,
+        for app: AppInfo
+    ) {
+
+        let id = Self.gameId(for: app)
+
+        if hidden {
+            UserDefaults.standard.set(
+                true,
+                forKey: Self.hiddenKey(id)
+            )
+        } else {
+            UserDefaults.standard.removeObject(
+                forKey: Self.hiddenKey(id)
+            )
+        }
+
+        scanApps()
+    }
+
+    private func updateHiddenAppsMenu() {
+
+        guard hiddenAppsBarButtonItem != nil else {
+            return
+        }
+
+        let hiddenApps = allApps.filter {
+            Self.isHidden($0)
+        }
+
+        var actions: [UIAction] = []
+
+        if hiddenApps.isEmpty {
+
+            actions.append(
+                UIAction(
+                    title: "No hidden JARs",
+                    image: UIImage(systemName: "checkmark.circle"),
+                    attributes: .disabled
+                ) { _ in }
+            )
+
+        } else {
+
+            for app in hiddenApps {
+
+                let action = UIAction(
+                    title: "\(app.name)  [\(app.fileName)]",
+                    image: UIImage(systemName: "eye")
+                ) { [weak self] _ in
+
+                    self?.setHidden(
+                        false,
+                        for: app
+                    )
+                }
+
+                actions.append(action)
+            }
+
+            actions.append(
+                UIAction(
+                    title: "Show All Hidden",
+                    image: UIImage(systemName: "eye.fill")
+                ) { [weak self] _ in
+
+                    self?.showAllHiddenApps()
+                }
+            )
+        }
+
+        hiddenAppsBarButtonItem.menu = UIMenu(
+            title: "Hidden JARs (\(hiddenApps.count))",
+            children: actions
+        )
+    }
+
+    private func showAllHiddenApps() {
+
+        for app in allApps {
+
+            UserDefaults.standard.removeObject(
+                forKey: Self.hiddenKey(Self.gameId(for: app))
+            )
+        }
+
+        scanApps()
+    }
+
+    // MARK: - Duplicate installation
+
+    // This button is outside the app grid.
+    // It lets the user select an installed JAR and create another installation.
+    @objc private func duplicateInstalledJARTapped() {
+
+        guard !allApps.isEmpty else {
+
+            showImportResult(
+                title: "No JAR Installed",
+                message: "Import a JAR before creating another installation."
+            )
+
+            return
+        }
+
+        let alert = UIAlertController(
+            title: "Install Another Copy",
+            message: "Choose the JAR you want to install again.",
+            preferredStyle: .actionSheet
+        )
+
+        let sortedApps = allApps.sorted {
+            $0.name.localizedCaseInsensitiveCompare($1.name)
+                == .orderedAscending
+        }
+
+        for app in sortedApps {
+
+            let title = "\(app.name)  [\(app.fileName)]"
+
+            alert.addAction(
+                UIAlertAction(
+                    title: title,
+                    style: .default
+                ) { [weak self] _ in
+
+                    self?.duplicateApp(app)
+                }
+            )
+        }
+
+        alert.addAction(
+            UIAlertAction(
+                title: "Cancel",
+                style: .cancel
+            )
+        )
+
+        if let popover = alert.popoverPresentationController {
+            popover.barButtonItem = duplicateInstallBarButtonItem
+        }
+
+        present(alert, animated: true)
+    }
+
+    private func duplicateApp(_ app: AppInfo) {
+
+        let fm = FileManager.default
+
+        let sourceURL = URL(fileURLWithPath: app.path)
+
+        guard fm.fileExists(atPath: sourceURL.path) else {
+
+            showImportResult(
+                title: "Cannot Duplicate",
+                message: "The original JAR file no longer exists."
+            )
+
+            return
+        }
+
+        let gamesURL = URL(
+            fileURLWithPath: Self.gamesDirectory,
+            isDirectory: true
+        )
+
+        let originalStem = sourceURL
+            .deletingPathExtension()
+            .lastPathComponent
+
+        let extensionName = sourceURL.pathExtension.isEmpty
+            ? "jar"
+            : sourceURL.pathExtension
+
+        let uniqueName =
+            "\(originalStem)__copy_\(UUID().uuidString).\(extensionName)"
+
+        let destinationURL = gamesURL.appendingPathComponent(uniqueName)
+
+        do {
+
+            try fm.createDirectory(
+                at: gamesURL,
+                withIntermediateDirectories: true
+            )
+
+            // Copy only the JAR itself.
+            // Do not copy RMS/account data from the original installation.
+            try fm.copyItem(
+                at: sourceURL,
+                to: destinationURL
+            )
+
+            let oldID = Self.gameId(for: app)
+            let newID = Self.gameId(forPath: destinationURL.path)
+
+            let newDisplayName = uniqueDisplayName(
+                basedOn: "\(app.name) (Copy)"
+            )
+
+            UserDefaults.standard.set(
+                newDisplayName,
+                forKey: Self.displayNameKey(newID)
+            )
+
+            // Keep a custom icon on the duplicated installation.
+            let oldIconURL = URL(
+                fileURLWithPath: Self.customIconPath(for: oldID)
+            )
+
+            let newIconURL = URL(
+                fileURLWithPath: Self.customIconPath(for: newID)
+            )
+
+            if fm.fileExists(atPath: oldIconURL.path) {
+
+                try? fm.createDirectory(
+                    at: newIconURL.deletingLastPathComponent(),
+                    withIntermediateDirectories: true
+                )
+
+                try? fm.copyItem(
+                    at: oldIconURL,
+                    to: newIconURL
+                )
+            }
+
+            // Copy display/per-game configuration,
+            // but deliberately keep saved game data separate.
+            copyGameSettings(
+                from: oldID,
+                to: newID
+            )
+
+            scanApps()
+
+            showImportResult(
+                title: "Installation Created",
+                message:
+                    "\(newDisplayName) was installed as a separate copy.\n\n"
+                    + "It has its own save data and account."
+            )
+
+        } catch {
+
+            showImportResult(
+                title: "Duplicate Failed",
+                message: error.localizedDescription
+            )
+        }
+    }
+
+    private func uniqueDisplayName(basedOn base: String) -> String {
+
+        let existingNames = Set(allApps.map { $0.name })
+
+        if !existingNames.contains(base) {
+            return base
+        }
+
+        var index = 2
+
+        while existingNames.contains("\(base) \(index)") {
+            index += 1
+        }
+
+        return "\(base) \(index)"
+    }
+
+    private static func copyGameSettings(
+        from oldID: String,
+        to newID: String
+    ) {
+
+        let defaults = UserDefaults.standard
+
+        let keys = [
+            "ss3d_",
+            "resW_",
+            "resH_",
+            "fpsLimit_"
+        ]
+
+        for prefix in keys {
+
+            let oldKey = prefix + oldID
+            let newKey = prefix + newID
+
+            if let value = defaults.object(forKey: oldKey) {
+                defaults.set(value, forKey: newKey)
+            }
+        }
+    }
+
+    // MARK: - Rename JAR
+
+    private func renameApp(_ app: AppInfo) {
+
+        let alert = UIAlertController(
+            title: "Rename JAR",
+            message: "Change the name shown on the home screen.",
+            preferredStyle: .alert
+        )
+
+        alert.addTextField { field in
+            field.text = app.name
+            field.placeholder = "JAR name"
+            field.clearButtonMode = .whileEditing
+        }
+
+        alert.addAction(
+            UIAlertAction(
+                title: "Cancel",
+                style: .cancel
+            )
+        )
+
+        alert.addAction(
+            UIAlertAction(
+                title: "Save",
+                style: .default
+            ) { [weak self] _ in
+
+                guard let self,
+                      let text = alert.textFields?.first?.text else {
+                    return
+                }
+
+                let newName = text.trimmingCharacters(
+                    in: .whitespacesAndNewlines
+                )
+
+                guard !newName.isEmpty else {
+                    return
+                }
+
+                let id = Self.gameId(for: app)
+
+                UserDefaults.standard.set(
+                    newName,
+                    forKey: Self.displayNameKey(id)
+                )
+
+                self.scanApps()
+            }
+        )
+
+        present(alert, animated: true)
+    }
+
+    // MARK: - Custom icon
+
+    private func changeIcon(for app: AppInfo) {
+
+        pendingIconAppID = Self.gameId(for: app)
+
+        let picker = UIDocumentPickerViewController(
+            forOpeningContentTypes: [.image],
+            asCopy: true
+        )
+
+        picker.delegate = self
+        picker.allowsMultipleSelection = false
+
+        present(picker, animated: true)
+    }
+
+    private func saveCustomIcon(
+        from imageURL: URL,
+        for appID: String
+    ) {
+
+        let accessing = imageURL.startAccessingSecurityScopedResource()
+
+        defer {
+            if accessing {
+                imageURL.stopAccessingSecurityScopedResource()
+            }
+        }
+
+        guard let data = try? Data(contentsOf: imageURL),
+              let image = UIImage(data: data),
+              let pngData = image.pngData() else {
+
+            showImportResult(
+                title: "Icon Error",
+                message: "The selected image could not be opened."
+            )
+
+            return
+        }
+
+        let iconDirectory = URL(
+            fileURLWithPath: Self.iconsDirectory,
+            isDirectory: true
+        )
+
+        let destinationURL = URL(
+            fileURLWithPath: Self.customIconPath(for: appID)
+        )
+
+        do {
+
+            try FileManager.default.createDirectory(
+                at: iconDirectory,
+                withIntermediateDirectories: true
+            )
+
+            try pngData.write(
+                to: destinationURL,
+                options: .atomic
+            )
+
+            scanApps()
+
+        } catch {
+
+            showImportResult(
+                title: "Icon Error",
+                message: error.localizedDescription
+            )
+        }
+    }
+
+    private func resetCustomIcon(for app: AppInfo) {
+
+        let id = Self.gameId(for: app)
+
+        try? FileManager.default.removeItem(
+            atPath: Self.customIconPath(for: id)
+        )
+
+        scanApps()
+    }
+
     // MARK: - Icon generation
-    // ============================================================
 
     private static let iconSize: CGFloat = SpringboardCell.iconSize
 
@@ -493,6 +1194,7 @@ class AppsListViewController: UIViewController,
         let renderer = UIGraphicsImageRenderer(size: size)
 
         return renderer.image { context in
+
             let rect = CGRect(
                 origin: .zero,
                 size: size
@@ -504,11 +1206,14 @@ class AppsListViewController: UIViewController,
             ).addClip()
 
             if let image = jarIcon {
+
                 UIColor(white: 0.22, alpha: 1).setFill()
                 UIBezierPath(rect: rect).fill()
+
                 image.draw(in: rect)
 
             } else {
+
                 let pair = placeholderGradients[
                     index % placeholderGradients.count
                 ]
@@ -521,6 +1226,7 @@ class AppsListViewController: UIViewController,
                     colors: [pair.0.cgColor, pair.1.cgColor] as CFArray,
                     locations: [0, 1]
                 ) {
+
                     cgContext.drawLinearGradient(
                         gradient,
                         start: .zero,
@@ -560,14 +1266,13 @@ class AppsListViewController: UIViewController,
             )
 
             UIColor(white: 1.0, alpha: 0.12).setStroke()
+
             borderPath.lineWidth = 1
             borderPath.stroke()
         }
     }
 
-    // ============================================================
-    // MARK: - UICollectionView
-    // ============================================================
+    // MARK: - Collection view
 
     func collectionView(
         _ collectionView: UICollectionView,
@@ -587,6 +1292,7 @@ class AppsListViewController: UIViewController,
         ) as! SpringboardCell
 
         let app = apps[indexPath.item]
+
         cell.configure(
             name: app.name,
             icon: app.icon
@@ -594,6 +1300,8 @@ class AppsListViewController: UIViewController,
 
         return cell
     }
+
+    // MARK: - Long press menu
 
     func collectionView(
         _ collectionView: UICollectionView,
@@ -607,125 +1315,211 @@ class AppsListViewController: UIViewController,
 
         let app = apps[indexPath.item]
 
-        return UIContextMenuConfiguration(actionProvider: { [weak self] _ in
+        return UIContextMenuConfiguration(
+            actionProvider: { [weak self] _ in
 
-            let ssEnabled = Self.is3DSupersampling(for: app)
+                // Rename.
+                let rename = UIAction(
+                    title: "Rename",
+                    image: UIImage(systemName: "pencil")
+                ) { _ in
 
-            let toggle3D = UIAction(
-                title: ssEnabled
-                    ? "Disable 3D Enhancement"
-                    : "Enable 3D Enhancement",
-                subtitle: ssEnabled
-                    ? "Lower GPU load and heat"
-                    : "Higher 3D quality, but more GPU load",
-                image: UIImage(systemName: "cube"),
-                state: ssEnabled ? .on : .off
-            ) { _ in
-                Self.set3DSupersampling(
-                    !ssEnabled,
-                    for: app
+                    self?.renameApp(app)
+                }
+
+                // Change icon.
+                let changeIcon = UIAction(
+                    title: "Change Icon...",
+                    image: UIImage(systemName: "photo")
+                ) { _ in
+
+                    self?.changeIcon(for: app)
+                }
+
+                // Restore JAR's original icon.
+                let iconActions: [UIAction]
+
+                if Self.hasCustomIcon(for: app) {
+
+                    let resetIcon = UIAction(
+                        title: "Restore Original Icon",
+                        image: UIImage(systemName: "arrow.uturn.backward")
+                    ) { _ in
+
+                        self?.resetCustomIcon(for: app)
+                    }
+
+                    iconActions = [
+                        rename,
+                        changeIcon,
+                        resetIcon
+                    ]
+
+                } else {
+
+                    iconActions = [
+                        rename,
+                        changeIcon
+                    ]
+                }
+
+                // Hide from the home screen.
+                let hide = UIAction(
+                    title: "Hide JAR",
+                    image: UIImage(systemName: "eye.slash")
+                ) { _ in
+
+                    self?.setHidden(
+                        true,
+                        for: app
+                    )
+                }
+
+                // Install another copy.
+                let duplicate = UIAction(
+                    title: "Duplicate Install",
+                    image: UIImage(systemName: "doc.on.doc")
+                ) { _ in
+
+                    self?.duplicateApp(app)
+                }
+
+                let manageMenu = UIMenu(
+                    title: "Manage JAR",
+                    image: UIImage(systemName: "app"),
+                    children: iconActions + [
+                        hide,
+                        duplicate
+                    ]
+                )
+
+                // 3D enhancement.
+                let ssEnabled = Self.is3DSupersampling(for: app)
+
+                let toggle3D = UIAction(
+                    title: ssEnabled
+                        ? "Disable 3D Enhancement"
+                        : "Enable 3D Enhancement",
+                    subtitle: nil,
+                    image: UIImage(systemName: "cube"),
+                    state: ssEnabled ? .on : .off
+                ) { _ in
+
+                    Self.set3DSupersampling(
+                        !ssEnabled,
+                        for: app
+                    )
+                }
+
+                // Screen resolution.
+                let currentRes = Self.resolution(for: app)
+
+                let resActions = Self.resolutionOptions.map { option in
+
+                    UIAction(
+                        title: option.label,
+                        state: (
+                            option.w == currentRes.w &&
+                            option.h == currentRes.h
+                        ) ? .on : .off
+                    ) { _ in
+
+                        Self.setResolution(
+                            w: option.w,
+                            h: option.h,
+                            for: app
+                        )
+                    }
+                }
+
+                let customResolution = UIAction(
+                    title: "Custom Resolution...",
+                    image: UIImage(systemName: "slider.horizontal.3")
+                ) { [weak self] _ in
+
+                    self?.promptCustomResolution(for: app)
+                }
+
+                let resMenu = UIMenu(
+                    title: "Screen Resolution",
+                    image: UIImage(systemName: "aspectratio"),
+                    children: resActions + [customResolution]
+                )
+
+                let settings = UIMenu(
+                    options: .displayInline,
+                    children: [
+                        toggle3D,
+                        resMenu
+                    ]
+                )
+
+                // FPS.
+                let currentFps = Self.fpsLimit(for: app)
+
+                let fpsActions = Self.fpsLimitOptions.map { option in
+
+                    UIAction(
+                        title: option.label,
+                        state: option.value == currentFps ? .on : .off
+                    ) { _ in
+
+                        Self.setFpsLimit(
+                            option.value,
+                            for: app
+                        )
+                    }
+                }
+
+                let fpsMenu = UIMenu(
+                    title: "FPS Limit",
+                    image: UIImage(systemName: "speedometer"),
+                    children: fpsActions
+                )
+
+                // Clear saved game data.
+                let clearData = UIAction(
+                    title: "Clear Game Data",
+                    image: UIImage(systemName: "eraser")
+                ) { _ in
+
+                    self?.confirmClearGameData(for: app)
+                }
+
+                // Delete JAR.
+                let delete = UIAction(
+                    title: "Delete",
+                    image: UIImage(systemName: "trash"),
+                    attributes: .destructive
+                ) { _ in
+
+                    self?.confirmDeleteApp(for: app)
+                }
+
+                let actions = UIMenu(
+                    options: .displayInline,
+                    children: [
+                        clearData,
+                        delete
+                    ]
+                )
+
+                return UIMenu(
+                    children: [
+                        manageMenu,
+                        settings,
+                        fpsMenu,
+                        actions
+                    ]
                 )
             }
-
-            let clearData = UIAction(
-                title: "Clear Game Data",
-                image: UIImage(systemName: "eraser")
-            ) { _ in
-                self?.confirmClearGameData(for: app)
-            }
-
-            let delete = UIAction(
-                title: "Delete",
-                image: UIImage(systemName: "trash"),
-                attributes: .destructive
-            ) { _ in
-                self?.confirmDeleteApp(at: indexPath)
-            }
-
-            let currentRes = Self.resolution(for: app)
-
-            let resActions = Self.resolutionOptions.map { option in
-                UIAction(
-                    title: option.label,
-                    state: (
-                        option.w == currentRes.w
-                        && option.h == currentRes.h
-                    ) ? .on : .off
-                ) { _ in
-                    Self.setResolution(
-                        w: option.w,
-                        h: option.h,
-                        for: app
-                    )
-                }
-            }
-
-            let customResolution = UIAction(
-                title: "Custom Resolution...",
-                image: UIImage(systemName: "slider.horizontal.3")
-            ) { [weak self] _ in
-                self?.promptCustomResolution(for: app)
-            }
-
-            let resMenu = UIMenu(
-                title: "Screen Resolution",
-                image: UIImage(systemName: "aspectratio"),
-                children: resActions + [customResolution]
-            )
-
-            let currentFps = Self.fpsLimit(for: app)
-
-            let fpsActions = Self.fpsLimitOptions.map { option in
-                UIAction(
-                    title: option.label,
-                    state: option.value == currentFps ? .on : .off
-                ) { _ in
-                    Self.setFpsLimit(
-                        option.value,
-                        for: app
-                    )
-                }
-            }
-
-            let fpsMenu = UIMenu(
-                title: "FPS Limit",
-                image: UIImage(systemName: "speedometer"),
-                children: fpsActions
-            )
-
-            let settings = UIMenu(
-                options: .displayInline,
-                children: [toggle3D, resMenu]
-            )
-
-            let actions = UIMenu(
-                options: .displayInline,
-                children: [clearData, delete]
-            )
-
-            return UIMenu(
-                children: [settings, fpsMenu, actions]
-            )
-        })
-    }
-
-    // ============================================================
-    // MARK: - Per-game settings
-    // ============================================================
-
-    private static func gameId(for app: AppInfo) -> String {
-        let jarName = URL(
-            fileURLWithPath: app.path
-        ).deletingPathExtension().lastPathComponent
-
-        return jarName.replacingOccurrences(
-            of: "[^a-zA-Z0-9._-]",
-            with: "_",
-            options: .regularExpression
         )
     }
 
+    // MARK: - Per-game settings
+
     static func is3DSupersampling(for app: AppInfo) -> Bool {
+
         UserDefaults.standard.object(
             forKey: "ss3d_\(gameId(for: app))"
         ) as? Bool ?? false
@@ -735,13 +1529,17 @@ class AppsListViewController: UIViewController,
         _ enabled: Bool,
         for app: AppInfo
     ) {
+
         UserDefaults.standard.set(
             enabled,
             forKey: "ss3d_\(gameId(for: app))"
         )
     }
 
-    private static let resolutionOptions: [(label: String, w: Int, h: Int)] = [
+    private static let resolutionOptions: [
+        (label: String, w: Int, h: Int)
+    ] = [
+
         ("101×80",   101,  80),
         ("128×128",  128, 128),
         ("128×160",  128, 160),
@@ -760,15 +1558,18 @@ class AppsListViewController: UIViewController,
         ("480×800",  480, 800)
     ]
 
-    static func resolution(for app: AppInfo) -> (w: Int, h: Int) {
-        let gameID = gameId(for: app)
+    static func resolution(
+        for app: AppInfo
+    ) -> (w: Int, h: Int) {
+
+        let id = gameId(for: app)
 
         let width = UserDefaults.standard.object(
-            forKey: "resW_\(gameID)"
+            forKey: "resW_\(id)"
         ) as? Int ?? 240
 
         let height = UserDefaults.standard.object(
-            forKey: "resH_\(gameID)"
+            forKey: "resH_\(id)"
         ) as? Int ?? 320
 
         return (width, height)
@@ -779,21 +1580,24 @@ class AppsListViewController: UIViewController,
         h: Int,
         for app: AppInfo
     ) {
-        let gameID = gameId(for: app)
+
+        let id = gameId(for: app)
 
         UserDefaults.standard.set(
             w,
-            forKey: "resW_\(gameID)"
+            forKey: "resW_\(id)"
         )
 
         UserDefaults.standard.set(
             h,
-            forKey: "resH_\(gameID)"
+            forKey: "resH_\(id)"
         )
     }
 
-    // 0 means Unlimited. Positive values are capped at 45 FPS.
-    private static let fpsLimitOptions: [(label: String, value: Int)] = [
+    private static let fpsLimitOptions: [
+        (label: String, value: Int)
+    ] = [
+
         ("Không giới hạn", 0),
         ("15 FPS", 15),
         ("20 FPS", 20),
@@ -802,6 +1606,7 @@ class AppsListViewController: UIViewController,
     ]
 
     static func fpsLimit(for app: AppInfo) -> Int {
+
         let key = "fpsLimit_\(gameId(for: app))"
 
         guard let saved = UserDefaults.standard.object(
@@ -811,6 +1616,7 @@ class AppsListViewController: UIViewController,
         }
 
         switch saved {
+
         case 0, 15, 20, 30, 45:
             return saved
 
@@ -823,6 +1629,7 @@ class AppsListViewController: UIViewController,
         _ fps: Int,
         for app: AppInfo
     ) {
+
         let safeFPS = fpsLimitOptions.contains {
             $0.value == fps
         } ? fps : 30
@@ -833,18 +1640,10 @@ class AppsListViewController: UIViewController,
         )
     }
 
-    private static var documentsDirectory: String {
-        FileManager.default.urls(
-            for: .documentDirectory,
-            in: .userDomainMask
-        ).first!.path
-    }
-
-    // ============================================================
     // MARK: - Custom resolution
-    // ============================================================
 
     private func promptCustomResolution(for app: AppInfo) {
+
         let current = Self.resolution(for: app)
 
         let alert = UIAlertController(
@@ -870,7 +1669,10 @@ class AppsListViewController: UIViewController,
         )
 
         alert.addAction(
-            UIAlertAction(title: "Apply", style: .default) { [weak self] _ in
+            UIAlertAction(
+                title: "Apply",
+                style: .default
+            ) { [weak self] _ in
 
                 guard let fields = alert.textFields,
                       fields.count == 2,
@@ -892,6 +1694,7 @@ class AppsListViewController: UIViewController,
                     )
 
                     self?.present(error, animated: true)
+
                     return
                 }
 
@@ -906,11 +1709,10 @@ class AppsListViewController: UIViewController,
         present(alert, animated: true)
     }
 
-    // ============================================================
-    // MARK: - Clear and delete
-    // ============================================================
+    // MARK: - Clear game data
 
     private func confirmClearGameData(for app: AppInfo) {
+
         let alert = UIAlertController(
             title: "Clear Game Data",
             message: "Delete all save data for \(app.name)?",
@@ -922,11 +1724,20 @@ class AppsListViewController: UIViewController,
         )
 
         alert.addAction(
-            UIAlertAction(title: "Clear", style: .destructive) { _ in
-                let gid = Self.gameId(for: app)
+            UIAlertAction(
+                title: "Clear",
+                style: .destructive
+            ) { _ in
+
+                let id = Self.gameId(for: app)
+
+                let savePath =
+                    Self.documentsDirectory
+                    + "/Games Data/"
+                    + id
 
                 try? FileManager.default.removeItem(
-                    atPath: Self.documentsDirectory + "/Games Data/" + gid
+                    atPath: savePath
                 )
             }
         )
@@ -934,8 +1745,9 @@ class AppsListViewController: UIViewController,
         present(alert, animated: true)
     }
 
-    private func confirmDeleteApp(at indexPath: IndexPath) {
-        let app = apps[indexPath.item]
+    // MARK: - Delete JAR
+
+    private func confirmDeleteApp(for app: AppInfo) {
 
         let alert = UIAlertController(
             title: "Delete Game",
@@ -948,54 +1760,86 @@ class AppsListViewController: UIViewController,
         )
 
         alert.addAction(
-            UIAlertAction(title: "Delete", style: .destructive) { [weak self] _ in
+            UIAlertAction(
+                title: "Delete",
+                style: .destructive
+            ) { [weak self] _ in
 
                 guard let self else {
                     return
                 }
 
-                let gid = Self.gameId(for: app)
+                let id = Self.gameId(for: app)
+
+                let savePath =
+                    Self.documentsDirectory
+                    + "/Games Data/"
+                    + id
 
                 try? FileManager.default.removeItem(
-                    atPath: Self.documentsDirectory + "/Games Data/" + gid
+                    atPath: savePath
                 )
 
                 try? FileManager.default.removeItem(
                     atPath: app.path
                 )
 
-                self.springboardCollectionView.performBatchUpdates {
-                    self.apps.remove(at: indexPath.item)
-                    self.springboardCollectionView.deleteItems(at: [indexPath])
-                }
+                try? FileManager.default.removeItem(
+                    atPath: Self.customIconPath(for: id)
+                )
 
-                self.emptyStateLabel.isHidden = !self.apps.isEmpty
+                UserDefaults.standard.removeObject(
+                    forKey: Self.displayNameKey(id)
+                )
+
+                UserDefaults.standard.removeObject(
+                    forKey: Self.hiddenKey(id)
+                )
+
+                UserDefaults.standard.removeObject(
+                    forKey: "ss3d_\(id)"
+                )
+
+                UserDefaults.standard.removeObject(
+                    forKey: "resW_\(id)"
+                )
+
+                UserDefaults.standard.removeObject(
+                    forKey: "resH_\(id)"
+                )
+
+                UserDefaults.standard.removeObject(
+                    forKey: "fpsLimit_\(id)"
+                )
+
+                self.scanApps()
             }
         )
 
         present(alert, animated: true)
     }
 
-    // ============================================================
     // MARK: - Launch game
-    // ============================================================
 
     func collectionView(
         _ collectionView: UICollectionView,
         didSelectItemAt indexPath: IndexPath
     ) {
+
         let app = apps[indexPath.item]
 
-        let render3dScale = Self.is3DSupersampling(for: app) ? 3 : 1
-        let res = Self.resolution(for: app)
+        let render3dScale =
+            Self.is3DSupersampling(for: app) ? 3 : 1
+
+        let resolution = Self.resolution(for: app)
         let fps = Self.fpsLimit(for: app)
 
         let gameVC = GameViewController(
             jarPath: app.path,
             appName: app.name,
             appIcon: app.icon,
-            canvasWidth: res.w,
-            canvasHeight: res.h,
+            canvasWidth: resolution.w,
+            canvasHeight: resolution.h,
             render3dScale: render3dScale,
             fpsLimit: fps
         )
@@ -1005,11 +1849,17 @@ class AppsListViewController: UIViewController,
         let itemIndex = indexPath.item
 
         if #available(iOS 18.0, *) {
+
             let options = UIViewController.Transition.ZoomOptions()
-            options.interactiveDismissShouldBegin = { _ in false }
+
+            options.interactiveDismissShouldBegin = { _ in
+                false
+            }
 
             options.alignmentRectProvider = { context in
-                guard let gvc = context.zoomedViewController as? GameViewController,
+
+                guard let gvc = context.zoomedViewController
+                        as? GameViewController,
                       let placeholder = gvc.placeholderIconView else {
                     return .null
                 }
@@ -1022,7 +1872,10 @@ class AppsListViewController: UIViewController,
 
                 guard let self,
                       let cell = self.springboardCollectionView.cellForItem(
-                        at: IndexPath(item: itemIndex, section: 0)
+                        at: IndexPath(
+                            item: itemIndex,
+                            section: 0
+                        )
                       ) as? SpringboardCell else {
                     return nil
                 }
