@@ -6,14 +6,12 @@
 
 import UIKit
 
-/// Real software-keyboard responder.
 private final class J2MEKeyboardInputView: UIView, UIKeyInput {
 
     var onInsertText: ((String) -> Void)?
     var onDeleteBackward: (() -> Void)?
 
     override var canBecomeFirstResponder: Bool { true }
-
     var hasText: Bool { true }
 
     var keyboardType: UIKeyboardType = .default
@@ -85,8 +83,6 @@ final class GameViewController: UIViewController {
     private(set) var placeholderIconView: UIImageView?
 
     private var alertTimeoutWork: DispatchWorkItem?
-
-    // Startup diagnostic timer.
     private var startupWatchdog: DispatchWorkItem?
 
     init(
@@ -126,7 +122,6 @@ final class GameViewController: UIViewController {
         startupWatchdog?.cancel()
 
         NotificationCenter.default.removeObserver(self)
-
         setGlobalEmulatorView(nil)
     }
 
@@ -196,10 +191,6 @@ final class GameViewController: UIViewController {
         setGlobalEmulatorView(emulatorView)
 
         // Reset native rendering state before starting a new game.
-        // This also clears a previous game's FPS interval.
-        //
-        // j2me_render_cleanup() resets g_frame_interval_ticks to zero.
-        // Therefore zero FPS below genuinely means Unlimited.
         j2me_render_stop()
         j2me_render_cleanup()
 
@@ -349,15 +340,16 @@ final class GameViewController: UIViewController {
 
         let safe = view.safeAreaLayoutGuide
 
-        // Add 20 real points to the keyboard container.
-        // Required priority prevents Auto Layout from ignoring the height.
+        // The previous value was 20.
+        // Increase by another 30 points to bring the keypad up to the red line.
         keypadHeightConstraint =
             keypadView.heightAnchor.constraint(
                 equalTo: view.widthAnchor,
                 multiplier: 0.45,
-                constant: 20
+                constant: 50
             )
 
+        // Required priority ensures Auto Layout does not discard this height.
         keypadHeightConstraint.priority = .required
 
         keypadCollapsedConstraint =
