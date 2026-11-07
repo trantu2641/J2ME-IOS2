@@ -38,7 +38,6 @@ final class J2MEVirtualKeypadView: UIView {
         ]
     ]
 
-    // L / empty / R, then directional keys and FIRE.
     private let rightRows: [[KeySpec?]] = [
         [
             KeySpec(title: "L", codes: [-6]),
@@ -65,6 +64,7 @@ final class J2MEVirtualKeypadView: UIView {
     override init(frame: CGRect) {
         super.init(frame: frame)
         backgroundColor = .clear
+        isMultipleTouchEnabled = true
         buildLayout()
     }
 
@@ -144,7 +144,9 @@ private final class J2MEKeyButton: UIButton {
 
     private let codes: [Int32]
     var onKeyEvent: ((Int32, Int32) -> Void)?
+
     private var isPressed = false
+    private var repeatTimer: Timer?
 
     private let normalColor = UIColor(
         red: 0.89,
@@ -165,6 +167,9 @@ private final class J2MEKeyButton: UIButton {
         super.init(frame: .zero)
 
         setTitle(title, for: .normal)
+
+        isMultipleTouchEnabled = true
+        isExclusiveTouch = false
 
         setTitleColor(
             UIColor(red: 0.03, green: 0.08, blue: 0.45, alpha: 1),
@@ -188,6 +193,15 @@ private final class J2MEKeyButton: UIButton {
         fatalError("init(coder:) has not been implemented")
     }
 
+    deinit {
+        repeatTimer?.invalidate()
+    }
+
+    // Expand the touch area slightly without changing the visible button.
+    override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
+        return bounds.insetBy(dx: -3, dy: -3).contains(point)
+    }
+
     override func layoutSubviews() {
         super.layoutSubviews()
         layer.cornerRadius = min(bounds.height * 0.24, 18)
@@ -205,12 +219,49 @@ private final class J2MEKeyButton: UIButton {
                 code
             )
         }
+
+        startKeyRepeat()
+    }
+
+    private func startKeyRepeat() {
+        repeatTimer?.invalidate()
+
+        // Start repeating after the key has been held for 0.4 seconds.
+        repeatTimer = Timer.scheduledTimer(
+            withTimeInterval: 0.4,
+            repeats: false
+        ) { [weak self] _ in
+
+            guard let self, self.isPressed else {
+                return
+            }
+
+            self.repeatTimer = Timer.scheduledTimer(
+                withTimeInterval: 0.08,
+                repeats: true
+            ) { [weak self] _ in
+
+                guard let self, self.isPressed else {
+                    return
+                }
+
+                for code in self.codes {
+                    self.onKeyEvent?(
+                        Int32(J2ME_INPUT_KEY_REPEATED),
+                        code
+                    )
+                }
+            }
+        }
     }
 
     @objc private func keyUp() {
         guard isPressed else { return }
 
         isPressed = false
+        repeatTimer?.invalidate()
+        repeatTimer = nil
+
         backgroundColor = normalColor
 
         for code in codes {
