@@ -2,7 +2,7 @@
 // EmulatorView.swift
 // Optimized J2ME framebuffer rendering.
 // Direct CGImage -> CALayer rendering.
-// iOS 16.4+
+// Compatible with iOS 16.4+.
 //
 
 import UIKit
@@ -24,7 +24,7 @@ final class EmulatorView: UIView {
         }
     }
 
-    // MARK: - Direct Core Animation rendering
+    // MARK: - Rendering
 
     private let framebufferLayer = CALayer()
 
@@ -33,7 +33,7 @@ final class EmulatorView: UIView {
 
     private var hasDisplayedFirstFrame = false
 
-    // MARK: - Frame coalescing
+    // MARK: - Frame queue
 
     private let frameLock = NSLock()
 
@@ -65,18 +65,19 @@ final class EmulatorView: UIView {
         isMultipleTouchEnabled = true
         isUserInteractionEnabled = true
 
-        // Use a dedicated CALayer instead of UIImageView.
-        framebufferLayer.backgroundColor = UIColor.black.cgColor
+        framebufferLayer.backgroundColor =
+            UIColor.black.cgColor
 
-        framebufferLayer.contentsGravity = kCAGravityResizeAspect
+        // FIX: Swift-compatible CALayerContentsGravity.
+        framebufferLayer.contentsGravity = .resizeAspect
 
         framebufferLayer.magnificationFilter = .nearest
         framebufferLayer.minificationFilter = .nearest
 
-        framebufferLayer.contentsScale = UIScreen.main.scale
+        framebufferLayer.contentsScale =
+            UIScreen.main.scale
 
         framebufferLayer.isOpaque = true
-
         framebufferLayer.contents = nil
 
         layer.addSublayer(framebufferLayer)
@@ -148,14 +149,11 @@ final class EmulatorView: UIView {
 
     // MARK: - Framebuffer submission
 
-    /// Called from the native J2ME rendering thread.
-    ///
-    /// Only the newest pending frame is retained.
-    /// At most one main-queue delivery is scheduled at a time.
     func displayImage(_ cgImage: CGImage) {
 
         frameLock.lock()
 
+        // Keep only the newest frame.
         pendingFrame = cgImage
 
         let shouldSchedule = !frameDeliveryScheduled
@@ -171,15 +169,12 @@ final class EmulatorView: UIView {
         }
 
         DispatchQueue.main.async { [weak self] in
-
             self?.displayPendingFrame()
         }
     }
 
-    /// Must execute on the main thread.
-    ///
-    /// Directly commits CGImage to CALayer.
-    /// No UIImage allocation and no forced Auto Layout pass.
+    // MARK: - Display frame
+
     private func displayPendingFrame() {
 
         dispatchPrecondition(
@@ -199,25 +194,20 @@ final class EmulatorView: UIView {
             return
         }
 
-        // Update dimensions for correct touch mapping.
         framebufferPixelWidth = cgImage.width
         framebufferPixelHeight = cgImage.height
 
-        // Avoid implicit Core Animation animations.
         CATransaction.begin()
         CATransaction.setDisableActions(true)
 
-        // Direct native image assignment.
+        // Direct CGImage assignment.
+        // Avoid creating a UIImage for each frame.
         framebufferLayer.contents = cgImage
 
         CATransaction.commit()
 
-        // Do not call setNeedsLayout() or layoutIfNeeded()
-        // for every frame. The layer already fills the view.
-
         onFrame?(cgImage)
 
-        // First frame notification.
         if !hasDisplayedFirstFrame {
 
             hasDisplayedFirstFrame = true
@@ -280,7 +270,7 @@ final class EmulatorView: UIView {
         )
     }
 
-    // MARK: - Pointer input
+    // MARK: - Touch events
 
     override func touchesBegan(
         _ touches: Set<UITouch>,
