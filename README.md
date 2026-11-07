@@ -1,83 +1,63 @@
-<p align="center">
-    <img src="Assets/icon.png" width="170" />
-</p>
-<h1 align="center">JarBox</h1>
+J2ME iOS fixes (iOS 16.4+)
+==========================
 
-JarBox is a J2ME (Java ME) emulator for iOS that runs MIDP 2.0 / CLDC 1.1 games and applications on iPhone and iPad.
+This package contains two complete replacement source files and one verified
+patch for GameViewController.swift. It does NOT edit GitHub automatically.
 
-Built on top of [miniJVM](https://github.com/niclet/mini_jvm) (a lightweight JVM written in C) with the J2ME API layer ported from [J2ME-Loader](https://github.com/niclet/J2ME-Loader) (Android).
+FAST APPLY ON LINUX
+-------------------
+1) Extract this ZIP.
+2) Open a terminal in the extracted J2ME-iOS-fixes folder.
+3) Run the script with the path to your cloned repository:
 
-## AI-assisted development
+   ./apply.sh /path/to/J2ME-IOS2
 
-This project was almost entirely built using [Claude Code](https://claude.ai/claude-code) as an experiment in applying LLMs to non-trivial codebases. The emulator involves C, Objective-C, Swift, Java, and OpenGL — spanning ~180k+ lines across multiple languages — and the vast majority of the code, debugging, and integration work was done through conversational interaction with Claude.
+The script copies the two complete files and applies the keyboard patch. It
+checks the patch before applying it, so it stops rather than partially applying
+if the GameViewController file does not match the expected version.
 
-## Features
+Then review and push:
 
-- **MIDlet lifecycle** — load and run J2ME apps from JAR files
-- **2D rendering** — Canvas, Graphics, Image via Core Graphics (CGBitmapContext)
-- **Game API** — GameCanvas, Sprite, TiledLayer, LayerManager
-- **3D graphics** — MascotCapsule micro3D (OpenGL ES 2.0) and M3G JSR-184 (OpenGL ES 1.1)
-- **Audio** — WAV/MP3 (AVAudioPlayer), MIDI (AVMIDIPlayer + SoundFont), ToneControl
-- **Forms UI** — Form, List, Alert, TextBox rendered with native UIKit views
-- **RMS** — RecordStore persistence via file system
-- **Networking** — HTTP/HTTPS/Socket/UDP via miniJVM's built-in POSIX stack
-- **Input** — virtual joystick (8-way) + numpad, touch → pointer events
-- **OEM extensions** — Nokia, Siemens, Samsung, Motorola, Vodafone, KDDI, JBlend, SprintPCS, SonyEricsson
-- **Per-game settings** — screen resolution, FPS limit, 3D supersampling (via long-tap menu)
+   cd /path/to/J2ME-IOS2
+   git diff --stat
+   git add J2MEEmulator/UI/EmulatorView.swift \
+           J2MEEmulator/UI/GameViewController.swift \
+           j2me_api/src/javax/microedition/lcdui/Displayable.java
+   git commit -m "Fix J2ME keyboard and screen scaling"
+   git push origin main
 
-## Architecture
+WHAT IS FIXED
+-------------
+1) System keyboard Backspace
+   The hidden keyboard responder is changed to a real UITextField. An
+   invisible zero-width sentinel keeps Backspace enabled, deleteBackward()
+   sends MIDP Canvas.KEY_CLEAR (-8), and the sentinel is restored so repeated
+   Backspace works. Text is intercepted and sent as UTF-16 values to Java.
+   Key release is delayed by 50 ms so MIDlets polling on a separate game thread
+   do not miss a very short key pulse.
 
-```
-┌─────────────────────────────────────────┐
-│         iOS App (Swift / UIKit)         │
-│   App list, game screen, virtual keys   │
-├─────────────────────────────────────────┤
-│        Native Bridge (C / Obj-C)        │
-│  Rendering, audio, input, 3D (OpenGL)   │
-├─────────────────────────────────────────┤
-│       J2ME API (Java, j2me_api.jar)     │
-│  MIDP/CLDC classes ported from          │
-│  J2ME-Loader with iOS native calls      │
-├─────────────────────────────────────────┤
-│            miniJVM (C)                  │
-│  Bytecode interpreter, GC, threading    │
-└─────────────────────────────────────────┘
-```
+2) Resolution / DPI behavior
+   EmulatorView keeps its UIImageView constrained to the full game viewport
+   and uses uniform Aspect Fit. The whole framebuffer stays inside the screen,
+   with no crop or stretch. Touches in the black letterbox areas are ignored;
+   touches on the image are mapped back to the selected J2ME logical size.
 
-## Building
+   The key fix is Displayable's constructor. The native bridge already sets
+   j2me.screen.width and j2me.screen.height before starting the MIDlet, but
+   Displayable previously initialized every new screen to 240x320. Games such
+   as Avatar 258 read getWidth()/getHeight() inside the Canvas constructor and
+   cache those values before Display.setCurrent() changes them. The constructor
+   now reads the configured virtual resolution immediately, so a custom size
+   such as 500x600 is visible to the game from its first instruction.
 
-**Requirements:** macOS with Xcode 26+, JDK 17+ (for compiling Java sources)
+3) Other JAR compatibility
+   This package does not claim to make every JAR run. Different games can call
+   missing MIDP/vendor methods, rely on unsupported native implementations, or
+   use bytecode/runtime features that need separate handling. The two Avatar
+   JARs inspected have most referenced Java/J2ME classes available in the
+   bundled runtime/API, so their actual launch exception or NoSuchMethodError
+   is needed before changing more runtime code.
 
-1. Build the runtime JAR (one-time):
-   ```bash
-   cd miniJVM-2.0.0/binary && ./build_jar.sh
-   ```
-
-2. Build the J2ME API JAR:
-   ```bash
-   cd J2MEEmulator/j2me_api && ./build.sh
-   ```
-
-3. Open `J2MEEmulator/J2MEEmulator.xcodeproj` in Xcode, select a device or simulator, and run.
-
-## Adding games
-
-Place `.jar` files into the app's Documents directory (accessible via the Files app or Xcode device file transfer). The app scans for JARs on launch and displays them in a springboard-style grid.
-
-## Per-game configuration
-
-Long-press a game icon to access:
-- **Screen Resolution** — 16 presets from 101x80 to 480x800
-- **FPS Limit** — Unlimited, 15, 20, 30, 60 (default: 60)
-- **3D Enhancement** — supersampled MascotCapsule / M3G rendering (3x)
-- **Clear Game Data** / **Delete**
-
-## License
-
-[Apache License 2.0](LICENSE)
-
-## Acknowledgments
-
-- [J2ME-Loader](https://github.com/niclet/J2ME-Loader) — J2ME API implementation for Android
-- [miniJVM](https://github.com/niclet/mini_jvm) — lightweight cross-platform JVM in C
-- [gs_instruments.sf2](https://schristiancollins.com/generaluser.php) — General MIDI SoundFont for MIDI playback
+For a JAR that still fails, open its launch error and use Copy Log. Send the
+log from the first exception down through its Caused by lines, along with the
+JAR filename. That identifies the exact class or method to implement next.
