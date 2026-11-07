@@ -5,9 +5,9 @@ package javax.microedition.lcdui;
  * Uses offscreen CGBitmapContext via NativeBridge for double-buffered rendering.
  *
  * Rendering behavior:
- * - FPS is always unlimited (0).
- * - No FPS-based frame pacing or frame skipping.
- * - Repaint requests retain the existing event-loop behavior.
+ * - 0 means unlimited FPS.
+ * - Positive FPS options pace repaint() and flushBuffer() callers.
+ * - Pacing is applied to the game/render caller, not doPaint().
  * - Prevent recursive painting.
  */
 public abstract class Canvas extends Displayable {
@@ -69,19 +69,87 @@ public abstract class Canvas extends Displayable {
     private boolean painting = false;
 
     // ============================================================
-    // FPS compatibility API
+    // FPS limiter
     // ============================================================
 
+    private static final Object frameRateLock = new Object();
+    private static volatile int fpsLimit = 0;
+    private static long lastFrameTime = 0;
+    private static int remainderAccumulator = 0;
+
     /**
-     * FPS is intentionally unlimited for every MIDlet.
-     * This method remains for compatibility with MIDletRunner.
+     * Sets the frame limit for the active MIDlet.
+     * Zero means unlimited. Supported positive values are 15, 20, 30 and 45.
      */
     public static void setLimitFps(int fps) {
-        // Deliberately ignored. Never pace the game loop.
+
+        if (fps != 0 && fps != 15 && fps != 20 &&
+            fps != 30 && fps != 45) {
+            fps = 0;
+        }
+
+        synchronized (frameRateLock) {
+            fpsLimit = fps;
+            lastFrameTime = 0;
+            remainderAccumulator = 0;
+        }
+
+        System.out.println("[Canvas] FPS limit: " +
+            (fps == 0 ? "Unlimited" : fps + " FPS"));
     }
 
     public static int getLimitFps() {
-        return 0;
+        return fpsLimit;
+    }
+
+    /**
+     * Pace the thread that requests a frame.
+     * This is called by repaint() and flushBuffer(), not doPaint().
+     * Game updates performed on that same thread are paced too.
+     * FPS = 0 never sleeps.
+     */
+    private void limitFps() {
+
+        synchronized (frameRateLock) {
+
+            int targetFps = fpsLimit;
+
+            if (targetFps <= 0) {
+                lastFrameTime = 0;
+                remainderAccumulator = 0;
+                return;
+            }
+
+            // Distribute fractional milliseconds across frames:
+            // 45 FPS uses a repeating 22/23 ms interval instead of
+            // being rounded to a fixed 23 ms interval.
+            long frameIntervalMs = 1000L / targetFps;
+            int remainder = 1000 % targetFps;
+
+            if (lastFrameTime > 0) {
+
+                remainderAccumulator += remainder;
+
+                if (remainderAccumulator >= targetFps) {
+                    frameIntervalMs++;
+                    remainderAccumulator -= targetFps;
+                }
+
+                long now = System.currentTimeMillis();
+                long elapsed = now - lastFrameTime;
+                long remaining = frameIntervalMs - elapsed;
+
+                if (remaining > 0) {
+                    try {
+                        Thread.sleep(remaining);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                }
+            }
+
+            lastFrameTime = System.currentTimeMillis();
+        }
     }
 
     // ============================================================
@@ -191,6 +259,8 @@ public abstract class Canvas extends Displayable {
     public void repaint(int x, int y, int w, int h) {
 
         recordRepaint();
+
+        limitFps();
 
         synchronized (repaintLock) {
 
@@ -303,6 +373,8 @@ public abstract class Canvas extends Displayable {
 
         try {
 
+            limitFps();
+
             synchronized (paintLock) {
 
                 startTime = System.currentTimeMillis();
@@ -348,6 +420,8 @@ public abstract class Canvas extends Displayable {
         long startTime = 0;
 
         try {
+
+            limitFps();
 
             synchronized (paintLock) {
 
