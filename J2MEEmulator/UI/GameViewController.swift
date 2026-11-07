@@ -101,9 +101,9 @@ final class GameViewController: UIViewController {
         self.canvasHeight = min(max(1, canvasHeight), 4096)
         self.render3dScale = max(1, render3dScale)
 
-        // This build always runs with unlimited FPS.
-        // Keep the parameter for compatibility with existing callers.
-        self.fpsLimit = 0
+        // Preserve the per-game FPS option selected in AppsListViewController.
+        let supportedFPS = [0, 15, 20, 30, 45]
+        self.fpsLimit = supportedFPS.contains(fpsLimit) ? fpsLimit : 0
 
         super.init(nibName: nil, bundle: nil)
 
@@ -191,8 +191,8 @@ final class GameViewController: UIViewController {
         j2me_render_stop()
         j2me_render_cleanup()
 
-        // FPS = 0 means unlimited.
-        // Set this after cleanup because cleanup resets render timing.
+        // Java Canvas controls the game/render caller's FPS.
+        // Keep native export unlimited to avoid applying the limit twice.
         j2me_render_set_fps_limit(0)
 
         // The ready callback prevents native code from creating
@@ -776,7 +776,12 @@ final class GameViewController: UIViewController {
         print("[JVM] MIDlet JAR: \(jarPath)")
         print("[JVM] Virtual resolution: \(canvasWidth)x\(canvasHeight)")
         print("[JVM] Diagnostic log: \(lastJVMLogPath)")
-        print("[JVM] FPS limit: Unlimited")
+
+        let fpsDescription = fpsLimit == 0
+            ? "Unlimited"
+            : "\(fpsLimit) FPS"
+
+        print("[JVM] FPS limit: \(fpsDescription)")
 
         let initResult = jvm_bridge_init(
             resourceRoot,
@@ -785,7 +790,7 @@ final class GameViewController: UIViewController {
             Int32(canvasWidth),
             Int32(canvasHeight),
             Int32(render3dScale),
-            0
+            Int32(fpsLimit)
         )
 
         guard initResult == 0 else {
