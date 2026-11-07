@@ -1,16 +1,14 @@
-
 package javax.microedition.lcdui;
 
 /**
  * J2ME Canvas — the main class for custom rendering in MIDlets.
  * Uses offscreen CGBitmapContext via NativeBridge for double-buffered rendering.
  *
- * Rendering optimizations:
- * - Coalesce repeated repaint requests.
- * - Apply FPS limiting to actual rendering, not repaint requests.
- * - Apply the same frame limiter to serviceRepaints and flushBuffer.
+ * Rendering behavior:
+ * - FPS is always unlimited (0).
+ * - No FPS-based frame pacing or frame skipping.
+ * - Repaint requests retain the existing event-loop behavior.
  * - Prevent recursive painting.
- * - Keep a maximum of 60 screen updates per second when FPS is unlimited.
  */
 public abstract class Canvas extends Displayable {
 
@@ -71,100 +69,19 @@ public abstract class Canvas extends Displayable {
     private boolean painting = false;
 
     // ============================================================
-    // FPS limiter
+    // FPS compatibility API
     // ============================================================
 
-    private static final int MAX_DISPLAY_FPS = 60;
-
-    private static final Object frameRateLock = new Object();
-
-    // 0 means automatic display refresh limit.
-    private static volatile int fpsLimit = 0;
-
-    private static long lastFrameTime = 0;
-
+    /**
+     * FPS is intentionally unlimited for every MIDlet.
+     * This method remains for compatibility with MIDletRunner.
+     */
     public static void setLimitFps(int fps) {
-
-        synchronized (frameRateLock) {
-
-            if (fps < 0) {
-                fps = 0;
-            }
-
-            if (fps > MAX_DISPLAY_FPS) {
-                fps = MAX_DISPLAY_FPS;
-            }
-
-            fpsLimit = fps;
-
-            // Reset frame timing after changing the setting.
-            lastFrameTime = 0;
-        }
+        // Deliberately ignored. Never pace the game loop.
     }
 
     public static int getLimitFps() {
-        return fpsLimit;
-    }
-
-    /**
-     * Limit actual screen rendering.
-     *
-     * This method must only be called when a frame is going to be rendered.
-     * repaint() itself must never sleep because it can be called hundreds
-     * of times per second by a game animation thread.
-     *
-     * FPS = 0 means automatic maximum display refresh (60 FPS).
-     */
-    private void limitFps() {
-
-        synchronized (frameRateLock) {
-
-            int configuredFps = fpsLimit;
-
-            int targetFps;
-
-            if (configuredFps <= 0) {
-                targetFps = MAX_DISPLAY_FPS;
-            } else {
-                targetFps = Math.min(
-                    configuredFps,
-                    MAX_DISPLAY_FPS
-                );
-            }
-
-            if (targetFps <= 0) {
-                return;
-            }
-
-            // Round up to avoid exceeding the selected frame rate.
-            long frameIntervalMs =
-                (1000L + targetFps - 1L) / targetFps;
-
-            long now = System.currentTimeMillis();
-
-            if (lastFrameTime > 0) {
-
-                long elapsed = now - lastFrameTime;
-
-                long remaining = frameIntervalMs - elapsed;
-
-                if (remaining > 0) {
-
-                    try {
-
-                        Thread.sleep(remaining);
-
-                    } catch (InterruptedException e) {
-
-                        Thread.currentThread().interrupt();
-                    }
-                }
-            }
-
-            // Use the actual completion time to avoid accumulating
-            // timing errors or producing catch-up frame bursts.
-            lastFrameTime = System.currentTimeMillis();
-        }
+        return 0;
     }
 
     // ============================================================
@@ -208,7 +125,7 @@ public abstract class Canvas extends Displayable {
 
     /**
      * Called by Display every five seconds.
-     * Reports approximate render activity without changing frame timing.
+     * Reports render activity without changing frame timing.
      */
     public static synchronized void printPerformanceStats() {
 
@@ -275,8 +192,6 @@ public abstract class Canvas extends Displayable {
 
         recordRepaint();
 
-        // Do not sleep here.
-        // Multiple requests are combined into one pending repaint.
         synchronized (repaintLock) {
 
             if (!repaintPending) {
@@ -326,9 +241,8 @@ public abstract class Canvas extends Displayable {
     }
 
     /**
-     * Process pending repaint immediately, subject to the common FPS limit.
-     *
-     * Repeated serviceRepaints() calls cannot bypass the frame limiter.
+     * Process pending repaint immediately.
+     * No FPS limiter or sleep is applied here.
      */
     public void serviceRepaints() {
 
@@ -391,9 +305,6 @@ public abstract class Canvas extends Displayable {
 
             synchronized (paintLock) {
 
-                // Share the same limiter with Canvas.doPaint().
-                limitFps();
-
                 startTime = System.currentTimeMillis();
 
                 if (nativeContext == 0) {
@@ -439,9 +350,6 @@ public abstract class Canvas extends Displayable {
         try {
 
             synchronized (paintLock) {
-
-                // Share the same limiter with Canvas.doPaint().
-                limitFps();
 
                 startTime = System.currentTimeMillis();
 
@@ -500,10 +408,6 @@ public abstract class Canvas extends Displayable {
 
             try {
 
-                // Wait before consuming the pending repaint.
-                // Requests arriving during this wait are coalesced.
-                limitFps();
-
                 int paintX;
                 int paintY;
                 int paintW;
@@ -511,7 +415,6 @@ public abstract class Canvas extends Displayable {
 
                 synchronized (repaintLock) {
 
-                    // Another rendering call may have consumed it.
                     if (!repaintPending) {
                         return;
                     }
@@ -521,7 +424,6 @@ public abstract class Canvas extends Displayable {
                     paintW = clipW;
                     paintH = clipH;
 
-                    // Use a full repaint if the clip is not initialized.
                     if (paintW <= 0 || paintH <= 0) {
 
                         paintX = 0;
@@ -532,11 +434,8 @@ public abstract class Canvas extends Displayable {
                         fullRepaint = true;
                     }
 
-                    // Consume this batch of repaint requests.
-                    // New requests arriving during paint() will set it again.
                     repaintPending = false;
 
-                    // Prepare a default full clip for the next repaint.
                     clipX = 0;
                     clipY = 0;
                     clipW = width;
