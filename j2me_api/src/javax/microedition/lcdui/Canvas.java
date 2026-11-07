@@ -1,8 +1,16 @@
+
 package javax.microedition.lcdui;
 
 /**
  * J2ME Canvas — the main class for custom rendering in MIDlets.
  * Uses offscreen CGBitmapContext via NativeBridge for double-buffered rendering.
+ *
+ * Rendering optimizations:
+ * - Coalesce repeated repaint requests.
+ * - Apply FPS limiting to actual rendering, not repaint requests.
+ * - Apply the same frame limiter to serviceRepaints and flushBuffer.
+ * - Prevent recursive painting.
+ * - Keep a maximum of 60 screen updates per second when FPS is unlimited.
  */
 public abstract class Canvas extends Displayable {
 
@@ -58,10 +66,106 @@ public abstract class Canvas extends Displayable {
     private boolean fullRepaint = true;
 
     private final Object paintLock = new Object();
+    private final Object repaintLock = new Object();
 
-    // Existing FPS limiter. It remains disabled unless explicitly configured.
-    private static int fpsLimit;
-    private long lastFrameTime = System.currentTimeMillis();
+    private boolean painting = false;
+
+    // ============================================================
+    // FPS limiter
+    // ============================================================
+
+    private static final int MAX_DISPLAY_FPS = 60;
+
+    private static final Object frameRateLock = new Object();
+
+    // 0 means automatic display refresh limit.
+    private static volatile int fpsLimit = 0;
+
+    private static long lastFrameTime = 0;
+
+    public static void setLimitFps(int fps) {
+
+        synchronized (frameRateLock) {
+
+            if (fps < 0) {
+                fps = 0;
+            }
+
+            if (fps > MAX_DISPLAY_FPS) {
+                fps = MAX_DISPLAY_FPS;
+            }
+
+            fpsLimit = fps;
+
+            // Reset frame timing after changing the setting.
+            lastFrameTime = 0;
+        }
+    }
+
+    public static int getLimitFps() {
+        return fpsLimit;
+    }
+
+    /**
+     * Limit actual screen rendering.
+     *
+     * This method must only be called when a frame is going to be rendered.
+     * repaint() itself must never sleep because it can be called hundreds
+     * of times per second by a game animation thread.
+     *
+     * FPS = 0 means automatic maximum display refresh (60 FPS).
+     */
+    private void limitFps() {
+
+        synchronized (frameRateLock) {
+
+            int configuredFps = fpsLimit;
+
+            int targetFps;
+
+            if (configuredFps <= 0) {
+                targetFps = MAX_DISPLAY_FPS;
+            } else {
+                targetFps = Math.min(
+                    configuredFps,
+                    MAX_DISPLAY_FPS
+                );
+            }
+
+            if (targetFps <= 0) {
+                return;
+            }
+
+            // Round up to avoid exceeding the selected frame rate.
+            long frameIntervalMs =
+                (1000L + targetFps - 1L) / targetFps;
+
+            long now = System.currentTimeMillis();
+
+            if (lastFrameTime > 0) {
+
+                long elapsed = now - lastFrameTime;
+
+                long remaining = frameIntervalMs - elapsed;
+
+                if (remaining > 0) {
+
+                    try {
+
+                        Thread.sleep(remaining);
+
+                    } catch (InterruptedException e) {
+
+                        Thread.currentThread().interrupt();
+                    }
+                }
+            }
+
+            // Use the actual completion time to avoid accumulating
+            // timing errors or producing catch-up frame bursts.
+            lastFrameTime = System.currentTimeMillis();
+        }
+    }
 
     // ============================================================
     // Performance counters
@@ -77,37 +181,6 @@ public abstract class Canvas extends Displayable {
     private static long perfFlushMaxMs = 0;
 
     private static long perfWindowStart = System.currentTimeMillis();
-
-    public static void setLimitFps(int fps) {
-        Canvas.fpsLimit = fps;
-    }
-
-    public static int getLimitFps() {
-        return fpsLimit;
-    }
-
-    private void limitFps() {
-
-        if (fpsLimit <= 0) {
-            return;
-        }
-
-        try {
-
-            long millis =
-                (1000 / fpsLimit)
-                - (System.currentTimeMillis() - lastFrameTime);
-
-            if (millis > 0) {
-                Thread.sleep(millis);
-            }
-
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
-
-        lastFrameTime = System.currentTimeMillis();
-    }
 
     private static synchronized void recordRepaint() {
         perfRepaintCount++;
@@ -202,54 +275,63 @@ public abstract class Canvas extends Displayable {
 
         recordRepaint();
 
-        limitFps();
+        // Do not sleep here.
+        // Multiple requests are combined into one pending repaint.
+        synchronized (repaintLock) {
 
-        if (!repaintPending) {
+            if (!repaintPending) {
 
-            clipX = x;
-            clipY = y;
-            clipW = w;
-            clipH = h;
+                clipX = x;
+                clipY = y;
+                clipW = w;
+                clipH = h;
 
-            fullRepaint = (
-                x == 0
-                && y == 0
-                && w >= width
-                && h >= height
-            );
+                fullRepaint = (
+                    x == 0
+                    && y == 0
+                    && w >= width
+                    && h >= height
+                );
 
-        } else {
+            } else {
 
-            int newRight = Math.max(
-                clipX + clipW,
-                x + w
-            );
+                int newRight = Math.max(
+                    clipX + clipW,
+                    x + w
+                );
 
-            int newBottom = Math.max(
-                clipY + clipH,
-                y + h
-            );
+                int newBottom = Math.max(
+                    clipY + clipH,
+                    y + h
+                );
 
-            clipX = Math.min(clipX, x);
-            clipY = Math.min(clipY, y);
+                clipX = Math.min(clipX, x);
+                clipY = Math.min(clipY, y);
 
-            clipW = newRight - clipX;
-            clipH = newBottom - clipY;
+                clipW = newRight - clipX;
+                clipH = newBottom - clipY;
 
-            if (
-                clipX <= 0
-                && clipY <= 0
-                && clipW >= width
-                && clipH >= height
-            ) {
-                fullRepaint = true;
+                if (
+                    clipX <= 0
+                    && clipY <= 0
+                    && clipW >= width
+                    && clipH >= height
+                ) {
+                    fullRepaint = true;
+                }
             }
-        }
 
-        repaintPending = true;
+            repaintPending = true;
+        }
     }
 
+    /**
+     * Process pending repaint immediately, subject to the common FPS limit.
+     *
+     * Repeated serviceRepaints() calls cannot bypass the frame limiter.
+     */
     public void serviceRepaints() {
+
         if (repaintPending) {
             doPaint();
         }
@@ -303,13 +385,16 @@ public abstract class Canvas extends Displayable {
             return;
         }
 
-        long startTime = System.currentTimeMillis();
+        long startTime = 0;
 
         try {
 
-            limitFps();
-
             synchronized (paintLock) {
+
+                // Share the same limiter with Canvas.doPaint().
+                limitFps();
+
+                startTime = System.currentTimeMillis();
 
                 if (nativeContext == 0) {
                     initContext();
@@ -334,9 +419,11 @@ public abstract class Canvas extends Displayable {
 
         } finally {
 
-            recordFlush(
-                System.currentTimeMillis() - startTime
-            );
+            if (startTime > 0) {
+                recordFlush(
+                    System.currentTimeMillis() - startTime
+                );
+            }
         }
     }
 
@@ -347,13 +434,16 @@ public abstract class Canvas extends Displayable {
         int y
     ) {
 
-        long startTime = System.currentTimeMillis();
+        long startTime = 0;
 
         try {
 
-            limitFps();
-
             synchronized (paintLock) {
+
+                // Share the same limiter with Canvas.doPaint().
+                limitFps();
+
+                startTime = System.currentTimeMillis();
 
                 if (nativeContext == 0) {
                     initContext();
@@ -378,9 +468,11 @@ public abstract class Canvas extends Displayable {
 
         } finally {
 
-            recordFlush(
-                System.currentTimeMillis() - startTime
-            );
+            if (startTime > 0) {
+                recordFlush(
+                    System.currentTimeMillis() - startTime
+                );
+            }
         }
     }
 
@@ -390,42 +482,97 @@ public abstract class Canvas extends Displayable {
 
     public void doPaint() {
 
-        long startTime = System.currentTimeMillis();
+        long startTime = 0;
 
-        try {
+        synchronized (paintLock) {
 
-            synchronized (paintLock) {
+            // Avoid nested paint calls.
+            if (painting) {
+                return;
+            }
+
+            // No pending work means there is no reason to render.
+            if (!repaintPending) {
+                return;
+            }
+
+            painting = true;
+
+            try {
+
+                // Wait before consuming the pending repaint.
+                // Requests arriving during this wait are coalesced.
+                limitFps();
+
+                int paintX;
+                int paintY;
+                int paintW;
+                int paintH;
+
+                synchronized (repaintLock) {
+
+                    // Another rendering call may have consumed it.
+                    if (!repaintPending) {
+                        return;
+                    }
+
+                    paintX = clipX;
+                    paintY = clipY;
+                    paintW = clipW;
+                    paintH = clipH;
+
+                    // Use a full repaint if the clip is not initialized.
+                    if (paintW <= 0 || paintH <= 0) {
+
+                        paintX = 0;
+                        paintY = 0;
+                        paintW = width;
+                        paintH = height;
+
+                        fullRepaint = true;
+                    }
+
+                    // Consume this batch of repaint requests.
+                    // New requests arriving during paint() will set it again.
+                    repaintPending = false;
+
+                    // Prepare a default full clip for the next repaint.
+                    clipX = 0;
+                    clipY = 0;
+                    clipW = width;
+                    clipH = height;
+
+                    fullRepaint = true;
+                }
+
+                startTime = System.currentTimeMillis();
 
                 if (nativeContext == 0) {
                     initContext();
                 }
 
-                repaintPending = false;
-
                 graphics.reset(
-                    clipX,
-                    clipY,
-                    clipW,
-                    clipH
+                    paintX,
+                    paintY,
+                    paintW,
+                    paintH
                 );
 
                 paint(graphics);
 
                 NativeBridge.flushToScreen(nativeContext);
 
-                fullRepaint = true;
+            } finally {
 
-                clipX = 0;
-                clipY = 0;
-                clipW = width;
-                clipH = height;
+                painting = false;
+
+                if (startTime > 0) {
+
+                    recordPaint(
+                        System.currentTimeMillis() - startTime
+                    );
+                }
             }
-
-        } finally {
-
-            recordPaint(
-                System.currentTimeMillis() - startTime
-            );
         }
     }
 
@@ -444,6 +591,20 @@ public abstract class Canvas extends Displayable {
                 nativeContext = 0;
                 graphics = null;
             }
+
+            painting = false;
+        }
+
+        synchronized (repaintLock) {
+
+            repaintPending = false;
+
+            clipX = 0;
+            clipY = 0;
+            clipW = width;
+            clipH = height;
+
+            fullRepaint = true;
         }
     }
 
