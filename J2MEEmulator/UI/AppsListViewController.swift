@@ -29,7 +29,6 @@ class AppsListViewController: UIViewController,
         super.viewDidLoad()
         view.backgroundColor = .black
 
-        // Animated blob background
         let bg = AnimatedBackgroundView()
         bg.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(bg)
@@ -41,7 +40,6 @@ class AppsListViewController: UIViewController,
             bg.bottomAnchor.constraint(equalTo: view.bottomAnchor),
         ])
 
-        // "+" button — import JAR from Files
         navigationItem.rightBarButtonItem = UIBarButtonItem(
             systemItem: .add,
             primaryAction: UIAction { [weak self] _ in
@@ -82,7 +80,6 @@ class AppsListViewController: UIViewController,
             springboardCollectionView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
         ])
 
-        // Empty state
         emptyStateLabel.text = "No Games Yet\nTap + to add a .jar file"
         emptyStateLabel.textColor = .secondaryLabel
         emptyStateLabel.font = .systemFont(ofSize: 17)
@@ -105,7 +102,6 @@ class AppsListViewController: UIViewController,
             ),
         ])
 
-        // Ensure games directory exists
         try? FileManager.default.createDirectory(
             atPath: Self.gamesDirectory,
             withIntermediateDirectories: true
@@ -175,9 +171,6 @@ class AppsListViewController: UIViewController,
     // ============================================================
 
     private func addAppTapped() {
-        // JAR is a ZIP-based Java archive and is not consistently registered
-        // as a system UTType by every Files provider. Use .data and validate
-        // the extension after selection.
         let picker = UIDocumentPickerViewController(
             forOpeningContentTypes: [.data],
             asCopy: true
@@ -219,7 +212,6 @@ class AppsListViewController: UIViewController,
         for sourceURL in urls {
             let fileName = sourceURL.lastPathComponent
 
-            // Accept both .jar and .JAR.
             guard sourceURL.pathExtension.lowercased() == "jar" else {
                 failures.append("\(fileName): not a .jar file")
                 continue
@@ -240,8 +232,6 @@ class AppsListViewController: UIViewController,
             )
 
             do {
-                // Copy to a temporary file first.
-                // Existing game is preserved if the new copy fails.
                 try fm.copyItem(
                     at: sourceURL,
                     to: temporaryURL
@@ -327,7 +317,7 @@ class AppsListViewController: UIViewController,
     }
 
     // ============================================================
-    // MARK: - App scanning (Documents/games/)
+    // MARK: - App scanning
     // ============================================================
 
     struct AppInfo {
@@ -366,7 +356,7 @@ class AppsListViewController: UIViewController,
                 }
             }
 
-            var unsorted = jarPaths.map {
+            let unsorted = jarPaths.map {
                 jar -> (String, String, String, String?, String?, UIImage?) in
 
                 let meta = JARMetadata.read(from: jar.path)
@@ -383,9 +373,7 @@ class AppsListViewController: UIViewController,
                     meta?.vendor,
                     jarIcon
                 )
-            }
-
-            unsorted.sort {
+            }.sorted {
                 $0.0.localizedCaseInsensitiveCompare($1.0)
                     == .orderedAscending
             }
@@ -584,8 +572,8 @@ class AppsListViewController: UIViewController,
                     ? "Disable 3D Enhancement"
                     : "Enable 3D Enhancement",
                 subtitle: ssEnabled
-                    ? "Lower quality, but closer to original"
-                    : "Smoother 3D, but not original-accurate",
+                    ? "Lower GPU load and heat"
+                    : "Higher 3D quality, but more GPU load",
                 image: UIImage(systemName: "cube"),
                 state: ssEnabled ? .on : .off
             ) { _ in
@@ -649,16 +637,18 @@ class AppsListViewController: UIViewController,
                 }
             }
 
+            // FPS menu is moved out of the nested settings menu.
+            // This avoids the deeper nested context-menu path that can crash
+            // while opening FPS Limit on some iOS 16 builds.
             let fpsMenu = UIMenu(
                 title: "FPS Limit",
-                subtitle: "High FPS may break some games",
-                image: UIImage(systemName: "gauge.with.needle"),
+                image: UIImage(systemName: "speedometer"),
                 children: fpsActions
             )
 
             let settings = UIMenu(
                 options: .displayInline,
-                children: [toggle3D, resMenu, fpsMenu]
+                children: [toggle3D, resMenu]
             )
 
             let actions = UIMenu(
@@ -666,7 +656,9 @@ class AppsListViewController: UIViewController,
                 children: [clearData, delete]
             )
 
-            return UIMenu(children: [settings, actions])
+            return UIMenu(
+                children: [settings, fpsMenu, actions]
+            )
         })
     }
 
@@ -689,7 +681,7 @@ class AppsListViewController: UIViewController,
     static func is3DSupersampling(for app: AppInfo) -> Bool {
         UserDefaults.standard.object(
             forKey: "ss3d_\(gameId(for: app))"
-        ) as? Bool ?? true
+        ) as? Bool ?? false
     }
 
     static func set3DSupersampling(_ enabled: Bool, for app: AppInfo) {
@@ -744,25 +736,40 @@ class AppsListViewController: UIViewController,
     }
 
     private static let fpsLimitOptions: [(label: String, value: Int)] = [
-        ("Unlimited", 0),
         ("15 FPS", 15),
         ("20 FPS", 20),
         ("30 FPS", 30),
-        ("60 FPS", 60)
+        ("45 FPS", 45)
     ]
 
     static func fpsLimit(for app: AppInfo) -> Int {
-        UserDefaults.standard.object(
-            forKey: "fpsLimit_\(gameId(for: app))"
-        ) as? Int ?? 60
+        let key = "fpsLimit_\(gameId(for: app))"
+
+        guard let saved = UserDefaults.standard.object(
+            forKey: key
+        ) as? Int else {
+            return 45
+        }
+
+        // Migrate old Unlimited, 0 FPS and 60 FPS settings to 45 FPS.
+        switch saved {
+        case 15, 20, 30, 45:
+            return saved
+        default:
+            return 45
+        }
     }
 
     private static func setFpsLimit(
         _ fps: Int,
         for app: AppInfo
     ) {
+        let safeFPS = fpsLimitOptions.contains {
+            $0.value == fps
+        } ? fps : 45
+
         UserDefaults.standard.set(
-            fps,
+            safeFPS,
             forKey: "fpsLimit_\(gameId(for: app))"
         )
     }
@@ -936,8 +943,6 @@ class AppsListViewController: UIViewController,
 
         let itemIndex = indexPath.item
 
-        // Zoom transition is available on iOS 18 and later only.
-        // iOS 16.4 and iOS 17 use standard full-screen presentation.
         if #available(iOS 18.0, *) {
             let options = UIViewController.Transition.ZoomOptions()
             options.interactiveDismissShouldBegin = { _ in false }
