@@ -38,9 +38,28 @@ static int g_log_redirected = 0;
 
 int g_render_3d_scale = 1;
 
+// Main iOS UI thread, registered from EmulatorView while on main.
+static pthread_t g_ios_main_pthread;
+static int g_ios_main_pthread_valid = 0;
+
 // Main MIDlet worker thread.
 static pthread_t g_midlet_runner_pthread;
 static int g_midlet_runner_pthread_valid = 0;
+
+// Called by Swift from UIView setup on the iOS main thread.
+void jvm_bridge_register_main_thread(void) {
+
+    if (!pthread_main_np()) {
+        fprintf(
+            stderr,
+            "[CPU Profiler] Main-thread registration called off main thread\n"
+        );
+        return;
+    }
+
+    g_ios_main_pthread = pthread_self();
+    g_ios_main_pthread_valid = 1;
+}
 
 
 // ============================================================
@@ -72,6 +91,7 @@ typedef struct CPUThreadSample {
     int vm_status;
     int vm_blocking;
     int vm_matched;
+    int is_ios_main_thread;
 
     char java_stack[CPU_PROFILE_TEXT];
 
@@ -774,6 +794,13 @@ static void *cpu_profiler_main(void *argument) {
 
             if (native_thread != NULL) {
 
+                top[i].is_ios_main_thread =
+                    g_ios_main_pthread_valid &&
+                    pthread_equal(
+                        native_thread,
+                        g_ios_main_pthread
+                    );
+
                 if (
                     pthread_getname_np(
                         native_thread,
@@ -787,6 +814,14 @@ static void *cpu_profiler_main(void *argument) {
                         top[i].native_name,
                         sizeof(top[i].native_name),
                         "unnamed"
+                    );
+                }
+
+                if (top[i].is_ios_main_thread) {
+                    snprintf(
+                        top[i].vm_role,
+                        sizeof(top[i].vm_role),
+                        "ios-main"
                     );
                 }
 
@@ -825,11 +860,12 @@ static void *cpu_profiler_main(void *argument) {
             }
 
             printf(
-                "[CPU Thread] mach=%u cpu=%.1f%% name=%s vm=%s status=%d blocking=%d\n",
+                "[CPU Thread] mach=%u cpu=%.1f%% name=%s vm=%s main=%d status=%d blocking=%d\n",
                 (unsigned int)top[i].thread_port,
                 top[i].cpu_percent,
                 top[i].native_name,
                 top[i].vm_role,
+                top[i].is_ios_main_thread,
                 top[i].vm_status,
                 top[i].vm_blocking
             );
@@ -1160,6 +1196,11 @@ int jvm_bridge_init(
     pthread_setname_np("J2ME-MIDlet");
 
     start_runtime_log(save_root);
+
+    printf(
+        "[JVM Bridge] iOS main thread registered: %s\n",
+        g_ios_main_pthread_valid ? "yes" : "no"
+    );
 
     char bootclasspath[1024];
 
