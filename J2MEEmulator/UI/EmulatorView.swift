@@ -51,6 +51,20 @@ final class EmulatorView: UIView {
     private let frameLock = NSLock()
     private var pendingFrame: CGImage?
 
+    // Frame timing counters are protected independently from frameLock.
+    private let metricsLock = NSLock()
+    private var metricsWindowStart = CACurrentMediaTime()
+    private var metricsDisplayTicks = 0
+    private var metricsFramesReceived = 0
+    private var metricsFramesDisplayed = 0
+    private var metricsFramesReplaced = 0
+    private var metricsLayerTotalMs = 0.0
+    private var metricsLayerMaxMs = 0.0
+    private var metricsCallbackTotalMs = 0.0
+    private var metricsCallbackMaxMs = 0.0
+    private var metricsTickTotalMs = 0.0
+    private var metricsTickMaxMs = 0.0
+
     private var displayLink: CADisplayLink?
     private var displayLinkTarget: EmulatorDisplayLinkTarget?
 
@@ -74,6 +88,16 @@ final class EmulatorView: UIView {
     }
 
     private func setup() {
+
+        // Register the real iOS main pthread so the native CPU profiler
+        // can distinguish UIKit's main thread from MiniJVM workers.
+        if Thread.isMainThread {
+            jvm_bridge_register_main_thread()
+        } else {
+            DispatchQueue.main.async {
+                jvm_bridge_register_main_thread()
+            }
+        }
 
         backgroundColor = .black
 
@@ -133,11 +157,10 @@ final class EmulatorView: UIView {
             selector: #selector(EmulatorDisplayLinkTarget.tick(_:))
         )
 
-        frameLock.lock()
-        let hasPendingFrame = pendingFrame != nil
-        frameLock.unlock()
-
-        link.isPaused = !hasPendingFrame
+        // Keep one display-link callback per display refresh.
+        // Frame submission only fills the pending slot and never dispatches
+        // an additional main-queue block for every frame.
+        link.isPaused = false
 
         displayLinkTarget = target
         displayLink = link
@@ -244,26 +267,102 @@ final class EmulatorView: UIView {
 
         frameLock.lock()
 
-        let wasEmpty = pendingFrame == nil
+        let replacedPendingFrame = pendingFrame != nil
 
         // Keep the newest frame if another frame arrives.
         pendingFrame = cgImage
 
         frameLock.unlock()
 
-        guard wasEmpty else {
-            return
+        metricsLock.lock()
+        metricsFramesReceived += 1
+
+        if replacedPendingFrame {
+            metricsFramesReplaced += 1
         }
 
-        // Wake the display link only when a frame is waiting.
-        DispatchQueue.main.async { [weak self] in
+        metricsLock.unlock()
+    }
 
-            guard let self,
-                  let link = self.displayLink else {
-                return
-            }
+    // MARK: - Frame performance metrics
 
-            link.isPaused = false
+    private func recordDisplayMetrics(
+        frameDisplayed: Bool,
+        layerMs: Double,
+        callbackMs: Double,
+        tickMs: Double
+    ) {
+
+        let now = CACurrentMediaTime()
+        var logLine: String?
+
+        metricsLock.lock()
+
+        metricsDisplayTicks += 1
+
+        if frameDisplayed {
+            metricsFramesDisplayed += 1
+
+            metricsLayerTotalMs += layerMs
+            metricsLayerMaxMs = max(metricsLayerMaxMs, layerMs)
+
+            metricsCallbackTotalMs += callbackMs
+            metricsCallbackMaxMs = max(metricsCallbackMaxMs, callbackMs)
+
+            metricsTickTotalMs += tickMs
+            metricsTickMaxMs = max(metricsTickMaxMs, tickMs)
+        }
+
+        let elapsed = now - metricsWindowStart
+
+        if elapsed >= 5.0 {
+
+            let ticksPerSecond =
+                Double(metricsDisplayTicks) / elapsed
+
+            let receivedPerSecond =
+                Double(metricsFramesReceived) / elapsed
+
+            let displayedPerSecond =
+                Double(metricsFramesDisplayed) / elapsed
+
+            let replacedPerSecond =
+                Double(metricsFramesReplaced) / elapsed
+
+            let frameCount = max(1, metricsFramesDisplayed)
+
+            logLine = String(
+                format:
+                    "[UI Frame Perf] displayLink/s=%.1f received/s=%.1f displayed/s=%.1f replaced/s=%.1f avgLayerMs=%.3f maxLayerMs=%.3f avgCallbackMs=%.3f maxCallbackMs=%.3f avgTickMs=%.3f maxTickMs=%.3f",
+                ticksPerSecond,
+                receivedPerSecond,
+                displayedPerSecond,
+                replacedPerSecond,
+                metricsLayerTotalMs / Double(frameCount),
+                metricsLayerMaxMs,
+                metricsCallbackTotalMs / Double(frameCount),
+                metricsCallbackMaxMs,
+                metricsTickTotalMs / Double(frameCount),
+                metricsTickMaxMs
+            )
+
+            metricsWindowStart = now
+            metricsDisplayTicks = 0
+            metricsFramesReceived = 0
+            metricsFramesDisplayed = 0
+            metricsFramesReplaced = 0
+            metricsLayerTotalMs = 0
+            metricsLayerMaxMs = 0
+            metricsCallbackTotalMs = 0
+            metricsCallbackMaxMs = 0
+            metricsTickTotalMs = 0
+            metricsTickMaxMs = 0
+        }
+
+        metricsLock.unlock()
+
+        if let logLine {
+            print(logLine)
         }
     }
 
@@ -275,6 +374,8 @@ final class EmulatorView: UIView {
             condition: .onQueue(.main)
         )
 
+        let tickStart = CACurrentMediaTime()
+
         frameLock.lock()
 
         let cgImage = pendingFrame
@@ -282,15 +383,22 @@ final class EmulatorView: UIView {
 
         frameLock.unlock()
 
-        // Pause until the native renderer submits another frame.
-        displayLink?.isPaused = true
-
         guard let cgImage else {
+
+            recordDisplayMetrics(
+                frameDisplayed: false,
+                layerMs: 0,
+                callbackMs: 0,
+                tickMs: (CACurrentMediaTime() - tickStart) * 1000.0
+            )
+
             return
         }
 
         framebufferPixelWidth = cgImage.width
         framebufferPixelHeight = cgImage.height
+
+        let layerStart = CACurrentMediaTime()
 
         CATransaction.begin()
         CATransaction.setDisableActions(true)
@@ -298,6 +406,11 @@ final class EmulatorView: UIView {
         framebufferLayer.contents = cgImage
 
         CATransaction.commit()
+
+        let layerMs =
+            (CACurrentMediaTime() - layerStart) * 1000.0
+
+        let callbackStart = CACurrentMediaTime()
 
         onFrame?(cgImage)
 
@@ -310,6 +423,19 @@ final class EmulatorView: UIView {
 
             callback?()
         }
+
+        let callbackMs =
+            (CACurrentMediaTime() - callbackStart) * 1000.0
+
+        let tickMs =
+            (CACurrentMediaTime() - tickStart) * 1000.0
+
+        recordDisplayMetrics(
+            frameDisplayed: true,
+            layerMs: layerMs,
+            callbackMs: callbackMs,
+            tickMs: tickMs
+        )
     }
 
     // MARK: - Touch conversion
