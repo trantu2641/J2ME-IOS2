@@ -1385,29 +1385,90 @@ s32 org_mini_zip_ZipFile_getEntrySize0(Runtime *runtime, JClass *clazz) {
     return 0;
 }
 
+
 s32 org_mini_zip_ZipFile_getEntry0(Runtime *runtime, JClass *clazz) {
-    Instance *zip_path_arr = localvar_getRefer(runtime->localvar, 0);
-    Instance *name_arr = localvar_getRefer(runtime->localvar, 1);
+
+    Instance *zip_path_arr =
+        localvar_getRefer(runtime->localvar, 0);
+
+    Instance *name_arr =
+        localvar_getRefer(runtime->localvar, 1);
+
     s32 ret = -1;
+
     if (zip_path_arr && name_arr) {
-        s64 filesize = zip_get_file_unzip_size(zip_path_arr->arr_body, name_arr->arr_body);
-        if (filesize >= 0) {
-            Instance *arr = jarray_create_by_type_index(runtime, (s32) filesize, DATATYPE_BYTE);
-            ret = zip_loadfile_to_mem(zip_path_arr->arr_body, name_arr->arr_body, arr->arr_body, filesize);
-            if (ret == 0) {
-                push_ref(runtime->stack, arr);
+
+        s64 filesize = zip_get_file_unzip_size(
+            zip_path_arr->arr_body,
+            name_arr->arr_body
+        );
+
+        /*
+         * IMPORTANT:
+         *
+         * Empty ZIP entries are valid.
+         * A zero-length Java byte[] is still a valid array,
+         * even though its native arr_body is NULL.
+         *
+         * Do not call zip_loadfile_to_mem() with a NULL
+         * destination for a zero-length entry.
+         */
+
+        if (filesize == 0) {
+
+            Instance *empty = jarray_create_by_type_index(
+                runtime,
+                0,
+                DATATYPE_BYTE
+            );
+
+            push_ref(runtime->stack, empty);
+
+            return 0;
+        }
+
+        if (filesize > 0 && filesize <= 0x7fffffffLL) {
+
+            Instance *arr = jarray_create_by_type_index(
+                runtime,
+                (s32) filesize,
+                DATATYPE_BYTE
+            );
+
+            if (arr && arr->arr_body) {
+
+                ret = zip_loadfile_to_mem(
+                    zip_path_arr->arr_body,
+                    name_arr->arr_body,
+                    arr->arr_body,
+                    filesize
+                );
+
+                if (ret == 0) {
+
+                    push_ref(runtime->stack, arr);
+
+                    return 0;
+                }
             }
         }
     }
-    if (ret) {
-        push_ref(runtime->stack, NULL);
-    }
+
+    push_ref(runtime->stack, NULL);
+
 #if _JVM_DEBUG_LOG_LEVEL > 5
+
     invoke_deepth(runtime);
-    jvm_printf("org_mini_zip_ZipFile_getEntry0  \n");
+
+    jvm_printf(
+        "org_mini_zip_ZipFile_getEntry0\n"
+    );
+
 #endif
+
     return 0;
 }
+
 
 s32 org_mini_zip_ZipFile_putEntry0(Runtime *runtime, JClass *clazz) {
     Instance *zip_path_arr = localvar_getRefer(runtime->localvar, 0);
