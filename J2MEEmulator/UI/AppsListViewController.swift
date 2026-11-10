@@ -1172,19 +1172,590 @@ class AppsListViewController: UIViewController,
     // MARK: - Long press menu
     //
     // IMPORTANT:
-    // iOS 16 can crash when a UIContextMenu contains deeply nested UIMenus
-    // (for example: Settings -> Screen Resolution -> item) and the submenu
-    // is opened and immediately collapsed again.
+    // Do not use UIKit UIMenu/UIContextMenu here.
     //
-    // Keep the grouped layout, but limit the hierarchy to ONE submenu level.
-    // This preserves:
-    //   Manage JAR >
-    //   Settings >
-    //   FPS Limit >
-    //   Clear / Delete
+    // The crash log from iOS 16.4 shows:
+    //   EXC_BAD_ACCESS
+    //   objc_setAssociatedObject
+    //   _UIContextMenuView _setHighlightedIndexPath:playFeedback:
+    //   _UIContextMenuView _handleSelectionGesture:
     //
-    // Screen Resolution options are kept inside Settings instead of creating
-    // another nested UIMenu.
+    // Therefore the crash happens inside Apple's context-menu UI while
+    // highlighting/selecting an item. The safest fix is to keep the same
+    // grouped/expandable menu appearance but render it as our own UIView.
+    //
+    // This also means the menu no longer creates nested UIMenu objects.
+
+    private var customMenuOverlay: UIView?
+    private weak var customMenuPanel: UIView?
+    private var customMenuApp: AppInfo?
+
+    private func dismissCustomMenu() {
+        customMenuOverlay?.removeFromSuperview()
+        customMenuOverlay = nil
+        customMenuPanel = nil
+        customMenuApp = nil
+    }
+
+    private func makeMenuButton(
+        title: String,
+        imageName: String?,
+        destructive: Bool = false,
+        action: @escaping () -> Void
+    ) -> UIButton {
+        var config = UIButton.Configuration.plain()
+        config.contentInsets = NSDirectionalEdgeInsets(
+            top: 11,
+            leading: 14,
+            bottom: 11,
+            trailing: 14
+        )
+        config.imagePadding = 10
+        config.baseForegroundColor = destructive
+            ? .systemRed
+            : .label
+
+        config.title = title
+
+        if let imageName {
+            config.image = UIImage(systemName: imageName)
+        }
+
+        let button = UIButton(configuration: config)
+
+        button.contentHorizontalAlignment = .leading
+        button.titleLabel?.font = .systemFont(
+            ofSize: 16,
+            weight: .regular
+        )
+
+        button.accessibilityLabel = title
+
+        button.addAction(
+            UIAction { [weak self] _ in
+                guard self != nil else {
+                    return
+                }
+                action()
+            },
+            for: .touchUpInside
+        )
+
+        return button
+    }
+
+    private func makeExpandableMenuButton(
+        title: String,
+        imageName: String,
+        expanded: Bool,
+        toggle: @escaping (UIButton) -> Void
+    ) -> UIButton {
+        var config = UIButton.Configuration.plain()
+        config.contentInsets = NSDirectionalEdgeInsets(
+            top: 12,
+            leading: 14,
+            bottom: 12,
+            trailing: 14
+        )
+        config.imagePadding = 10
+        config.baseForegroundColor = .label
+        config.title = title
+        config.image = UIImage(systemName: imageName)
+
+        let button = UIButton(configuration: config)
+        button.contentHorizontalAlignment = .leading
+
+        button.titleLabel?.font = .systemFont(
+            ofSize: 16,
+            weight: .semibold
+        )
+
+        button.accessibilityLabel = title
+
+        button.addAction(
+            UIAction { [weak button] _ in
+                guard let button else {
+                    return
+                }
+                toggle(button)
+            },
+            for: .touchUpInside
+        )
+
+        return button
+    }
+
+    private func setChevron(
+        on button: UIButton,
+        expanded: Bool
+    ) {
+        var config = button.configuration
+        config?.image = UIImage(
+            systemName: expanded
+                ? "chevron.down"
+                : "chevron.right"
+        )
+        config?.imagePadding = 10
+        button.configuration = config
+    }
+
+    private func addMenuSeparator(
+        to stack: UIStackView
+    ) {
+        let separator = UIView()
+        separator.backgroundColor = UIColor.separator
+            .withAlphaComponent(0.45)
+        separator.translatesAutoresizingMaskIntoConstraints = false
+        separator.heightAnchor.constraint(equalToConstant: 0.5).isActive = true
+        stack.addArrangedSubview(separator)
+    }
+
+    private func addSubmenuItem(
+        title: String,
+        imageName: String?,
+        destructive: Bool = false,
+        to stack: UIStackView,
+        action: @escaping () -> Void
+    ) {
+        let button = makeMenuButton(
+            title: title,
+            imageName: imageName,
+            destructive: destructive,
+            action: action
+        )
+
+        stack.addArrangedSubview(button)
+    }
+
+    private func showCustomMenu(
+        for app: AppInfo,
+        at point: CGPoint
+    ) {
+        dismissCustomMenu()
+
+        guard let window = view.window else {
+            return
+        }
+
+        customMenuApp = app
+
+        let overlay = UIView(frame: window.bounds)
+        overlay.backgroundColor = .clear
+        overlay.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+
+        let outsideTap = UITapGestureRecognizer(
+            target: self,
+            action: #selector(customMenuOutsideTapped(_:))
+        )
+        overlay.addGestureRecognizer(outsideTap)
+
+        let panel = UIVisualEffectView(
+            effect: UIBlurEffect(style: .systemMaterialDark)
+        )
+
+        panel.layer.cornerRadius = 16
+        panel.clipsToBounds = true
+        panel.layer.borderWidth = 0.5
+        panel.layer.borderColor = UIColor.white
+            .withAlphaComponent(0.18)
+            .cgColor
+
+        panel.translatesAutoresizingMaskIntoConstraints = false
+
+        overlay.addSubview(panel)
+
+        let scroll = UIScrollView()
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        scroll.alwaysBounceVertical = true
+        scroll.showsVerticalScrollIndicator = false
+
+        let rootStack = UIStackView()
+        rootStack.axis = .vertical
+        rootStack.spacing = 0
+        rootStack.translatesAutoresizingMaskIntoConstraints = false
+
+        panel.contentView.addSubview(scroll)
+        scroll.addSubview(rootStack)
+
+        NSLayoutConstraint.activate([
+            scroll.topAnchor.constraint(
+                equalTo: panel.contentView.topAnchor
+            ),
+            scroll.leadingAnchor.constraint(
+                equalTo: panel.contentView.leadingAnchor
+            ),
+            scroll.trailingAnchor.constraint(
+                equalTo: panel.contentView.trailingAnchor
+            ),
+            scroll.bottomAnchor.constraint(
+                equalTo: panel.contentView.bottomAnchor
+            ),
+
+            rootStack.topAnchor.constraint(
+                equalTo: scroll.contentLayoutGuide.topAnchor
+            ),
+            rootStack.leadingAnchor.constraint(
+                equalTo: scroll.contentLayoutGuide.leadingAnchor
+            ),
+            rootStack.trailingAnchor.constraint(
+                equalTo: scroll.contentLayoutGuide.trailingAnchor
+            ),
+            rootStack.bottomAnchor.constraint(
+                equalTo: scroll.contentLayoutGuide.bottomAnchor
+            ),
+            rootStack.widthAnchor.constraint(
+                equalTo: scroll.frameLayoutGuide.widthAnchor
+            )
+        ])
+
+        // -------------------------------------------------------------
+        // Manage JAR >
+        // -------------------------------------------------------------
+
+        let manageItems = UIStackView()
+        manageItems.axis = .vertical
+        manageItems.spacing = 0
+        manageItems.isHidden = false
+        manageItems.isLayoutMarginsRelativeArrangement = true
+        manageItems.layoutMargins = UIEdgeInsets(
+            top: 0,
+            left: 20,
+            bottom: 0,
+            right: 0
+        )
+
+        addSubmenuItem(
+            title: "Rename",
+            imageName: "pencil",
+            to: manageItems
+        ) { [weak self] in
+            self?.dismissCustomMenu()
+            self?.renameApp(app)
+        }
+
+        addSubmenuItem(
+            title: "Change Icon...",
+            imageName: "photo",
+            to: manageItems
+        ) { [weak self] in
+            self?.dismissCustomMenu()
+            self?.changeIcon(for: app)
+        }
+
+        if Self.hasCustomIcon(for: app) {
+            addSubmenuItem(
+                title: "Restore Original Icon",
+                imageName: "arrow.uturn.backward",
+                to: manageItems
+            ) { [weak self] in
+                self?.dismissCustomMenu()
+                self?.resetCustomIcon(for: app)
+            }
+        }
+
+        addSubmenuItem(
+            title: "Duplicate Install",
+            imageName: "doc.on.doc",
+            to: manageItems
+        ) { [weak self] in
+            self?.dismissCustomMenu()
+            self?.duplicateApp(app)
+        }
+
+        manageItems.isHidden = true
+
+        let manageButton = makeExpandableMenuButton(
+            title: "Manage JAR",
+            imageName: "app",
+            expanded: false
+        ) { [weak manageItems, weak self] button in
+            guard let manageItems else {
+                return
+            }
+
+            let expanding = manageItems.isHidden
+            manageItems.isHidden = !expanding
+
+            self?.setChevron(
+                on: button,
+                expanded: expanding
+            )
+        }
+
+        rootStack.addArrangedSubview(manageButton)
+        rootStack.addArrangedSubview(manageItems)
+
+        // -------------------------------------------------------------
+        // Settings >
+        // -------------------------------------------------------------
+
+        let settingsItems = UIStackView()
+        settingsItems.axis = .vertical
+        settingsItems.spacing = 0
+        settingsItems.isHidden = true
+        settingsItems.isLayoutMarginsRelativeArrangement = true
+        settingsItems.layoutMargins = UIEdgeInsets(
+            top: 0,
+            left: 20,
+            bottom: 0,
+            right: 0
+        )
+
+        let ssEnabled = Self.is3DSupersampling(for: app)
+
+        addSubmenuItem(
+            title: ssEnabled
+                ? "Disable 3D Enhancement"
+                : "Enable 3D Enhancement",
+            imageName: "cube",
+            to: settingsItems
+        ) {
+            Self.set3DSupersampling(
+                !ssEnabled,
+                for: app
+            )
+            self.dismissCustomMenu()
+        }
+
+        // Screen Resolution >
+        let resolutionItems = UIStackView()
+        resolutionItems.axis = .vertical
+        resolutionItems.spacing = 0
+        resolutionItems.isHidden = true
+        resolutionItems.isLayoutMarginsRelativeArrangement = true
+        resolutionItems.layoutMargins = UIEdgeInsets(
+            top: 0,
+            left: 20,
+            bottom: 0,
+            right: 0
+        )
+
+        let currentRes = Self.resolution(for: app)
+
+        for option in Self.resolutionOptions {
+            addSubmenuItem(
+                title: option.label
+                    + (
+                        option.w == currentRes.w &&
+                        option.h == currentRes.h
+                        ? "  ✓"
+                        : ""
+                    ),
+                imageName: nil,
+                to: resolutionItems
+            ) {
+                Self.setResolution(
+                    w: option.w,
+                    h: option.h,
+                    for: app
+                )
+                self.dismissCustomMenu()
+            }
+        }
+
+        addSubmenuItem(
+            title: "Custom Resolution...",
+            imageName: "slider.horizontal.3",
+            to: resolutionItems
+        ) { [weak self] in
+            self?.dismissCustomMenu()
+            self?.promptCustomResolution(for: app)
+        }
+
+        let resolutionButton = makeExpandableMenuButton(
+            title: "Screen Resolution",
+            imageName: "aspectratio",
+            expanded: false
+        ) { [weak resolutionItems, weak self] button in
+            guard let resolutionItems else {
+                return
+            }
+
+            let expanding = resolutionItems.isHidden
+            resolutionItems.isHidden = !expanding
+
+            self?.setChevron(
+                on: button,
+                expanded: expanding
+            )
+        }
+
+        settingsItems.addArrangedSubview(resolutionButton)
+        settingsItems.addArrangedSubview(resolutionItems)
+
+        let settingsButton = makeExpandableMenuButton(
+            title: "Settings",
+            imageName: "gearshape",
+            expanded: false
+        ) { [weak settingsItems, weak self] button in
+            guard let settingsItems else {
+                return
+            }
+
+            let expanding = settingsItems.isHidden
+            settingsItems.isHidden = !expanding
+
+            self?.setChevron(
+                on: button,
+                expanded: expanding
+            )
+        }
+
+        rootStack.addArrangedSubview(settingsButton)
+        rootStack.addArrangedSubview(settingsItems)
+
+        // -------------------------------------------------------------
+        // FPS Limit >
+        // -------------------------------------------------------------
+
+        let fpsItems = UIStackView()
+        fpsItems.axis = .vertical
+        fpsItems.spacing = 0
+        fpsItems.isHidden = true
+        fpsItems.isLayoutMarginsRelativeArrangement = true
+        fpsItems.layoutMargins = UIEdgeInsets(
+            top: 0,
+            left: 20,
+            bottom: 0,
+            right: 0
+        )
+
+        let currentFps = Self.fpsLimit(for: app)
+
+        for option in Self.fpsLimitOptions {
+            addSubmenuItem(
+                title: option.label
+                    + (option.value == currentFps ? "  ✓" : ""),
+                imageName: nil,
+                to: fpsItems
+            ) {
+                Self.setFpsLimit(
+                    option.value,
+                    for: app
+                )
+                self.dismissCustomMenu()
+            }
+        }
+
+        let fpsButton = makeExpandableMenuButton(
+            title: "FPS Limit",
+            imageName: "speedometer",
+            expanded: false
+        ) { [weak fpsItems, weak self] button in
+            guard let fpsItems else {
+                return
+            }
+
+            let expanding = fpsItems.isHidden
+            fpsItems.isHidden = !expanding
+
+            self?.setChevron(
+                on: button,
+                expanded: expanding
+            )
+        }
+
+        rootStack.addArrangedSubview(fpsButton)
+        rootStack.addArrangedSubview(fpsItems)
+
+        // -------------------------------------------------------------
+        // Bottom actions
+        // -------------------------------------------------------------
+
+        addMenuSeparator(to: rootStack)
+
+        addSubmenuItem(
+            title: "Clear Game Data",
+            imageName: "eraser",
+            to: rootStack
+        ) { [weak self] in
+            self?.dismissCustomMenu()
+            self?.confirmClearGameData(for: app)
+        }
+
+        addSubmenuItem(
+            title: "Delete",
+            imageName: "trash",
+            destructive: true,
+            to: rootStack
+        ) { [weak self] in
+            self?.dismissCustomMenu()
+            self?.confirmDeleteApp(for: app)
+        }
+
+        window.addSubview(overlay)
+
+        customMenuOverlay = overlay
+        customMenuPanel = panel
+
+        let maxWidth = min(
+            window.bounds.width - 32,
+            360
+        )
+
+        let maxHeight = min(
+            window.bounds.height - 80,
+            620
+        )
+
+        // Position near the pressed cell, but keep the entire panel on-screen.
+        let targetX = min(
+            max(16, point.x - maxWidth * 0.5),
+            window.bounds.width - maxWidth - 16
+        )
+
+        let targetY = min(
+            max(16, point.y),
+            window.bounds.height - maxHeight - 16
+        )
+
+        NSLayoutConstraint.activate([
+            panel.widthAnchor.constraint(
+                equalToConstant: maxWidth
+            ),
+            panel.heightAnchor.constraint(
+                lessThanOrEqualToConstant: maxHeight
+            ),
+            panel.leadingAnchor.constraint(
+                equalTo: overlay.leadingAnchor,
+                constant: targetX
+            ),
+            panel.topAnchor.constraint(
+                equalTo: overlay.topAnchor,
+                constant: targetY
+            ),
+            panel.bottomAnchor.constraint(
+                lessThanOrEqualTo: overlay.bottomAnchor,
+                constant: -16
+            )
+        ])
+
+        overlay.alpha = 0
+
+        UIView.animate(
+            withDuration: 0.12,
+            animations: {
+                overlay.alpha = 1
+            }
+        )
+    }
+
+    @objc private func customMenuOutsideTapped(
+        _ recognizer: UITapGestureRecognizer
+    ) {
+        guard let overlay = customMenuOverlay else {
+            return
+        }
+
+        let location = recognizer.location(in: overlay)
+
+        if let panel = customMenuPanel,
+           panel.frame.contains(location) {
+            return
+        }
+
+        dismissCustomMenu()
+    }
 
     func collectionView(
         _ collectionView: UICollectionView,
@@ -1192,237 +1763,32 @@ class AppsListViewController: UIViewController,
         point: CGPoint
     ) -> UIContextMenuConfiguration? {
 
-        guard let indexPath = indexPaths.first,
-              indexPath.section >= 0,
-              indexPath.item >= 0,
-              indexPath.item < apps.count else {
+        guard
+            let indexPath = indexPaths.first,
+            indexPath.item >= 0,
+            indexPath.item < apps.count
+        else {
             return nil
         }
 
-        // Capture the JAR path, not only the array position.
-        // If scanApps() reloads the collection while the context menu is open,
-        // the old IndexPath can become invalid.
-        let appPath = apps[indexPath.item].path
+        let app = apps[indexPath.item]
 
-        return UIContextMenuConfiguration(
-            identifier: NSString(string: appPath),
-            previewProvider: nil,
-            actionProvider: { [weak self] _ in
+        // IMPORTANT:
+        // Return nil. Never construct UIMenu/UIAction here.
+        // The custom UIView menu above replaces UIKit's context menu.
+        //
+        // `point` is in the collection view coordinate space, while our
+        // custom overlay is attached to the window.
+        let windowPoint: CGPoint
+        if let window = view.window {
+            windowPoint = collectionView.convert(point, to: window)
+        } else {
+            windowPoint = point
+        }
 
-                guard let self else {
-                    return nil
-                }
+        showCustomMenu(for: app, at: windowPoint)
 
-                // Resolve the current AppInfo from its stable path.
-                // Never access apps[indexPath.item] from a delayed menu action.
-                guard let app = self.apps.first(where: {
-                    $0.path == appPath
-                }) else {
-                    return nil
-                }
-
-                // =========================================================
-                // MANAGE JAR
-                // =========================================================
-
-                let rename = UIAction(
-                    title: "Rename",
-                    image: UIImage(systemName: "pencil")
-                ) { [weak self] _ in
-                    guard let self else { return }
-                    self.renameApp(app)
-                }
-
-                let changeIcon = UIAction(
-                    title: "Change Icon...",
-                    image: UIImage(systemName: "photo")
-                ) { [weak self] _ in
-                    guard let self else { return }
-                    self.changeIcon(for: app)
-                }
-
-                var manageChildren: [UIMenuElement] = [
-                    rename,
-                    changeIcon
-                ]
-
-                if Self.hasCustomIcon(for: app) {
-                    let resetIcon = UIAction(
-                        title: "Restore Original Icon",
-                        image: UIImage(
-                            systemName: "arrow.uturn.backward"
-                        )
-                    ) { [weak self] _ in
-                        guard let self else { return }
-                        self.resetCustomIcon(for: app)
-                    }
-
-                    manageChildren.append(resetIcon)
-                }
-
-                let duplicate = UIAction(
-                    title: "Duplicate Install",
-                    image: UIImage(systemName: "doc.on.doc")
-                ) { [weak self] _ in
-                    guard let self else { return }
-                    self.duplicateApp(app)
-                }
-
-                manageChildren.append(duplicate)
-
-                let manageMenu = UIMenu(
-                    title: "Manage JAR",
-                    image: UIImage(systemName: "app"),
-                    children: manageChildren
-                )
-
-                // =========================================================
-                // SETTINGS
-                // =========================================================
-
-                let ssEnabled = Self.is3DSupersampling(for: app)
-
-                let toggle3D = UIAction(
-                    title: ssEnabled
-                        ? "Disable 3D Enhancement"
-                        : "Enable 3D Enhancement",
-                    image: UIImage(systemName: "cube"),
-                    state: ssEnabled ? .on : .off
-                ) { _ in
-                    Self.set3DSupersampling(
-                        !ssEnabled,
-                        for: app
-                    )
-                }
-
-                // IMPORTANT:
-                // Do NOT put these resolution actions inside another UIMenu.
-                // That creates Settings -> Screen Resolution -> item, which
-                // is the nested hierarchy that is unsafe on iOS 16.
-                let currentRes = Self.resolution(for: app)
-
-                var settingsChildren: [UIMenuElement] = [
-                    toggle3D
-                ]
-
-                let resolutionHeader = UIAction(
-                    title: "Screen Resolution",
-                    image: UIImage(systemName: "aspectratio"),
-                    attributes: [.disabled]
-                ) { _ in }
-
-                settingsChildren.append(resolutionHeader)
-
-                let resActions = Self.resolutionOptions.map { option in
-                    UIAction(
-                        title: option.label,
-                        state: (
-                            option.w == currentRes.w &&
-                            option.h == currentRes.h
-                        ) ? .on : .off
-                    ) { _ in
-                        Self.setResolution(
-                            w: option.w,
-                            h: option.h,
-                            for: app
-                        )
-                    }
-                }
-
-                settingsChildren.append(contentsOf: resActions)
-
-                let customResolution = UIAction(
-                    title: "Custom Resolution...",
-                    image: UIImage(
-                        systemName: "slider.horizontal.3"
-                    )
-                ) { [weak self] _ in
-                    guard let self else { return }
-                    self.promptCustomResolution(for: app)
-                }
-
-                settingsChildren.append(customResolution)
-
-                // ONE level only:
-                // Settings -> actions
-                let settingsMenu = UIMenu(
-                    title: "Settings",
-                    image: UIImage(systemName: "gearshape"),
-                    children: settingsChildren
-                )
-
-                // =========================================================
-                // FPS
-                // =========================================================
-
-                let currentFps = Self.fpsLimit(for: app)
-
-                let fpsActions = Self.fpsLimitOptions.map { option in
-                    UIAction(
-                        title: option.label,
-                        state: option.value == currentFps
-                            ? .on
-                            : .off
-                    ) { _ in
-                        Self.setFpsLimit(
-                            option.value,
-                            for: app
-                        )
-                    }
-                }
-
-                let fpsMenu = UIMenu(
-                    title: "FPS Limit",
-                    image: UIImage(systemName: "speedometer"),
-                    children: fpsActions
-                )
-
-                // =========================================================
-                // DATA / DELETE
-                // =========================================================
-
-                let clearData = UIAction(
-                    title: "Clear Game Data",
-                    image: UIImage(systemName: "eraser")
-                ) { [weak self] _ in
-                    guard let self else { return }
-                    self.confirmClearGameData(for: app)
-                }
-
-                let delete = UIAction(
-                    title: "Delete",
-                    image: UIImage(systemName: "trash"),
-                    attributes: .destructive
-                ) { [weak self] _ in
-                    guard let self else { return }
-                    self.confirmDeleteApp(for: app)
-                }
-
-                let actions = UIMenu(
-                    options: .displayInline,
-                    children: [
-                        clearData,
-                        delete
-                    ]
-                )
-
-                // =========================================================
-                // ROOT MENU
-                // =========================================================
-
-                // Keep the original grouped appearance.
-                // The only structural change is that Settings no longer
-                // contains a second UIMenu for Screen Resolution.
-                return UIMenu(
-                    children: [
-                        manageMenu,
-                        settingsMenu,
-                        fpsMenu,
-                        actions
-                    ]
-                )
-            }
-        )
+        return nil
     }
 
     // MARK: - Per-game settings
