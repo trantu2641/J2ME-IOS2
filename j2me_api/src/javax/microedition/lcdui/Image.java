@@ -1,4 +1,3 @@
-```java
 package javax.microedition.lcdui;
 
 import java.io.ByteArrayOutputStream;
@@ -1076,4 +1075,3 @@ public class Image {
         super.finalize();
     }
 }
-```
