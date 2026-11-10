@@ -1186,137 +1186,149 @@ class AppsListViewController: UIViewController,
         return UIContextMenuConfiguration(
             actionProvider: { [weak self] _ in
 
-                // Keep the menu grouped, but only one level deep.
-                // Each category can be opened/closed independently:
-                //   Manage JAR
-                //   Screen Resolution
-                //   FPS Limit
-                //   Data
-                //
-                // Do NOT put UIMenu inside another UIMenu inside another
-                // UIMenu.  A single submenu level is enough for the iOS
-                // context-menu controller and avoids the old collapse crash.
+                // Rename.
+                let rename = UIAction(
+                    title: "Rename",
+                    image: UIImage(systemName: "pencil")
+                ) { _ in
 
-                // MARK: Manage JAR
-
-                var manageActions: [UIAction] = []
-
-                manageActions.append(
-                    UIAction(
-                        title: "Rename",
-                        image: UIImage(systemName: "pencil")
-                    ) { [weak self] _ in
-                        self?.renameApp(app)
-                    }
-                )
-
-                manageActions.append(
-                    UIAction(
-                        title: "Change Icon...",
-                        image: UIImage(systemName: "photo")
-                    ) { [weak self] _ in
-                        self?.changeIcon(for: app)
-                    }
-                )
-
-                if Self.hasCustomIcon(for: app) {
-                    manageActions.append(
-                        UIAction(
-                            title: "Restore Original Icon",
-                            image: UIImage(systemName: "arrow.uturn.backward")
-                        ) { [weak self] _ in
-                            self?.resetCustomIcon(for: app)
-                        }
-                    )
+                    self?.renameApp(app)
                 }
 
-                manageActions.append(
-                    UIAction(
-                        title: "Duplicate Install",
-                        image: UIImage(systemName: "doc.on.doc")
-                    ) { [weak self] _ in
-                        self?.duplicateApp(app)
-                    }
-                )
+                // Change icon.
+                let changeIcon = UIAction(
+                    title: "Change Icon...",
+                    image: UIImage(systemName: "photo")
+                ) { _ in
 
-                let ssEnabled = Self.is3DSupersampling(for: app)
+                    self?.changeIcon(for: app)
+                }
 
-                manageActions.append(
-                    UIAction(
-                        title: ssEnabled
-                            ? "Disable 3D Enhancement"
-                            : "Enable 3D Enhancement",
-                        image: UIImage(systemName: "cube"),
-                        state: ssEnabled ? .on : .off
+                // Restore JAR's original icon.
+                let iconActions: [UIAction]
+
+                if Self.hasCustomIcon(for: app) {
+
+                    let resetIcon = UIAction(
+                        title: "Restore Original Icon",
+                        image: UIImage(systemName: "arrow.uturn.backward")
                     ) { _ in
-                        Self.set3DSupersampling(!ssEnabled, for: app)
+
+                        self?.resetCustomIcon(for: app)
                     }
-                )
+
+                    iconActions = [
+                        rename,
+                        changeIcon,
+                        resetIcon
+                    ]
+
+                } else {
+
+                    iconActions = [
+                        rename,
+                        changeIcon
+                    ]
+                }
+
+                // Install another copy.
+                let duplicate = UIAction(
+                    title: "Duplicate Install",
+                    image: UIImage(systemName: "doc.on.doc")
+                ) { _ in
+
+                    self?.duplicateApp(app)
+                }
 
                 let manageMenu = UIMenu(
                     title: "Manage JAR",
-                    image: UIImage(systemName: "archivebox"),
-                    children: manageActions
+                    image: UIImage(systemName: "app"),
+                    children: iconActions + [
+                        duplicate
+                    ]
                 )
 
-                // MARK: Screen resolution
+                // 3D enhancement.
+                let ssEnabled = Self.is3DSupersampling(for: app)
 
-                let currentRes = Self.resolution(for: app)
-                var resolutionActions: [UIAction] = []
+                let toggle3D = UIAction(
+                    title: ssEnabled
+                        ? "Disable 3D Enhancement"
+                        : "Enable 3D Enhancement",
+                    subtitle: nil,
+                    image: UIImage(systemName: "cube"),
+                    state: ssEnabled ? .on : .off
+                ) { _ in
 
-                for option in Self.resolutionOptions {
-                    resolutionActions.append(
-                        UIAction(
-                            title: option.label,
-                            state:
-                                option.w == currentRes.w &&
-                                option.h == currentRes.h
-                                ? .on
-                                : .off
-                        ) { _ in
-                            Self.setResolution(
-                                w: option.w,
-                                h: option.h,
-                                for: app
-                            )
-                        }
+                    Self.set3DSupersampling(
+                        !ssEnabled,
+                        for: app
                     )
                 }
 
-                resolutionActions.append(
+                // Screen resolution.
+                let currentRes = Self.resolution(for: app)
+
+                let resActions = Self.resolutionOptions.map { option in
+
                     UIAction(
-                        title: "Custom Resolution...",
-                        image: UIImage(systemName: "slider.horizontal.3")
-                    ) { [weak self] _ in
-                        self?.promptCustomResolution(for: app)
+                        title: option.label,
+                        state: (
+                            option.w == currentRes.w &&
+                            option.h == currentRes.h
+                        ) ? .on : .off
+                    ) { _ in
+
+                        Self.setResolution(
+                            w: option.w,
+                            h: option.h,
+                            for: app
+                        )
                     }
-                )
+                }
 
-                let resolutionMenu = UIMenu(
+                let customResolution = UIAction(
+                    title: "Custom Resolution...",
+                    image: UIImage(systemName: "slider.horizontal.3")
+                ) { [weak self] _ in
+
+                    self?.promptCustomResolution(for: app)
+                }
+
+                let resMenu = UIMenu(
                     title: "Screen Resolution",
-                    image: UIImage(systemName: "rectangle.on.rectangle"),
-                    children: resolutionActions
+                    image: UIImage(systemName: "aspectratio"),
+                    children: resActions + [customResolution]
                 )
 
-                // MARK: FPS
+                // Keep Settings as a real submenu.
+                // Do not use .displayInline here: on iOS 16.4, nested
+                // inline menus inside a collection-view context menu can
+                // crash when the submenu is collapsed.
+                let settings = UIMenu(
+                    title: "Settings",
+                    image: UIImage(systemName: "gearshape"),
+                    children: [
+                        toggle3D,
+                        resMenu
+                    ]
+                )
 
+                // FPS.
                 let currentFps = Self.fpsLimit(for: app)
-                var fpsActions: [UIAction] = []
 
-                for option in Self.fpsLimitOptions {
-                    fpsActions.append(
-                        UIAction(
-                            title: option.label,
-                            state: option.value == currentFps
-                                ? .on
-                                : .off
-                        ) { _ in
-                            Self.setFpsLimit(
-                                option.value,
-                                for: app
-                            )
-                        }
-                    )
+                let fpsActions = Self.fpsLimitOptions.map { option in
+
+                    UIAction(
+                        title: option.label,
+                        state: option.value == currentFps ? .on : .off
+                    ) { _ in
+
+                        Self.setFpsLimit(
+                            option.value,
+                            for: app
+                        )
+                    }
                 }
 
                 let fpsMenu = UIMenu(
@@ -1325,38 +1337,41 @@ class AppsListViewController: UIViewController,
                     children: fpsActions
                 )
 
-                // MARK: Data
+                // Clear saved game data.
+                let clearData = UIAction(
+                    title: "Clear Game Data",
+                    image: UIImage(systemName: "eraser")
+                ) { _ in
 
-                let dataMenu = UIMenu(
-                    title: "Data",
-                    image: UIImage(systemName: "externaldrive"),
+                    self?.confirmClearGameData(for: app)
+                }
+
+                // Delete JAR.
+                let delete = UIAction(
+                    title: "Delete",
+                    image: UIImage(systemName: "trash"),
+                    attributes: .destructive
+                ) { _ in
+
+                    self?.confirmDeleteApp(for: app)
+                }
+
+                // Keep Actions as a separate collapsible submenu too.
+                let actions = UIMenu(
+                    title: "Actions",
+                    image: UIImage(systemName: "ellipsis.circle"),
                     children: [
-                        UIAction(
-                            title: "Clear Game Data",
-                            image: UIImage(systemName: "eraser")
-                        ) { [weak self] _ in
-                            self?.confirmClearGameData(for: app)
-                        },
-                        UIAction(
-                            title: "Delete",
-                            image: UIImage(systemName: "trash"),
-                            attributes: .destructive
-                        ) { [weak self] _ in
-                            self?.confirmDeleteApp(for: app)
-                        }
+                        clearData,
+                        delete
                     ]
                 )
 
-                // Only the four category menus are shown at the root.
-                // Each category has its own disclosure arrow and can be
-                // expanded/collapsed independently.
                 return UIMenu(
-                    title: "JAR",
                     children: [
                         manageMenu,
-                        resolutionMenu,
+                        settings,
                         fpsMenu,
-                        dataMenu
+                        actions
                     ]
                 )
             }
@@ -1459,7 +1474,7 @@ class AppsListViewController: UIViewController,
         guard let saved = UserDefaults.standard.object(
             forKey: key
         ) as? Int else {
-            return 0
+            return 30
         }
 
         switch saved {
@@ -1468,7 +1483,7 @@ class AppsListViewController: UIViewController,
             return saved
 
         default:
-            return 0
+            return 30
         }
     }
 
@@ -1479,7 +1494,7 @@ class AppsListViewController: UIViewController,
 
         let safeFPS = fpsLimitOptions.contains {
             $0.value == fps
-        } ? fps : 0
+        } ? fps : 30
 
         UserDefaults.standard.set(
             safeFPS,
