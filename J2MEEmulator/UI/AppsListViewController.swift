@@ -1183,23 +1183,8 @@ class AppsListViewController: UIViewController,
 
         let app = apps[indexPath.item]
 
-        let appPath = app.path
-
         return UIContextMenuConfiguration(
-            identifier: NSString(string: appPath),
-            previewProvider: nil,
             actionProvider: { [weak self] _ in
-
-                // Resolve the JAR by its stable path instead of keeping an
-                // IndexPath alive while the context menu is open.
-                guard let self,
-                      let currentApp = self.apps.first(where: {
-                          $0.path == appPath
-                      }) else {
-                    return nil
-                }
-
-                let app = currentApp
 
                 // Rename.
                 let rename = UIAction(
@@ -1207,7 +1192,7 @@ class AppsListViewController: UIViewController,
                     image: UIImage(systemName: "pencil")
                 ) { _ in
 
-                    self.renameApp(app)
+                    self?.renameApp(app)
                 }
 
                 // Change icon.
@@ -1216,7 +1201,7 @@ class AppsListViewController: UIViewController,
                     image: UIImage(systemName: "photo")
                 ) { _ in
 
-                    self.changeIcon(for: app)
+                    self?.changeIcon(for: app)
                 }
 
                 // Restore JAR's original icon.
@@ -1229,7 +1214,7 @@ class AppsListViewController: UIViewController,
                         image: UIImage(systemName: "arrow.uturn.backward")
                     ) { _ in
 
-                        self.resetCustomIcon(for: app)
+                        self?.resetCustomIcon(for: app)
                     }
 
                     iconActions = [
@@ -1252,7 +1237,7 @@ class AppsListViewController: UIViewController,
                     image: UIImage(systemName: "doc.on.doc")
                 ) { _ in
 
-                    self.duplicateApp(app)
+                    self?.duplicateApp(app)
                 }
 
                 let manageMenu = UIMenu(
@@ -1310,29 +1295,22 @@ class AppsListViewController: UIViewController,
                     self?.promptCustomResolution(for: app)
                 }
 
-                // IMPORTANT FOR iOS 16.4:
-                // Do not put a large resolution UIMenu inside Settings.
-                // UIKit can crash in _UIContextMenuView when that submenu
-                // is collapsed from its disclosure arrow. Keep Settings as
-                // one normal system submenu with only two children.
-                // Resolution choices are shown in a normal system action
-                // sheet, so the Settings arrow itself remains available and
-                // can be safely opened/closed.
-                let resolutionAction = UIAction(
-                    title: "Screen Resolution...",
-                    image: UIImage(systemName: "aspectratio")
-                ) { [weak self] _ in
-                    DispatchQueue.main.async { [weak self] in
-                        self?.showResolutionPicker(for: app)
-                    }
-                }
+                let resMenu = UIMenu(
+                    title: "Screen Resolution",
+                    image: UIImage(systemName: "aspectratio"),
+                    children: resActions + [customResolution]
+                )
 
+                // Keep Settings as a real system submenu.
+                // The original .displayInline + nested Screen Resolution menu
+                // is the combination that triggers the collapse crash on
+                // iOS 16.4. Do not change the order or any other menu item.
                 let settings = UIMenu(
                     title: "Settings",
                     image: UIImage(systemName: "gearshape"),
                     children: [
                         toggle3D,
-                        resolutionAction
+                        resMenu
                     ]
                 )
 
@@ -1365,7 +1343,7 @@ class AppsListViewController: UIViewController,
                     image: UIImage(systemName: "eraser")
                 ) { _ in
 
-                    self.confirmClearGameData(for: app)
+                    self?.confirmClearGameData(for: app)
                 }
 
                 // Delete JAR.
@@ -1375,7 +1353,7 @@ class AppsListViewController: UIViewController,
                     attributes: .destructive
                 ) { _ in
 
-                    self.confirmDeleteApp(for: app)
+                    self?.confirmDeleteApp(for: app)
                 }
 
                 let actions = UIMenu(
@@ -1520,70 +1498,6 @@ class AppsListViewController: UIViewController,
             safeFPS,
             forKey: "fpsLimit_\(gameId(for: app))"
         )
-    }
-
-    // MARK: - Resolution picker
-
-    private func showResolutionPicker(for app: AppInfo) {
-
-        let current = Self.resolution(for: app)
-
-        let alert = UIAlertController(
-            title: "Screen Resolution",
-            message: "Choose the J2ME virtual screen size.",
-            preferredStyle: .actionSheet
-        )
-
-        for option in Self.resolutionOptions {
-
-            let isCurrent =
-                option.w == current.w &&
-                option.h == current.h
-
-            alert.addAction(
-                UIAlertAction(
-                    title: isCurrent
-                        ? "✓  \(option.label)"
-                        : option.label,
-                    style: .default
-                ) { _ in
-
-                    Self.setResolution(
-                        w: option.w,
-                        h: option.h,
-                        for: app
-                    )
-                }
-            )
-        }
-
-        alert.addAction(
-            UIAlertAction(
-                title: "Custom Resolution...",
-                style: .default
-            ) { [weak self] _ in
-                self?.promptCustomResolution(for: app)
-            }
-        )
-
-        alert.addAction(
-            UIAlertAction(
-                title: "Cancel",
-                style: .cancel
-            )
-        )
-
-        if let popover = alert.popoverPresentationController {
-            popover.sourceView = springboardCollectionView
-            popover.sourceRect = CGRect(
-                x: springboardCollectionView.bounds.midX,
-                y: springboardCollectionView.bounds.midY,
-                width: 1,
-                height: 1
-            )
-        }
-
-        present(alert, animated: true)
     }
 
     // MARK: - Custom resolution
