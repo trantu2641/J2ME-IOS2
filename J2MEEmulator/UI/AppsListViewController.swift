@@ -1172,20 +1172,358 @@ class AppsListViewController: UIViewController,
     // MARK: - Long press menu
 
     func collectionView(
-        _ collectionView: UICollectionView,
-        contextMenuConfigurationForItemsAt indexPaths: [IndexPath],
-        point: CGPoint
-    ) -> UIContextMenuConfiguration? {
+    _ collectionView: UICollectionView,
+    contextMenuConfigurationForItemsAt indexPaths: [IndexPath],
+    point: CGPoint
+) -> UIContextMenuConfiguration? {
 
-        guard let indexPath = indexPaths.first else {
+    guard let indexPath = indexPaths.first,
+          indexPath.item >= 0,
+          indexPath.item < apps.count else {
+        return nil
+    }
+
+    let app = apps[indexPath.item]
+
+    return UIContextMenuConfiguration(
+        identifier: NSString(
+            string:
+                Self.gameId(for: app)
+        ),
+        previewProvider: nil
+    ) { [weak self] _ in
+
+        guard let self else {
             return nil
         }
 
-        let app = apps[indexPath.item]
+        var actions:
+            [UIMenuElement] = []
 
-        return UIContextMenuConfiguration(
-            actionProvider: { [weak self] _ in
+        // ====================================================
+        // RENAME
+        // ====================================================
 
+        let rename =
+            UIAction(
+                title:
+                    "Rename",
+                image:
+                    UIImage(
+                        systemName:
+                            "pencil"
+                    )
+            ) { [weak self] _ in
+
+                guard let self else {
+                    return
+                }
+
+                self.renameApp(app)
+            }
+
+        actions.append(rename)
+
+        // ====================================================
+        // CHANGE ICON
+        // ====================================================
+
+        let changeIcon =
+            UIAction(
+                title:
+                    "Change Icon",
+                image:
+                    UIImage(
+                        systemName:
+                            "photo"
+                    )
+            ) { [weak self] _ in
+
+                self?.changeIcon(
+                    for: app
+                )
+            }
+
+        actions.append(changeIcon)
+
+        // ====================================================
+        // RESTORE ORIGINAL ICON
+        // ====================================================
+
+        if Self.hasCustomIcon(
+            for: app
+        ) {
+
+            let resetIcon =
+                UIAction(
+                    title:
+                        "Restore Original Icon",
+                    image:
+                        UIImage(
+                            systemName:
+                                "arrow.uturn.backward"
+                        )
+                ) { [weak self] _ in
+
+                    self?.resetCustomIcon(
+                        for: app
+                    )
+                }
+
+            actions.append(
+                resetIcon
+            )
+        }
+
+        // ====================================================
+        // DUPLICATE
+        // ====================================================
+
+        let duplicate =
+            UIAction(
+                title:
+                    "Duplicate Install",
+                image:
+                    UIImage(
+                        systemName:
+                            "doc.on.doc"
+                    )
+            ) { [weak self] _ in
+
+                self?.duplicateApp(
+                    app
+                )
+            }
+
+        actions.append(
+            duplicate
+        )
+
+        // ====================================================
+        // 3D
+        // ====================================================
+
+        let ssEnabled =
+            Self.is3DSupersampling(
+                for: app
+            )
+
+        let toggle3D =
+            UIAction(
+                title:
+                    ssEnabled
+                    ? "Disable 3D Enhancement"
+                    : "Enable 3D Enhancement",
+                image:
+                    UIImage(
+                        systemName:
+                            "cube"
+                    ),
+                state:
+                    ssEnabled
+                    ? .on
+                    : .off
+            ) { _ in
+
+                Self.set3DSupersampling(
+                    !ssEnabled,
+                    for:
+                        app
+                )
+            }
+
+        actions.append(
+            toggle3D
+        )
+
+        // ====================================================
+        // RESOLUTION OPTIONS
+        //
+        // IMPORTANT:
+        // No nested UIMenu here.
+        // This removes the submenu arrow.
+        // ====================================================
+
+        let currentResolution =
+            Self.resolution(
+                for:
+                    app
+            )
+
+        for option in
+            Self.resolutionOptions {
+
+            let action =
+                UIAction(
+                    title:
+                        "Resolution \(option.label)",
+                    image:
+                        UIImage(
+                            systemName:
+                                "aspectratio"
+                        ),
+                    state:
+                        (
+                            option.w ==
+                                currentResolution.w &&
+                            option.h ==
+                                currentResolution.h
+                        )
+                        ? .on
+                        : .off
+                ) { _ in
+
+                    Self.setResolution(
+                        w:
+                            option.w,
+                        h:
+                            option.h,
+                        for:
+                            app
+                    )
+                }
+
+            actions.append(
+                action
+            )
+        }
+
+        // ====================================================
+        // CUSTOM RESOLUTION
+        // ====================================================
+
+        let customResolution =
+            UIAction(
+                title:
+                    "Custom Resolution",
+                image:
+                    UIImage(
+                        systemName:
+                            "slider.horizontal.3"
+                    )
+            ) { [weak self] _ in
+
+                self?.promptCustomResolution(
+                    for:
+                        app
+                )
+            }
+
+        actions.append(
+            customResolution
+        )
+
+        // ====================================================
+        // FPS
+        //
+        // IMPORTANT:
+        // FPS is now only a display FPS.
+        // MiniJVM itself remains unlimited.
+        // ====================================================
+
+        let currentFPS =
+            Self.fpsLimit(
+                for:
+                    app
+            )
+
+        for option in
+            Self.fpsLimitOptions {
+
+            let fpsAction =
+                UIAction(
+                    title:
+                        option.value == 0
+                        ? "FPS: Unlimited"
+                        : "FPS: \(option.value)",
+                    image:
+                        UIImage(
+                            systemName:
+                                "speedometer"
+                        ),
+                    state:
+                        option.value ==
+                            currentFPS
+                        ? .on
+                        : .off
+                ) { _ in
+
+                    Self.setFpsLimit(
+                        option.value,
+                        for:
+                            app
+                    )
+                }
+
+            actions.append(
+                fpsAction
+            )
+        }
+
+        // ====================================================
+        // CLEAR DATA
+        // ====================================================
+
+        let clearData =
+            UIAction(
+                title:
+                    "Clear Game Data",
+                image:
+                    UIImage(
+                        systemName:
+                            "eraser"
+                    )
+            ) { [weak self] _ in
+
+                self?.confirmClearGameData(
+                    for:
+                        app
+                )
+            }
+
+        actions.append(
+            clearData
+        )
+
+        // ====================================================
+        // DELETE
+        // ====================================================
+
+        let delete =
+            UIAction(
+                title:
+                    "Delete",
+                image:
+                    UIImage(
+                        systemName:
+                            "trash"
+                    ),
+                attributes:
+                    .destructive
+            ) { [weak self] _ in
+
+                self?.confirmDeleteApp(
+                    for:
+                        app
+                )
+            }
+
+        actions.append(
+            delete
+        )
+
+        // ====================================================
+        // SINGLE LEVEL MENU
+        // ====================================================
+
+        return UIMenu(
+            title:
+                app.name,
+            children:
+                actions
+        )
+    }
+    }
                 // Rename.
                 let rename = UIAction(
                     title: "Rename",
