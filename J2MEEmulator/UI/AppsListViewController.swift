@@ -534,7 +534,29 @@ class AppsListViewController: UIViewController,
 
         let gamesDir = Self.gamesDirectory
 
-        DispatchQueue.global(qos: .userInitiated).async {
+        //
+        // IMPORTANT:
+        //
+        // Do NOT load every JAR icon inside one serial map().
+        // A broken / unusual JAR icon can be very slow or fail while
+        // reading its ZIP entry. If that happens in the old code,
+        // the whole scan waits there and every icon after it appears
+        // to have stopped loading.
+        //
+        // New flow:
+        //   1. Discover all JARs.
+        //   2. Create the grid immediately using placeholders.
+        //   3. Load each JAR icon independently on its own background task.
+        //   4. Update only that JAR's cell when its icon succeeds.
+        //
+        // Therefore one bad icon cannot block the remaining icons.
+        //
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+
+            guard self != nil else {
+                return
+            }
 
             var jarPaths: [(name: String, path: String)] = []
 
@@ -557,18 +579,20 @@ class AppsListViewController: UIViewController,
                 }
             }
 
-            let unsorted = jarPaths.map {
-                jar -> (
-                    String,
-                    String,
-                    String,
-                    String?,
-                    String?,
-                    UIImage?
-                ) in
+            // Read metadata first, but NEVER read the icon here.
+            // The icon reader is isolated below so one problematic icon
+            // cannot stop the rest of the grid from appearing.
+            var basicApps: [
+                (name: String,
+                 path: String,
+                 fileName: String,
+                 version: String?,
+                 vendor: String?)
+            ] = []
+
+            for jar in jarPaths {
 
                 let meta = JARMetadata.read(from: jar.path)
-                let jarIcon = meta?.readIcon(from: jar.path)
 
                 let fileName = URL(
                     fileURLWithPath: jar.path
@@ -576,24 +600,26 @@ class AppsListViewController: UIViewController,
 
                 let appName = meta?.midletName ?? jar.name
 
-                return (
-                    appName,
-                    jar.path,
-                    fileName,
-                    meta?.version,
-                    meta?.vendor,
-                    jarIcon
-                )
+                basicApps.append((
+                    name: appName,
+                    path: jar.path,
+                    fileName: fileName,
+                    version: meta?.version,
+                    vendor: meta?.vendor
+                ))
+            }
 
-            }.sorted {
-                $0.0.localizedCaseInsensitiveCompare($1.0)
+            basicApps.sort {
+                $0.name.localizedCaseInsensitiveCompare($1.name)
                     == .orderedAscending
             }
 
-            let scannedApps = unsorted.enumerated().map {
-                index, item -> AppInfo in
+            // Build the initial list with placeholders only.
+            // This means the collection view never waits for icon decoding.
+            let initialApps: [AppInfo] = basicApps.enumerated().map {
+                index, item in
 
-                let id = Self.gameId(forPath: item.1)
+                let id = Self.gameId(forPath: item.path)
 
                 let savedName = UserDefaults.standard.string(
                     forKey: Self.displayNameKey(id)
@@ -607,7 +633,7 @@ class AppsListViewController: UIViewController,
                    ).isEmpty {
                     displayName = savedName
                 } else {
-                    displayName = item.0
+                    displayName = item.name
                 }
 
                 let customIcon = UIImage(
@@ -615,17 +641,17 @@ class AppsListViewController: UIViewController,
                 )
 
                 let finalIcon = Self.springboardIcon(
-                    customIcon ?? item.5,
+                    customIcon,
                     name: displayName,
                     index: index
                 )
 
                 return AppInfo(
                     name: displayName,
-                    path: item.1,
-                    fileName: item.2,
-                    version: item.3,
-                    vendor: item.4,
+                    path: item.path,
+                    fileName: item.fileName,
+                    version: item.version,
+                    vendor: item.vendor,
                     icon: finalIcon
                 )
             }
@@ -636,18 +662,125 @@ class AppsListViewController: UIViewController,
                     return
                 }
 
-                // All installed JARs are shown.
-                // There is no hidden-JAR filter anymore.
-                self.allApps = scannedApps
-                self.apps = scannedApps
+                self.allApps = initialApps
+                self.apps = initialApps
 
                 self.springboardCollectionView.reloadData()
-
                 self.updateEmptyState()
 
                 print(
-                    "[Swift] Found \(scannedApps.count) JAR installations"
+                    "[Swift] Found \(initialApps.count) JAR installations"
                 )
+
+                // Start icon loading AFTER the grid is already visible.
+                // Each JAR is independent. A failed/hung icon reader only
+                // affects that one background operation.
+                self.loadJARIconsIndependently(
+                    for: initialApps
+                )
+            }
+        }
+    }
+
+    private func loadJARIconsIndependently(
+        for initialApps: [AppInfo]
+    ) {
+
+        let iconQueue = DispatchQueue(
+            label: "jarbox.jar-icon-loader",
+            qos: .utility,
+            attributes: .concurrent
+        )
+
+        for app in initialApps {
+
+            // If the user supplied a custom icon, do not waste time opening
+            // the JAR's built-in icon. The custom icon is already displayed.
+            let appID = Self.gameId(for: app)
+
+            if FileManager.default.fileExists(
+                atPath: Self.customIconPath(for: appID)
+            ) {
+                continue
+            }
+
+            iconQueue.async { [weak self] in
+
+                guard let self else {
+                    return
+                }
+
+                let jarIcon: UIImage?
+
+                // This operation is deliberately isolated to this worker.
+                // Even if this JAR has a broken/missing icon, the other
+                // workers continue loading their own icons.
+                let meta = JARMetadata.read(from: app.path)
+                jarIcon = meta?.readIcon(from: app.path)
+
+                guard let jarIcon else {
+                    print(
+                        "[Swift] No usable icon: \(app.fileName)"
+                    )
+                    return
+                }
+
+                DispatchQueue.main.async { [weak self] in
+
+                    guard let self else {
+                        return
+                    }
+
+                    // Find the installation by its path, not by array index.
+                    // This prevents a late icon result from being assigned
+                    // to the wrong JAR after sorting/reloading.
+                    guard let index = self.allApps.firstIndex(
+                        where: { $0.path == app.path }
+                    ) else {
+                        return
+                    }
+
+                    let currentApp = self.allApps[index]
+
+                    let updatedIcon = Self.springboardIcon(
+                        jarIcon,
+                        name: currentApp.name,
+                        index: index
+                    )
+
+                    let updatedApp = AppInfo(
+                        name: currentApp.name,
+                        path: currentApp.path,
+                        fileName: currentApp.fileName,
+                        version: currentApp.version,
+                        vendor: currentApp.vendor,
+                        icon: updatedIcon
+                    )
+
+                    self.allApps[index] = updatedApp
+
+                    if let visibleIndex = self.apps.firstIndex(
+                        where: { $0.path == app.path }
+                    ) {
+                        self.apps[visibleIndex] = updatedApp
+
+                        let indexPath = IndexPath(
+                            item: visibleIndex,
+                            section: 0
+                        )
+
+                        // Reload only this icon.
+                        // Do not reload the whole collection, which would
+                        // make the remaining icon loading feel stalled.
+                        if self.springboardCollectionView.indexPathsForVisibleItems
+                            .contains(indexPath) {
+
+                            self.springboardCollectionView.reloadItems(
+                                at: [indexPath]
+                            )
+                        }
+                    }
+                }
             }
         }
     }
