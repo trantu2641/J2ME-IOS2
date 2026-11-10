@@ -28,27 +28,16 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      # ==========================================================
-      # PATCH MINIJVM HTTP
-      #
-      # Fix:
-      # 1. Do not reuse persistent HTTP connections.
-      #    A broken server connection can no longer poison the
-      #    connection pool for the following item-icon requests.
-      #
-      # 2. Set 10-second socket timeout.
-      #    A server that stops responding cannot block the MIDlet
-      #    network thread forever.
-      # ==========================================================
-
-      - name: Rebuild MiniJVM HTTP runtime with network recovery fix
+      - name: Patch and rebuild MiniJVM runtime
+        shell: bash
         run: |
           set -euo pipefail
 
           MINI_JVM_DIR="$RUNNER_TEMP/miniJVM"
           MINI_JVM_COMMIT="76f904ea4008a8058db5155bf5ee2cfe94d19e60"
 
-          git clone --filter=blob:none \
+          git clone \
+            --filter=blob:none \
             https://github.com/digitalgust/miniJVM.git \
             "$MINI_JVM_DIR"
 
@@ -61,90 +50,52 @@ jobs:
           import sys
 
           path = Path(sys.argv[1])
-
           text = path.read_text(encoding="utf-8")
 
-          # ------------------------------------------------------
-          # FIX 1:
-          # Disable HTTP persistent connection reuse.
-          #
-          # Original:
-          #     private static boolean nonPersistentFlag;
-          #
-          # Constructor already contains:
-          #
-          #     if (nonPersistentFlag) {
-          #         ConnectionCloseFlag = true;
-          #     }
-          #
-          # Therefore forcing this flag to true makes every HTTP
-          # connection close instead of returning to the pool.
-          # ------------------------------------------------------
-
-          old = "    private static boolean nonPersistentFlag;"
-          new = "    private static boolean nonPersistentFlag = true;"
+          old = "private static boolean nonPersistentFlag;"
+          new = "private static boolean nonPersistentFlag = true;"
 
           if old not in text:
               raise SystemExit(
-                  "PATCH ERROR: nonPersistentFlag declaration not found"
+                  "PATCH ERROR: nonPersistentFlag not found"
               )
 
           text = text.replace(old, new, 1)
 
-          # ------------------------------------------------------
-          # FIX 2:
-          # Add a 10-second socket timeout for direct HTTP.
-          # ------------------------------------------------------
+          old = """conn.openPrim("//" + hostAndPort, Connector.READ_WRITE, true);"""
 
-          old = """            conn.openPrim("//" + hostAndPort, Connector.READ_WRITE, true);
-
-            // Do not delay request since this delays the response."""
-
-          new = """            conn.openPrim("//" + hostAndPort, Connector.READ_WRITE, true);
-            conn.setSocketOption(SocketConnection.TIMEOUT, 10000);
-
-            // Do not delay request since this delays the response."""
+          new = """conn.openPrim("//" + hostAndPort, Connector.READ_WRITE, true);
+          conn.setSocketOption(SocketConnection.TIMEOUT, 10000);"""
 
           if old not in text:
               raise SystemExit(
-                  "PATCH ERROR: direct HTTP connect block not found"
+                  "PATCH ERROR: direct HTTP connection block not found"
               )
 
           text = text.replace(old, new, 1)
 
-          # ------------------------------------------------------
-          # FIX 3:
-          # Add the same timeout when HTTP is using a proxy.
-          # ------------------------------------------------------
+          old = """conn.openPrim("//" + proxyHost + ":" + proxyPort, Connector.READ_WRITE, true);"""
 
-          old = """        conn.openPrim("//" + proxyHost + ":" + proxyPort, Connector.READ_WRITE, true);
-
-        // Do not delay request since this delays the response."""
-
-          new = """        conn.openPrim("//" + proxyHost + ":" + proxyPort, Connector.READ_WRITE, true);
-        conn.setSocketOption(SocketConnection.TIMEOUT, 10000);
-
-        // Do not delay request since this delays the response."""
+          new = """conn.openPrim("//" + proxyHost + ":" + proxyPort, Connector.READ_WRITE, true);
+          conn.setSocketOption(SocketConnection.TIMEOUT, 10000);"""
 
           if old not in text:
               raise SystemExit(
-                  "PATCH ERROR: proxy HTTP connect block not found"
+                  "PATCH ERROR: proxy HTTP connection block not found"
               )
 
           text = text.replace(old, new, 1)
 
           path.write_text(text, encoding="utf-8")
 
-          print()
-          print("==============================================")
-          print("MiniJVM HTTP PATCH APPLIED")
-          print("==============================================")
-          print("Persistent connection reuse : DISABLED")
-          print("Socket timeout              : 10 seconds")
-          print("==============================================")
+          print("======================================")
+          print("MiniJVM HTTP patch applied")
+          print("Persistent connection reuse: disabled")
+          print("Socket timeout: 10 seconds")
+          print("======================================")
           PY
 
-          echo "Building patched MiniJVM runtime..."
+          echo "Building MiniJVM..."
 
           mvn -q \
             -DskipTests \
@@ -158,16 +109,11 @@ jobs:
             "$MINI_JVM_DIR/minijvm/java/target/minijvm_rt.jar" \
             J2MEEmulator/Resources/jars/minijvm_rt.jar
 
-          echo ""
-          echo "Patched MiniJVM runtime:"
           ls -lh \
             J2MEEmulator/Resources/jars/minijvm_rt.jar
 
-      # ==========================================================
-      # BUILD J2ME API
-      # ==========================================================
-
       - name: Build J2ME API runtime JAR
+        shell: bash
         run: |
           set -e
 
@@ -180,12 +126,12 @@ jobs:
             J2MEEmulator/Resources/jars/j2me_api.jar
 
           echo "J2ME runtime JARs:"
-
           ls -lh \
             J2MEEmulator/Resources/jars/minijvm_rt.jar \
             J2MEEmulator/Resources/jars/j2me_api.jar
 
       - name: Verify Xcode project
+        shell: bash
         run: |
           set -e
 
@@ -196,6 +142,7 @@ jobs:
             -project J2MEEmulator.xcodeproj
 
       - name: Build app for iOS 16.4
+        shell: bash
         run: |
           set -o pipefail
 
@@ -214,7 +161,8 @@ jobs:
             CODE_SIGN_IDENTITY='' \
             build 2>&1 | tee "$RUNNER_TEMP/xcodebuild.log"
 
-      - name: Verify app, bundle MiniJVM runtime and package IPA
+      - name: Verify app and package IPA
+        shell: bash
         run: |
           set -e
 
@@ -267,7 +215,6 @@ jobs:
 
           test -s J2ME-iOS-unsigned.ipa
 
-          echo ""
           echo "Verifying runtime files in IPA:"
 
           unzip -Z1 J2ME-iOS-unsigned.ipa \
