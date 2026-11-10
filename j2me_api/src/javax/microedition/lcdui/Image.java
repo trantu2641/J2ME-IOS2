@@ -7,7 +7,6 @@ import java.io.InputStream;
 import java.util.Enumeration;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
-import javax.microedition.io.Connector;
 
 /**
  * J2ME Image compatibility layer.
