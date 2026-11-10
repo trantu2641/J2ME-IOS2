@@ -101,8 +101,25 @@ public final class Connector {
             throw new IOException("Connection does not support input");
         }
 
-        return ((InputConnection) connection).openInputStream();
+        try {
+            return ((InputConnection) connection).openInputStream();
+        } catch (IOException e) {
+            // If one remote icon request fails, immediately destroy that
+            // failed connection so the next request gets a fresh connection.
+            try {
+                connection.close();
+            } catch (IOException ignored) {
+            }
+            throw e;
+        } catch (RuntimeException e) {
+            try {
+                connection.close();
+            } catch (IOException ignored) {
+            }
+            throw e;
+        }
     }
+
 
     public static OutputStream openOutputStream(String name)
         throws IOException {
@@ -186,31 +203,56 @@ public final class Connector {
                 throw new IOException("Connection is not open for reading");
             }
 
-            ensureConnected();
+            try {
+                ensureConnected();
 
-            int responseCode = connection.getResponseCode();
+                int responseCode = connection.getResponseCode();
 
-            if (responseCode >= 400) {
-                InputStream error = connection.getErrorStream();
+                if (responseCode >= 400) {
+                    InputStream error = connection.getErrorStream();
 
-                if (error != null) {
-                    try {
-                        error.close();
-                    } catch (IOException ignored) {
+                    if (error != null) {
+                        try {
+                            error.close();
+                        } catch (IOException ignored) {
+                        }
                     }
+
+                    String message;
+                    try {
+                        message = connection.getResponseMessage();
+                    } catch (IOException ignored) {
+                        message = "";
+                    }
+
+                    throw new IOException(
+                        "HTTP " + responseCode
+                        + " " + message
+                    );
                 }
 
-                throw new IOException(
-                    "HTTP " + responseCode
-                    + " " + connection.getResponseMessage()
-                );
-            }
+                InputStream input = connection.getInputStream();
 
-            return new ConnectionInputStream(
-                connection.getInputStream(),
-                this
-            );
+                if (input == null) {
+                    throw new IOException("HTTP input stream is null");
+                }
+
+                return new ConnectionInputStream(
+                    input,
+                    this
+                );
+            } catch (IOException e) {
+                // A failed request must not poison the following image
+                // requests. Disconnect immediately before propagating
+                // the error to the J2ME caller.
+                close();
+                throw e;
+            } catch (RuntimeException e) {
+                close();
+                throw e;
+            }
         }
+
 
         @Override
         public DataInputStream openDataInputStream() throws IOException {
