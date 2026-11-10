@@ -1,3 +1,4 @@
+```java
 package javax.microedition.lcdui;
 
 import java.io.ByteArrayOutputStream;
@@ -12,8 +13,12 @@ import javax.microedition.io.Connector;
 /**
  * J2ME Image compatibility layer.
  *
- * Missing or corrupted image resources are replaced with a transparent
- * 1x1 image so that optional graphics do not stop the MIDlet.
+ * Missing, corrupted, empty, or failed image resources are replaced with
+ * a transparent 1x1 image so that optional graphics do not stop the MIDlet.
+ *
+ * IMPORTANT:
+ * Remote HTTP/HTTPS image failures are intentionally isolated from the
+ * MIDlet. One failed icon must not stop subsequent icon/resource loads.
  */
 public class Image {
 
@@ -84,14 +89,22 @@ public class Image {
         return img;
     }
 
+    /**
+     * Creates a transparent 1x1 fallback image.
+     *
+     * Used when an optional image/resource is missing, invalid,
+     * corrupted, empty, or cannot be downloaded.
+     */
     private static Image createTransparentPlaceholder() {
 
         long handle = 0;
 
         try {
+
             handle = NativeBridge.createMutableImage(1, 1);
 
             if (handle == 0) {
+
                 System.out.println(
                     "[Image] COMPAT: unable to allocate placeholder"
                 );
@@ -99,9 +112,11 @@ public class Image {
                 return new Image(0, 1, 1, false);
             }
 
-            long context = NativeBridge.getImageContext(handle);
+            long context =
+                NativeBridge.getImageContext(handle);
 
             if (context != 0) {
+
                 NativeBridge.drawRGB(
                     context,
                     new int[] { 0x00000000 },
@@ -115,11 +130,17 @@ public class Image {
                 );
             }
 
-            return new Image(handle, 1, 1, false);
+            return new Image(
+                handle,
+                1,
+                1,
+                false
+            );
 
         } catch (RuntimeException e) {
 
             if (handle != 0) {
+
                 try {
                     NativeBridge.destroyImage(handle);
                 } catch (RuntimeException ignored) {
@@ -127,17 +148,29 @@ public class Image {
             }
 
             System.out.println(
-                "[Image] COMPAT: placeholder creation failed: " + e
+                "[Image] COMPAT: placeholder creation failed: "
+                + e
             );
 
-            return new Image(0, 1, 1, false);
+            return new Image(
+                0,
+                1,
+                1,
+                false
+            );
         }
     }
 
-    private static void logFallback(String name, String reason) {
+    private static void logFallback(
+        String name,
+        String reason
+    ) {
+
         System.out.println(
-            "[Image] COMPAT: " + reason
-            + ": " + name
+            "[Image] COMPAT: "
+            + reason
+            + ": "
+            + name
             + " (using transparent placeholder)"
         );
     }
@@ -145,102 +178,232 @@ public class Image {
     /**
      * Creates an image from a JAR resource name.
      *
-     * If the supplied name is an HTTP/HTTPS URL, it is treated as a remote
-     * resource and downloaded through Connector instead of being searched
-     * inside the JAR.
+     * Local missing/corrupted resources are replaced with a transparent
+     * placeholder.
+     *
+     * HTTP/HTTPS resources are also isolated:
+     *
+     *     request A -> OK
+     *     request B -> FAILED -> placeholder
+     *     request C -> still allowed to continue
+     *
+     * A failed remote icon must never be allowed to kill the resource
+     * loading chain by propagating its IOException.
      */
-    public static Image createImage(String name) throws IOException {
+    public static Image createImage(String name)
+        throws IOException {
 
         if (name == null || name.length() == 0) {
+
             logFallback(
                 String.valueOf(name),
                 "invalid resource name"
             );
+
             return createTransparentPlaceholder();
         }
 
+        /*
+         * ------------------------------------------------------------
+         * Remote HTTP/HTTPS image
+         * ------------------------------------------------------------
+         */
         if (isRemoteURL(name)) {
+
             InputStream remote = null;
 
             try {
-                remote = Connector.openInputStream(name, Connector.READ);
+
+                System.out.println(
+                    "[Image] REMOTE: loading " + name
+                );
+
+                remote =
+                    Connector.openInputStream(
+                        name,
+                        Connector.READ
+                    );
+
+                if (remote == null) {
+
+                    logFallback(
+                        name,
+                        "remote connection returned null stream"
+                    );
+
+                    return createTransparentPlaceholder();
+                }
+
+                /*
+                 * IMPORTANT:
+                 *
+                 * createImage(InputStream) already reads and closes
+                 * the stream. Do not throw the remote IOException here.
+                 *
+                 * A broken icon is treated as an optional resource.
+                 */
                 return createImage(remote);
 
             } catch (IOException e) {
-                // A remote resource is not the same thing as a missing
-                // local JAR entry. Keep the failure visible to the MIDlet.
-                System.out.println(
-                    "[Image] REMOTE: failed to download "
-                    + name + ": " + e
+
+                /*
+                 * THIS is the important compatibility behavior.
+                 *
+                 * Previously this code did:
+                 *
+                 *     throw e;
+                 *
+                 * That allowed one failed server icon to propagate
+                 * into the game and potentially terminate its loader.
+                 *
+                 * Now the failed icon is replaced by a transparent
+                 * placeholder and the Java game is allowed to continue.
+                 */
+                logFallback(
+                    name,
+                    "remote image request failed: " + e
                 );
-                throw e;
+
+                return createTransparentPlaceholder();
+
+            } catch (RuntimeException e) {
+
+                /*
+                 * Protect the MIDlet from native/network runtime errors
+                 * caused by one optional image.
+                 */
+                logFallback(
+                    name,
+                    "remote image runtime failure: " + e
+                );
+
+                return createTransparentPlaceholder();
 
             } finally {
+
+                /*
+                 * Defensive close.
+                 *
+                 * Some InputStream implementations may already have
+                 * been closed by createImage(InputStream). Calling close()
+                 * again is intentionally ignored.
+                 */
                 if (remote != null) {
+
                     try {
                         remote.close();
                     } catch (IOException ignored) {
+                    } catch (RuntimeException ignored) {
                     }
                 }
             }
         }
 
+        /*
+         * ------------------------------------------------------------
+         * Local JAR resource
+         * ------------------------------------------------------------
+         */
         try {
-            InputStream is = findResource(name);
+
+            InputStream is =
+                findResource(name);
 
             if (is == null) {
+
                 logFallback(
                     name,
                     "local resource not found"
                 );
+
                 return createTransparentPlaceholder();
             }
 
             return createImage(is);
 
         } catch (IOException e) {
+
             logFallback(
                 name,
                 "local resource read failed: " + e
             );
+
             return createTransparentPlaceholder();
 
         } catch (RuntimeException e) {
+
             logFallback(
                 name,
                 "local resource loader failed: " + e
             );
+
             return createTransparentPlaceholder();
         }
     }
 
     private static boolean isRemoteURL(String name) {
-        return startsWithIgnoreCase(name, "http://")
-            || startsWithIgnoreCase(name, "https://");
+
+        return startsWithIgnoreCase(
+            name,
+            "http://"
+        )
+        || startsWithIgnoreCase(
+            name,
+            "https://"
+        );
     }
 
     private static boolean startsWithIgnoreCase(
         String value,
         String prefix
     ) {
-        if (value == null || prefix == null) {
+
+        if (
+            value == null
+            || prefix == null
+        ) {
             return false;
         }
 
-        if (value.length() < prefix.length()) {
+        if (
+            value.length()
+            < prefix.length()
+        ) {
             return false;
         }
 
-        for (int i = 0; i < prefix.length(); i++) {
-            char a = value.charAt(i);
-            char b = prefix.charAt(i);
+        for (
+            int i = 0;
+            i < prefix.length();
+            i++
+        ) {
 
-            if (a >= 'A' && a <= 'Z') {
-                a = (char)(a + ('a' - 'A'));
+            char a =
+                value.charAt(i);
+
+            char b =
+                prefix.charAt(i);
+
+            if (
+                a >= 'A'
+                && a <= 'Z'
+            ) {
+                a =
+                    (char)(
+                        a
+                        + ('a' - 'A')
+                    );
             }
 
-            if (b >= 'A' && b <= 'Z') {
-                b = (char)(b + ('a' - 'A'));
+            if (
+                b >= 'A'
+                && b <= 'Z'
+            ) {
+                b =
+                    (char)(
+                        b
+                        + ('a' - 'A')
+                    );
             }
 
             if (a != b) {
@@ -251,29 +414,43 @@ public class Image {
         return true;
     }
 
-    private static InputStream findResource(String name) {
+    private static InputStream findResource(
+        String name
+    ) {
 
-        if (name == null || name.length() == 0) {
+        if (
+            name == null
+            || name.length() == 0
+        ) {
             return null;
         }
 
-        InputStream is = tryLoadResource(name);
+        InputStream is =
+            tryLoadResource(name);
 
         if (is != null) {
             return is;
         }
 
-        if (name.lastIndexOf('.') <= name.lastIndexOf('/')) {
+        if (
+            name.lastIndexOf('.')
+            <= name.lastIndexOf('/')
+        ) {
 
-            String searchName = name.startsWith("/")
-                ? name.substring(1)
-                : name;
+            String searchName =
+                name.startsWith("/")
+                    ? name.substring(1)
+                    : name;
 
-            String match = findEntryByPrefix(searchName);
+            String match =
+                findEntryByPrefix(searchName);
 
             if (match != null) {
 
-                is = tryLoadResource("/" + match);
+                is =
+                    tryLoadResource(
+                        "/" + match
+                    );
 
                 if (is != null) {
                     return is;
@@ -284,23 +461,38 @@ public class Image {
         return null;
     }
 
-    private static String findEntryByPrefix(String name) {
+    private static String findEntryByPrefix(
+        String name
+    ) {
 
-        String cp = System.getProperty("java.class.path");
+        String cp =
+            System.getProperty(
+                "java.class.path"
+            );
 
-        if (cp == null || cp.length() == 0) {
+        if (
+            cp == null
+            || cp.length() == 0
+        ) {
             return null;
         }
 
-        String[] paths = cp.split(File.pathSeparator);
+        String[] paths =
+            cp.split(
+                File.pathSeparator
+            );
 
         for (String path : paths) {
 
-            if (path == null || path.length() == 0) {
+            if (
+                path == null
+                || path.length() == 0
+            ) {
                 continue;
             }
 
-            File f = new File(path);
+            File f =
+                new File(path);
 
             if (!f.isFile()) {
                 continue;
@@ -310,27 +502,48 @@ public class Image {
 
             try {
 
-                zf = new ZipFile(f);
+                zf =
+                    new ZipFile(f);
 
-                Enumeration entries = zf.entries();
+                Enumeration entries =
+                    zf.entries();
 
-                while (entries.hasMoreElements()) {
+                while (
+                    entries.hasMoreElements()
+                ) {
 
                     ZipEntry entry =
-                        (ZipEntry) entries.nextElement();
+                        (ZipEntry)
+                            entries.nextElement();
 
-                    String entryName = entry.getName();
+                    String entryName =
+                        entry.getName();
 
-                    int dotIdx = entryName.lastIndexOf('.');
+                    int dotIdx =
+                        entryName.lastIndexOf(
+                            '.'
+                        );
 
                     if (dotIdx > 0) {
 
                         String baseName =
-                            entryName.substring(0, dotIdx);
+                            entryName.substring(
+                                0,
+                                dotIdx
+                            );
 
-                        if (baseName.equals(name)) {
+                        if (
+                            baseName.equals(name)
+                        ) {
 
+                            /*
+                             * The stream itself will be opened separately.
+                             * Close this ZIP immediately.
+                             */
                             zf.close();
+
+                            zf = null;
+
                             return entryName;
                         }
                     }
@@ -338,15 +551,21 @@ public class Image {
 
             } catch (IOException e) {
 
-                // Skip unreadable JAR.
+                /*
+                 * One unreadable JAR must not affect
+                 * resource loading from other paths.
+                 */
 
             } catch (RuntimeException e) {
 
-                // Skip malformed or unsupported JAR.
+                /*
+                 * Malformed/unsupported JAR is also isolated.
+                 */
 
             } finally {
 
                 if (zf != null) {
+
                     try {
                         zf.close();
                     } catch (IOException ignored) {
@@ -358,12 +577,16 @@ public class Image {
         return null;
     }
 
-    private static InputStream tryLoadResource(String name) {
+    private static InputStream tryLoadResource(
+        String name
+    ) {
 
         try {
 
             InputStream is =
-                Image.class.getResourceAsStream(name);
+                Image.class.getResourceAsStream(
+                    name
+                );
 
             if (is != null) {
                 return is;
@@ -371,7 +594,10 @@ public class Image {
 
             if (!name.startsWith("/")) {
 
-                is = Image.class.getResourceAsStream("/" + name);
+                is =
+                    Image.class.getResourceAsStream(
+                        "/" + name
+                    );
 
                 if (is != null) {
                     return is;
@@ -379,11 +605,15 @@ public class Image {
             }
 
             ClassLoader cl =
-                Thread.currentThread().getContextClassLoader();
+                Thread.currentThread()
+                    .getContextClassLoader();
 
             if (cl != null) {
 
-                is = cl.getResourceAsStream(name);
+                is =
+                    cl.getResourceAsStream(
+                        name
+                    );
 
                 if (is != null) {
                     return is;
@@ -391,9 +621,10 @@ public class Image {
 
                 if (name.startsWith("/")) {
 
-                    is = cl.getResourceAsStream(
-                        name.substring(1)
-                    );
+                    is =
+                        cl.getResourceAsStream(
+                            name.substring(1)
+                        );
 
                     if (is != null) {
                         return is;
@@ -405,29 +636,62 @@ public class Image {
 
             System.out.println(
                 "[Image] COMPAT: resource lookup failed for "
-                + name + ": " + e
+                + name
+                + ": "
+                + e
             );
         }
 
         return null;
     }
 
-    public static Image createImage(InputStream stream)
-        throws IOException {
+    /**
+     * Creates an image from an InputStream.
+     *
+     * Any failure while reading/decoding an optional image is converted
+     * into a transparent placeholder.
+     */
+    public static Image createImage(
+        InputStream stream
+    ) throws IOException {
 
         if (stream == null) {
+
             logFallback(
                 "InputStream",
                 "null input stream"
             );
+
             return createTransparentPlaceholder();
         }
 
         try {
 
-            byte[] data = readAllBytes(stream);
+            byte[] data =
+                readAllBytes(stream);
 
-            return createImage(data, 0, data.length);
+            /*
+             * Empty response body is treated as a missing/broken image,
+             * not as a fatal MIDlet error.
+             */
+            if (
+                data == null
+                || data.length == 0
+            ) {
+
+                logFallback(
+                    "InputStream",
+                    "empty image data"
+                );
+
+                return createTransparentPlaceholder();
+            }
+
+            return createImage(
+                data,
+                0,
+                data.length
+            );
 
         } catch (IOException e) {
 
@@ -435,6 +699,7 @@ public class Image {
                 "InputStream",
                 "image read failed: " + e
             );
+
             return createTransparentPlaceholder();
 
         } catch (RuntimeException e) {
@@ -443,6 +708,7 @@ public class Image {
                 "InputStream",
                 "image decoding failed: " + e
             );
+
             return createTransparentPlaceholder();
         }
     }
@@ -454,22 +720,28 @@ public class Image {
     ) {
 
         if (imageData == null) {
+
             logFallback(
                 "byte[]",
                 "null image data"
             );
+
             return createTransparentPlaceholder();
         }
 
         if (
             imageOffset < 0
             || imageLength <= 0
-            || imageOffset > imageData.length - imageLength
+            || imageOffset
+                > imageData.length
+                    - imageLength
         ) {
+
             logFallback(
                 "byte[]",
                 "invalid or empty image data"
             );
+
             return createTransparentPlaceholder();
         }
 
@@ -477,26 +749,45 @@ public class Image {
 
         try {
 
-            handle = NativeBridge.createImageFromData(
-                imageData,
-                imageOffset,
-                imageLength
-            );
+            handle =
+                NativeBridge.createImageFromData(
+                    imageData,
+                    imageOffset,
+                    imageLength
+                );
 
             if (handle == 0) {
+
                 logFallback(
                     "byte[]",
                     "native image decoder failed"
                 );
+
                 return createTransparentPlaceholder();
             }
 
-            int w = NativeBridge.getImageWidth(handle);
-            int h = NativeBridge.getImageHeight(handle);
+            int w =
+                NativeBridge.getImageWidth(
+                    handle
+                );
 
-            if (w <= 0 || h <= 0) {
+            int h =
+                NativeBridge.getImageHeight(
+                    handle
+                );
 
-                NativeBridge.destroyImage(handle);
+            if (
+                w <= 0
+                || h <= 0
+            ) {
+
+                try {
+                    NativeBridge.destroyImage(
+                        handle
+                    );
+                } catch (RuntimeException ignored) {
+                }
+
                 handle = 0;
 
                 logFallback(
@@ -507,13 +798,21 @@ public class Image {
                 return createTransparentPlaceholder();
             }
 
-            return new Image(handle, w, h, false);
+            return new Image(
+                handle,
+                w,
+                h,
+                false
+            );
 
         } catch (RuntimeException e) {
 
             if (handle != 0) {
+
                 try {
-                    NativeBridge.destroyImage(handle);
+                    NativeBridge.destroyImage(
+                        handle
+                    );
                 } catch (RuntimeException ignored) {
                 }
             }
@@ -545,13 +844,19 @@ public class Image {
             || transform == 7
             || transform == 4
         ) {
+
             outW = height;
             outH = width;
         }
 
-        Image result = createImage(outW, outH);
+        Image result =
+            createImage(
+                outW,
+                outH
+            );
 
-        Graphics g = result.getGraphics();
+        Graphics g =
+            result.getGraphics();
 
         g.drawRegion(
             source,
@@ -562,7 +867,8 @@ public class Image {
             transform,
             0,
             0,
-            Graphics.LEFT | Graphics.TOP
+            Graphics.LEFT
+                | Graphics.TOP
         );
 
         result.mutable = false;
@@ -570,20 +876,25 @@ public class Image {
         return result;
     }
 
-    public static Image createImage(Image source) {
+    public static Image createImage(
+        Image source
+    ) {
 
-        Image copy = createImage(
-            source.width,
-            source.height
-        );
+        Image copy =
+            createImage(
+                source.width,
+                source.height
+            );
 
-        Graphics g = copy.getGraphics();
+        Graphics g =
+            copy.getGraphics();
 
         g.drawImage(
             source,
             0,
             0,
-            Graphics.LEFT | Graphics.TOP
+            Graphics.LEFT
+                | Graphics.TOP
         );
 
         return copy;
@@ -596,9 +907,14 @@ public class Image {
         boolean processAlpha
     ) {
 
-        Image img = createImage(width, height);
+        Image img =
+            createImage(
+                width,
+                height
+            );
 
-        Graphics g = img.getGraphics();
+        Graphics g =
+            img.getGraphics();
 
         g.drawRGB(
             rgb,
@@ -617,6 +933,7 @@ public class Image {
     public Graphics getGraphics() {
 
         if (!mutable) {
+
             throw new IllegalStateException(
                 "Image is not mutable"
             );
@@ -625,15 +942,19 @@ public class Image {
         if (cachedGraphics == null) {
 
             long ctx =
-                NativeBridge.getImageContext(nativeHandle);
+                NativeBridge.getImageContext(
+                    nativeHandle
+                );
 
-            cachedGraphics = new Graphics(
-                ctx,
-                width,
-                height
-            );
+            cachedGraphics =
+                new Graphics(
+                    ctx,
+                    width,
+                    height
+                );
 
-            cachedGraphics.ownsContext = true;
+            cachedGraphics.ownsContext =
+                true;
         }
 
         return cachedGraphics;
@@ -673,33 +994,54 @@ public class Image {
         );
     }
 
-    private static byte[] readAllBytes(InputStream is)
-        throws IOException {
+    /**
+     * Reads the complete stream.
+     *
+     * The stream is ALWAYS closed here, including when read() fails.
+     */
+    private static byte[] readAllBytes(
+        InputStream is
+    ) throws IOException {
 
         if (is == null) {
-            throw new IOException("InputStream is null");
+
+            throw new IOException(
+                "InputStream is null"
+            );
         }
 
         ByteArrayOutputStream bos =
-            new ByteArrayOutputStream(4096);
+            new ByteArrayOutputStream(
+                4096
+            );
 
-        byte[] buf = new byte[4096];
+        byte[] buf =
+            new byte[4096];
 
         try {
 
             while (true) {
 
-                int n = is.read(buf);
+                int n =
+                    is.read(buf);
 
                 if (n < 0) {
                     break;
                 }
 
+                /*
+                 * Some broken HTTP/InputStream implementations
+                 * may return 0. Do not treat that as EOF.
+                 */
                 if (n == 0) {
                     continue;
                 }
 
-                bos.write(buf, 0, n);
+                bos.write(
+                    buf,
+                    0,
+                    n
+                );
             }
 
             return bos.toByteArray();
@@ -709,17 +1051,24 @@ public class Image {
             try {
                 is.close();
             } catch (IOException ignored) {
+            } catch (RuntimeException ignored) {
             }
         }
     }
 
-    protected void finalize() throws Throwable {
+    protected void finalize()
+        throws Throwable {
 
         cachedGraphics = null;
 
         if (nativeHandle != 0) {
 
-            NativeBridge.destroyImage(nativeHandle);
+            try {
+                NativeBridge.destroyImage(
+                    nativeHandle
+                );
+            } catch (RuntimeException ignored) {
+            }
 
             nativeHandle = 0;
         }
@@ -727,3 +1076,4 @@ public class Image {
         super.finalize();
     }
 }
+```
