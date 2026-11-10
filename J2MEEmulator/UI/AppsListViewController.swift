@@ -1207,7 +1207,7 @@ class AppsListViewController: UIViewController,
                     image: UIImage(systemName: "pencil")
                 ) { _ in
 
-                    self?.renameApp(app)
+                    self.renameApp(app)
                 }
 
                 // Change icon.
@@ -1216,7 +1216,7 @@ class AppsListViewController: UIViewController,
                     image: UIImage(systemName: "photo")
                 ) { _ in
 
-                    self?.changeIcon(for: app)
+                    self.changeIcon(for: app)
                 }
 
                 // Restore JAR's original icon.
@@ -1229,7 +1229,7 @@ class AppsListViewController: UIViewController,
                         image: UIImage(systemName: "arrow.uturn.backward")
                     ) { _ in
 
-                        self?.resetCustomIcon(for: app)
+                        self.resetCustomIcon(for: app)
                     }
 
                     iconActions = [
@@ -1252,7 +1252,7 @@ class AppsListViewController: UIViewController,
                     image: UIImage(systemName: "doc.on.doc")
                 ) { _ in
 
-                    self?.duplicateApp(app)
+                    self.duplicateApp(app)
                 }
 
                 let manageMenu = UIMenu(
@@ -1365,7 +1365,7 @@ class AppsListViewController: UIViewController,
                     image: UIImage(systemName: "eraser")
                 ) { _ in
 
-                    self?.confirmClearGameData(for: app)
+                    self.confirmClearGameData(for: app)
                 }
 
                 // Delete JAR.
@@ -1375,7 +1375,7 @@ class AppsListViewController: UIViewController,
                     attributes: .destructive
                 ) { _ in
 
-                    self?.confirmDeleteApp(for: app)
+                    self.confirmDeleteApp(for: app)
                 }
 
                 let actions = UIMenu(
