@@ -1170,6 +1170,21 @@ class AppsListViewController: UIViewController,
     }
 
     // MARK: - Long press menu
+    //
+    // IMPORTANT:
+    // iOS 16 can crash when a UIContextMenu contains deeply nested UIMenus
+    // (for example: Settings -> Screen Resolution -> item) and the submenu
+    // is opened and immediately collapsed again.
+    //
+    // Keep the grouped layout, but limit the hierarchy to ONE submenu level.
+    // This preserves:
+    //   Manage JAR >
+    //   Settings >
+    //   FPS Limit >
+    //   Clear / Delete
+    //
+    // Screen Resolution options are kept inside Settings instead of creating
+    // another nested UIMenu.
 
     func collectionView(
         _ collectionView: UICollectionView,
@@ -1178,17 +1193,19 @@ class AppsListViewController: UIViewController,
     ) -> UIContextMenuConfiguration? {
 
         guard let indexPath = indexPaths.first,
+              indexPath.section >= 0,
               indexPath.item >= 0,
               indexPath.item < apps.count else {
             return nil
         }
 
-        // Copy the value out of the array before UIKit starts building the menu.
-        // This avoids depending on a live IndexPath during menu expansion/collapse.
-        let app = apps[indexPath.item]
+        // Capture the JAR path, not only the array position.
+        // If scanApps() reloads the collection while the context menu is open,
+        // the old IndexPath can become invalid.
+        let appPath = apps[indexPath.item].path
 
         return UIContextMenuConfiguration(
-            identifier: NSString(string: Self.gameId(for: app)),
+            identifier: NSString(string: appPath),
             previewProvider: nil,
             actionProvider: { [weak self] _ in
 
@@ -1196,56 +1213,73 @@ class AppsListViewController: UIViewController,
                     return nil
                 }
 
-                // -------------------------------------------------------------
-                // Manage JAR
-                // -------------------------------------------------------------
+                // Resolve the current AppInfo from its stable path.
+                // Never access apps[indexPath.item] from a delayed menu action.
+                guard let app = self.apps.first(where: {
+                    $0.path == appPath
+                }) else {
+                    return nil
+                }
+
+                // =========================================================
+                // MANAGE JAR
+                // =========================================================
+
                 let rename = UIAction(
                     title: "Rename",
                     image: UIImage(systemName: "pencil")
                 ) { [weak self] _ in
-                    self?.renameApp(app)
+                    guard let self else { return }
+                    self.renameApp(app)
                 }
 
                 let changeIcon = UIAction(
                     title: "Change Icon...",
                     image: UIImage(systemName: "photo")
                 ) { [weak self] _ in
-                    self?.changeIcon(for: app)
+                    guard let self else { return }
+                    self.changeIcon(for: app)
                 }
 
-                var iconActions: [UIAction] = [
+                var manageChildren: [UIMenuElement] = [
                     rename,
                     changeIcon
                 ]
 
                 if Self.hasCustomIcon(for: app) {
-                    iconActions.append(
-                        UIAction(
-                            title: "Restore Original Icon",
-                            image: UIImage(systemName: "arrow.uturn.backward")
-                        ) { [weak self] _ in
-                            self?.resetCustomIcon(for: app)
-                        }
-                    )
+                    let resetIcon = UIAction(
+                        title: "Restore Original Icon",
+                        image: UIImage(
+                            systemName: "arrow.uturn.backward"
+                        )
+                    ) { [weak self] _ in
+                        guard let self else { return }
+                        self.resetCustomIcon(for: app)
+                    }
+
+                    manageChildren.append(resetIcon)
                 }
 
-                iconActions.append(
-                    UIAction(
-                        title: "Duplicate Install",
-                        image: UIImage(systemName: "doc.on.doc")
-                    ) { [weak self] _ in
-                        self?.duplicateApp(app)
-                    }
+                let duplicate = UIAction(
+                    title: "Duplicate Install",
+                    image: UIImage(systemName: "doc.on.doc")
+                ) { [weak self] _ in
+                    guard let self else { return }
+                    self.duplicateApp(app)
+                }
+
+                manageChildren.append(duplicate)
+
+                let manageMenu = UIMenu(
+                    title: "Manage JAR",
+                    image: UIImage(systemName: "app"),
+                    children: manageChildren
                 )
 
-                // -------------------------------------------------------------
-                // Settings
-                //
-                // IMPORTANT: this is deliberately ONE submenu level.
-                // The old code had Settings -> Screen Resolution -> actions.
-                // UIKit on iOS 16 can become unstable when that nested menu is
-                // expanded and collapsed from a UICollectionView context menu.
-                // -------------------------------------------------------------
+                // =========================================================
+                // SETTINGS
+                // =========================================================
+
                 let ssEnabled = Self.is3DSupersampling(for: app)
 
                 let toggle3D = UIAction(
@@ -1261,16 +1295,31 @@ class AppsListViewController: UIViewController,
                     )
                 }
 
+                // IMPORTANT:
+                // Do NOT put these resolution actions inside another UIMenu.
+                // That creates Settings -> Screen Resolution -> item, which
+                // is the nested hierarchy that is unsafe on iOS 16.
                 let currentRes = Self.resolution(for: app)
 
-                let resolutionActions = Self.resolutionOptions.map { option in
+                var settingsChildren: [UIMenuElement] = [
+                    toggle3D
+                ]
+
+                let resolutionHeader = UIAction(
+                    title: "Screen Resolution",
+                    image: UIImage(systemName: "aspectratio"),
+                    attributes: [.disabled]
+                ) { _ in }
+
+                settingsChildren.append(resolutionHeader)
+
+                let resActions = Self.resolutionOptions.map { option in
                     UIAction(
                         title: option.label,
-                        state:
+                        state: (
                             option.w == currentRes.w &&
                             option.h == currentRes.h
-                            ? .on
-                            : .off
+                        ) ? .on : .off
                     ) { _ in
                         Self.setResolution(
                             w: option.w,
@@ -1280,28 +1329,37 @@ class AppsListViewController: UIViewController,
                     }
                 }
 
+                settingsChildren.append(contentsOf: resActions)
+
                 let customResolution = UIAction(
                     title: "Custom Resolution...",
-                    image: UIImage(systemName: "slider.horizontal.3")
+                    image: UIImage(
+                        systemName: "slider.horizontal.3"
+                    )
                 ) { [weak self] _ in
-                    self?.promptCustomResolution(for: app)
+                    guard let self else { return }
+                    self.promptCustomResolution(for: app)
                 }
 
-                // Settings contains the resolution actions directly.
-                // No Settings -> Resolution -> Actions nesting.
-                let settingsActions = [toggle3D]
-                    + resolutionActions
-                    + [customResolution]
+                settingsChildren.append(customResolution)
 
-                // -------------------------------------------------------------
+                // ONE level only:
+                // Settings -> actions
+                let settingsMenu = UIMenu(
+                    title: "Settings",
+                    image: UIImage(systemName: "gearshape"),
+                    children: settingsChildren
+                )
+
+                // =========================================================
                 // FPS
-                // -------------------------------------------------------------
+                // =========================================================
+
                 let currentFps = Self.fpsLimit(for: app)
 
                 let fpsActions = Self.fpsLimitOptions.map { option in
                     UIAction(
                         title: option.label,
-                        image: nil,
                         state: option.value == currentFps
                             ? .on
                             : .off
@@ -1313,14 +1371,22 @@ class AppsListViewController: UIViewController,
                     }
                 }
 
-                // -------------------------------------------------------------
-                // Data actions
-                // -------------------------------------------------------------
+                let fpsMenu = UIMenu(
+                    title: "FPS Limit",
+                    image: UIImage(systemName: "speedometer"),
+                    children: fpsActions
+                )
+
+                // =========================================================
+                // DATA / DELETE
+                // =========================================================
+
                 let clearData = UIAction(
                     title: "Clear Game Data",
                     image: UIImage(systemName: "eraser")
                 ) { [weak self] _ in
-                    self?.confirmClearGameData(for: app)
+                    guard let self else { return }
+                    self.confirmClearGameData(for: app)
                 }
 
                 let delete = UIAction(
@@ -1328,32 +1394,33 @@ class AppsListViewController: UIViewController,
                     image: UIImage(systemName: "trash"),
                     attributes: .destructive
                 ) { [weak self] _ in
-                    self?.confirmDeleteApp(for: app)
+                    guard let self else { return }
+                    self.confirmDeleteApp(for: app)
                 }
 
-                // Four top-level groups remain visually clean, but there is
-                // only one level of expandable submenu under each group.
-                return UIMenu(children: [
-                    UIMenu(
-                        title: "Manage JAR",
-                        image: UIImage(systemName: "app"),
-                        children: iconActions
-                    ),
-                    UIMenu(
-                        title: "Settings",
-                        image: UIImage(systemName: "gearshape"),
-                        children: settingsActions
-                    ),
-                    UIMenu(
-                        title: "FPS Limit",
-                        image: UIImage(systemName: "speedometer"),
-                        children: fpsActions
-                    ),
-                    UIMenu(
-                        options: .displayInline,
-                        children: [clearData, delete]
-                    )
-                ])
+                let actions = UIMenu(
+                    options: .displayInline,
+                    children: [
+                        clearData,
+                        delete
+                    ]
+                )
+
+                // =========================================================
+                // ROOT MENU
+                // =========================================================
+
+                // Keep the original grouped appearance.
+                // The only structural change is that Settings no longer
+                // contains a second UIMenu for Screen Resolution.
+                return UIMenu(
+                    children: [
+                        manageMenu,
+                        settingsMenu,
+                        fpsMenu,
+                        actions
+                    ]
+                )
             }
         )
     }
@@ -1444,8 +1511,7 @@ class AppsListViewController: UIViewController,
         ("15 FPS", 15),
         ("20 FPS", 20),
         ("30 FPS", 30),
-        ("45 FPS", 45),
-        ("60 FPS", 60)
+        ("45 FPS", 45)
     ]
 
     static func fpsLimit(for app: AppInfo) -> Int {
@@ -1455,16 +1521,16 @@ class AppsListViewController: UIViewController,
         guard let saved = UserDefaults.standard.object(
             forKey: key
         ) as? Int else {
-            return 0
+            return 30
         }
 
         switch saved {
 
-        case 0, 15, 20, 30, 45, 60:
+        case 0, 15, 20, 30, 45:
             return saved
 
         default:
-            return 0
+            return 30
         }
     }
 
@@ -1475,7 +1541,7 @@ class AppsListViewController: UIViewController,
 
         let safeFPS = fpsLimitOptions.contains {
             $0.value == fps
-        } ? fps : 0
+        } ? fps : 30
 
         UserDefaults.standard.set(
             safeFPS,
