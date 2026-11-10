@@ -28,24 +28,177 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      # ==========================================================
+      # PATCH MINIJVM HTTP
+      #
+      # Fix:
+      # 1. Do not reuse persistent HTTP connections.
+      #    A broken server connection can no longer poison the
+      #    connection pool for the following item-icon requests.
+      #
+      # 2. Set 10-second socket timeout.
+      #    A server that stops responding cannot block the MIDlet
+      #    network thread forever.
+      # ==========================================================
+
+      - name: Rebuild MiniJVM HTTP runtime with network recovery fix
+        run: |
+          set -euo pipefail
+
+          MINI_JVM_DIR="$RUNNER_TEMP/miniJVM"
+          MINI_JVM_COMMIT="76f904ea4008a8058db5155bf5ee2cfe94d19e60"
+
+          git clone --filter=blob:none \
+            https://github.com/digitalgust/miniJVM.git \
+            "$MINI_JVM_DIR"
+
+          git -C "$MINI_JVM_DIR" checkout --detach "$MINI_JVM_COMMIT"
+
+          PROTOCOL="$MINI_JVM_DIR/minijvm/java/src/main/java/org/mini/net/http/Protocol.java"
+
+          python3 - "$PROTOCOL" <<'PY'
+          from pathlib import Path
+          import sys
+
+          path = Path(sys.argv[1])
+
+          text = path.read_text(encoding="utf-8")
+
+          # ------------------------------------------------------
+          # FIX 1:
+          # Disable HTTP persistent connection reuse.
+          #
+          # Original:
+          #     private static boolean nonPersistentFlag;
+          #
+          # Constructor already contains:
+          #
+          #     if (nonPersistentFlag) {
+          #         ConnectionCloseFlag = true;
+          #     }
+          #
+          # Therefore forcing this flag to true makes every HTTP
+          # connection close instead of returning to the pool.
+          # ------------------------------------------------------
+
+          old = "    private static boolean nonPersistentFlag;"
+          new = "    private static boolean nonPersistentFlag = true;"
+
+          if old not in text:
+              raise SystemExit(
+                  "PATCH ERROR: nonPersistentFlag declaration not found"
+              )
+
+          text = text.replace(old, new, 1)
+
+          # ------------------------------------------------------
+          # FIX 2:
+          # Add a 10-second socket timeout for direct HTTP.
+          # ------------------------------------------------------
+
+          old = """            conn.openPrim("//" + hostAndPort, Connector.READ_WRITE, true);
+
+            // Do not delay request since this delays the response."""
+
+          new = """            conn.openPrim("//" + hostAndPort, Connector.READ_WRITE, true);
+            conn.setSocketOption(SocketConnection.TIMEOUT, 10000);
+
+            // Do not delay request since this delays the response."""
+
+          if old not in text:
+              raise SystemExit(
+                  "PATCH ERROR: direct HTTP connect block not found"
+              )
+
+          text = text.replace(old, new, 1)
+
+          # ------------------------------------------------------
+          # FIX 3:
+          # Add the same timeout when HTTP is using a proxy.
+          # ------------------------------------------------------
+
+          old = """        conn.openPrim("//" + proxyHost + ":" + proxyPort, Connector.READ_WRITE, true);
+
+        // Do not delay request since this delays the response."""
+
+          new = """        conn.openPrim("//" + proxyHost + ":" + proxyPort, Connector.READ_WRITE, true);
+        conn.setSocketOption(SocketConnection.TIMEOUT, 10000);
+
+        // Do not delay request since this delays the response."""
+
+          if old not in text:
+              raise SystemExit(
+                  "PATCH ERROR: proxy HTTP connect block not found"
+              )
+
+          text = text.replace(old, new, 1)
+
+          path.write_text(text, encoding="utf-8")
+
+          print()
+          print("==============================================")
+          print("MiniJVM HTTP PATCH APPLIED")
+          print("==============================================")
+          print("Persistent connection reuse : DISABLED")
+          print("Socket timeout              : 10 seconds")
+          print("==============================================")
+          PY
+
+          echo "Building patched MiniJVM runtime..."
+
+          mvn -q \
+            -DskipTests \
+            package \
+            -f "$MINI_JVM_DIR/minijvm/java/pom.xml"
+
+          test -s \
+            "$MINI_JVM_DIR/minijvm/java/target/minijvm_rt.jar"
+
+          cp \
+            "$MINI_JVM_DIR/minijvm/java/target/minijvm_rt.jar" \
+            J2MEEmulator/Resources/jars/minijvm_rt.jar
+
+          echo ""
+          echo "Patched MiniJVM runtime:"
+          ls -lh \
+            J2MEEmulator/Resources/jars/minijvm_rt.jar
+
+      # ==========================================================
+      # BUILD J2ME API
+      # ==========================================================
+
       - name: Build J2ME API runtime JAR
         run: |
           set -e
-          test -f J2MEEmulator/Resources/jars/minijvm_rt.jar
+
+          test -f \
+            J2MEEmulator/Resources/jars/minijvm_rt.jar
+
           bash j2me_api/build.sh
-          test -s J2MEEmulator/Resources/jars/j2me_api.jar
+
+          test -s \
+            J2MEEmulator/Resources/jars/j2me_api.jar
+
           echo "J2ME runtime JARs:"
-          ls -lh J2MEEmulator/Resources/jars/minijvm_rt.jar J2MEEmulator/Resources/jars/j2me_api.jar
+
+          ls -lh \
+            J2MEEmulator/Resources/jars/minijvm_rt.jar \
+            J2MEEmulator/Resources/jars/j2me_api.jar
 
       - name: Verify Xcode project
         run: |
           set -e
+
           test -d J2MEEmulator.xcodeproj
-          xcodebuild -list -project J2MEEmulator.xcodeproj
+
+          xcodebuild \
+            -list \
+            -project J2MEEmulator.xcodeproj
 
       - name: Build app for iOS 16.4
         run: |
           set -o pipefail
+
           xcodebuild \
             -project J2MEEmulator.xcodeproj \
             -scheme J2MEEmulator \
@@ -64,15 +217,25 @@ jobs:
       - name: Verify app, bundle MiniJVM runtime and package IPA
         run: |
           set -e
+
           APP="$RUNNER_TEMP/DerivedData/Build/Products/Release-iphoneos/JarBox.app"
 
           if [ ! -d "$APP" ]; then
-            echo "ERROR: JarBox.app was not found. Available app bundles:"
-            find "$RUNNER_TEMP/DerivedData" -name '*.app' -type d -print || true
+            echo "ERROR: JarBox.app was not found."
+            echo "Available app bundles:"
+            find "$RUNNER_TEMP/DerivedData" \
+              -name '*.app' \
+              -type d \
+              -print || true
             exit 1
           fi
 
-          MIN_OS=$(/usr/libexec/PlistBuddy -c 'Print :MinimumOSVersion' "$APP/Info.plist")
+          MIN_OS=$(
+            /usr/libexec/PlistBuddy \
+              -c 'Print :MinimumOSVersion' \
+              "$APP/Info.plist"
+          )
+
           echo "Built MinimumOSVersion: $MIN_OS"
 
           if [ "$MIN_OS" != "16.4" ]; then
@@ -80,20 +243,36 @@ jobs:
             exit 1
           fi
 
-          cp J2MEEmulator/Resources/jars/minijvm_rt.jar "$APP/minijvm_rt.jar"
-          cp J2MEEmulator/Resources/jars/j2me_api.jar "$APP/j2me_api.jar"
+          cp \
+            J2MEEmulator/Resources/jars/minijvm_rt.jar \
+            "$APP/minijvm_rt.jar"
+
+          cp \
+            J2MEEmulator/Resources/jars/j2me_api.jar \
+            "$APP/j2me_api.jar"
 
           test -s "$APP/minijvm_rt.jar"
           test -s "$APP/j2me_api.jar"
 
           mkdir -p Payload
-          ditto "$APP" Payload/J2MEPlayer.app
 
-          /usr/bin/zip -qry J2ME-iOS-unsigned.ipa Payload
+          ditto \
+            "$APP" \
+            Payload/J2MEPlayer.app
+
+          /usr/bin/zip \
+            -qry \
+            J2ME-iOS-unsigned.ipa \
+            Payload
+
           test -s J2ME-iOS-unsigned.ipa
 
+          echo ""
           echo "Verifying runtime files in IPA:"
-          unzip -Z1 J2ME-iOS-unsigned.ipa | grep -E '^Payload/J2MEPlayer\.app/(minijvm_rt|j2me_api)\.jar$'
+
+          unzip -Z1 J2ME-iOS-unsigned.ipa \
+            | grep -E \
+              '^Payload/J2MEPlayer\.app/(minijvm_rt|j2me_api)\.jar$'
 
           ls -lh J2ME-iOS-unsigned.ipa
 
