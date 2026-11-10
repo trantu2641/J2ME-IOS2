@@ -175,7 +175,7 @@ final class GameViewController:
             )
 
         let supportedFPS =
-            [0, 15, 20, 30, 45]
+            [0, 15, 20, 30, 45, 60]
 
         self.fpsLimit =
             supportedFPS.contains(fpsLimit)

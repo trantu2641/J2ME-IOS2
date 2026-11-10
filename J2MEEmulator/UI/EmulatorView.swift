@@ -59,6 +59,13 @@ final class EmulatorView: UIView {
     //
     private var displayFPS: Int = 0
 
+    // Software presentation cap. CADisplayLink's preferredFrameRateRange is
+    // only a scheduling hint, so it is not enough to guarantee 30/20/15 FPS.
+    // This timestamp gate makes the limit deterministic while MiniJVM itself
+    // continues running without a Java-side FPS throttle.
+    private var lastPresentedFrameTime: CFTimeInterval = 0
+    private var displayFrameInterval: CFTimeInterval = 0
+
     func setDisplayFPS(_ fps: Int) {
 
         let safeFPS: Int
@@ -76,6 +83,14 @@ final class EmulatorView: UIView {
         }
 
         displayFPS = safeFPS
+        displayFrameInterval =
+            safeFPS > 0
+            ? (1.0 / Double(safeFPS))
+            : 0
+
+        if safeFPS == 0 {
+            lastPresentedFrameTime = 0
+        }
 
         applyDisplayFPS()
     }
@@ -580,6 +595,23 @@ final class EmulatorView: UIView {
         let tickStart =
             CACurrentMediaTime()
 
+        // CADisplayLink preferredFrameRateRange is not a hard limiter.
+        // Enforce the requested presentation interval here. This only drops
+        // display updates. It never pauses or throttles MiniJVM/Java.
+        if displayFrameInterval > 0,
+           lastPresentedFrameTime > 0,
+           (tickStart - lastPresentedFrameTime) < displayFrameInterval {
+
+            recordDisplayMetrics(
+                frameDisplayed: false,
+                layerMs: 0,
+                callbackMs: 0,
+                tickMs: 0
+            )
+
+            return
+        }
+
         frameLock.lock()
 
         let cgImage =
@@ -620,6 +652,8 @@ final class EmulatorView: UIView {
 
         framebufferLayer.contents =
             cgImage
+
+        lastPresentedFrameTime = tickStart
 
         CATransaction.commit()
 
