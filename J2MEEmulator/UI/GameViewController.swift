@@ -175,7 +175,7 @@ final class GameViewController:
             )
 
         let supportedFPS =
-            [0, 15, 20, 30, 45, 60]
+            [0, 15, 20, 30, 45]
 
         self.fpsLimit =
             supportedFPS.contains(fpsLimit)
@@ -406,7 +406,7 @@ final class GameViewController:
             systemKeyboardButton,
             symbol: "text.cursor",
             accessibility:
-                "Show iPhone keyboard"
+                "Show or hide iPhone keyboard"
         )
 
         configureHeaderButton(
@@ -427,7 +427,7 @@ final class GameViewController:
         systemKeyboardButton.addTarget(
             self,
             action:
-                #selector(showSystemKeyboard),
+                #selector(toggleSystemKeyboard),
             for:
                 .touchUpInside
         )
@@ -828,7 +828,14 @@ final class GameViewController:
         )
     }
 
-    @objc private func showSystemKeyboard() {
+    @objc private func toggleSystemKeyboard() {
+
+        if keyboardInput.isFirstResponder ||
+            keyboardIsVisible {
+
+            keyboardInput.resignFirstResponder()
+            return
+        }
 
         let becameFirstResponder =
             keyboardInput.becomeFirstResponder()
