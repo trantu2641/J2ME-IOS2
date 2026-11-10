@@ -2,6 +2,8 @@ package javax.microedition.io;
 
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -25,8 +27,9 @@ public final class Connector {
     public static final int WRITE = 2;
     public static final int READ_WRITE = 3;
 
-    private static final int DEFAULT_CONNECT_TIMEOUT = 15000;
-    private static final int DEFAULT_READ_TIMEOUT = 30000;
+    private static final int DEFAULT_CONNECT_TIMEOUT = 8000;
+    private static final int DEFAULT_READ_TIMEOUT = 10000;
+    private static final int MAX_HTTP_RETRIES = 1;
 
     private Connector() {
     }
@@ -91,35 +94,91 @@ public final class Connector {
     public static InputStream openInputStream(String name, int mode)
         throws IOException {
 
-        Connection connection = open(name, mode, false);
+        IOException lastError = null;
 
-        if (!(connection instanceof InputConnection)) {
+        for (int attempt = 0; attempt <= MAX_HTTP_RETRIES; attempt++) {
+            Connection connection = null;
+
             try {
-                connection.close();
-            } catch (IOException ignored) {
+                connection = open(name, mode, false);
+
+                if (!(connection instanceof InputConnection)) {
+                    throw new IOException("Connection does not support input");
+                }
+
+                // Important for J2ME games which request many remote icons:
+                // fully detach the response from HttpURLConnection before
+                // returning it. The HTTP connection is then closed even if
+                // Image.createImage() later fails while decoding the bytes.
+                InputStream source = ((InputConnection) connection).openInputStream();
+                if (source == null) {
+                    throw new IOException("HTTP input stream is null");
+                }
+
+                byte[] data = readAllAndClose(source, connection);
+                return new ByteArrayInputStream(data);
+
+            } catch (IOException e) {
+                lastError = e;
+
+                if (connection != null) {
+                    try {
+                        connection.close();
+                    } catch (IOException ignored) {
+                    } catch (RuntimeException ignored) {
+                    }
+                }
+
+                // Retry once with a completely new HTTP connection.
+                if (attempt < MAX_HTTP_RETRIES) {
+                    continue;
+                }
+            } catch (RuntimeException e) {
+                if (connection != null) {
+                    try {
+                        connection.close();
+                    } catch (IOException ignored) {
+                    } catch (RuntimeException ignored) {
+                    }
+                }
+                throw e;
             }
-            throw new IOException("Connection does not support input");
         }
 
-        try {
-            return ((InputConnection) connection).openInputStream();
-        } catch (IOException e) {
-            // If one remote icon request fails, immediately destroy that
-            // failed connection so the next request gets a fresh connection.
-            try {
-                connection.close();
-            } catch (IOException ignored) {
-            }
-            throw e;
-        } catch (RuntimeException e) {
-            try {
-                connection.close();
-            } catch (IOException ignored) {
-            }
-            throw e;
-        }
+        throw lastError != null
+            ? lastError
+            : new IOException("HTTP request failed: " + name);
     }
 
+    private static byte[] readAllAndClose(
+        InputStream source,
+        Connection connection
+    ) throws IOException {
+
+        ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+        byte[] chunk = new byte[8192];
+
+        try {
+            int count;
+            while ((count = source.read(chunk)) != -1) {
+                if (count > 0) {
+                    buffer.write(chunk, 0, count);
+                }
+            }
+            return buffer.toByteArray();
+        } finally {
+            try {
+                source.close();
+            } catch (IOException ignored) {
+            } finally {
+                try {
+                    connection.close();
+                } catch (IOException ignored) {
+                } catch (RuntimeException ignored) {
+                }
+            }
+        }
+    }
 
     public static OutputStream openOutputStream(String name)
         throws IOException {
@@ -168,6 +227,9 @@ public final class Connector {
 
             connection.setInstanceFollowRedirects(true);
             connection.setUseCaches(false);
+            // Do not keep a broken server socket alive between icon requests.
+            connection.setRequestProperty("Connection", "close");
+            connection.setRequestProperty("Cache-Control", "no-cache");
             connection.setConnectTimeout(
                 timeouts ? 0 : DEFAULT_CONNECT_TIMEOUT
             );
