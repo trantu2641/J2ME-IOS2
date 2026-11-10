@@ -1186,73 +1186,62 @@ class AppsListViewController: UIViewController,
         return UIContextMenuConfiguration(
             actionProvider: { [weak self] _ in
 
-                // IMPORTANT:
-                // Keep this context menu flat.
+                // Keep the menu grouped, but only one level deep.
+                // Each category can be opened/closed independently:
+                //   Manage JAR
+                //   Screen Resolution
+                //   FPS Limit
+                //   Data
                 //
-                // The previous implementation used nested UIMenu objects
-                // (Manage JAR, Screen Resolution, FPS Limit, etc.).
-                // On some iOS versions, expanding and collapsing those
-                // submenu disclosure arrows can crash the UICollectionView
-                // context-menu controller.
-                //
-                // Every item below is therefore a direct UIAction.
-                // There are no nested UIMenu children.
-
-                var menuActions: [UIAction] = []
+                // Do NOT put UIMenu inside another UIMenu inside another
+                // UIMenu.  A single submenu level is enough for the iOS
+                // context-menu controller and avoids the old collapse crash.
 
                 // MARK: Manage JAR
 
-                menuActions.append(
+                var manageActions: [UIAction] = []
+
+                manageActions.append(
                     UIAction(
                         title: "Rename",
                         image: UIImage(systemName: "pencil")
                     ) { [weak self] _ in
-
                         self?.renameApp(app)
                     }
                 )
 
-                menuActions.append(
+                manageActions.append(
                     UIAction(
                         title: "Change Icon...",
                         image: UIImage(systemName: "photo")
                     ) { [weak self] _ in
-
                         self?.changeIcon(for: app)
                     }
                 )
 
                 if Self.hasCustomIcon(for: app) {
-
-                    menuActions.append(
+                    manageActions.append(
                         UIAction(
                             title: "Restore Original Icon",
-                            image: UIImage(
-                                systemName: "arrow.uturn.backward"
-                            )
+                            image: UIImage(systemName: "arrow.uturn.backward")
                         ) { [weak self] _ in
-
                             self?.resetCustomIcon(for: app)
                         }
                     )
                 }
 
-                menuActions.append(
+                manageActions.append(
                     UIAction(
                         title: "Duplicate Install",
                         image: UIImage(systemName: "doc.on.doc")
                     ) { [weak self] _ in
-
                         self?.duplicateApp(app)
                     }
                 )
 
-                // MARK: 3D enhancement
+                let ssEnabled = Self.is3DSupersampling(for: app)
 
-                let ssEnabled =
-                    Self.is3DSupersampling(for: app)
-
-                menuActions.append(
+                manageActions.append(
                     UIAction(
                         title: ssEnabled
                             ? "Disable 3D Enhancement"
@@ -1260,33 +1249,31 @@ class AppsListViewController: UIViewController,
                         image: UIImage(systemName: "cube"),
                         state: ssEnabled ? .on : .off
                     ) { _ in
-
-                        Self.set3DSupersampling(
-                            !ssEnabled,
-                            for: app
-                        )
+                        Self.set3DSupersampling(!ssEnabled, for: app)
                     }
+                )
+
+                let manageMenu = UIMenu(
+                    title: "Manage JAR",
+                    image: UIImage(systemName: "archivebox"),
+                    children: manageActions
                 )
 
                 // MARK: Screen resolution
 
-                let currentRes =
-                    Self.resolution(for: app)
+                let currentRes = Self.resolution(for: app)
+                var resolutionActions: [UIAction] = []
 
                 for option in Self.resolutionOptions {
-
-                    menuActions.append(
+                    resolutionActions.append(
                         UIAction(
-                            title: "Resolution: \(option.label)",
+                            title: option.label,
                             state:
-                                (
-                                    option.w == currentRes.w &&
-                                    option.h == currentRes.h
-                                )
+                                option.w == currentRes.w &&
+                                option.h == currentRes.h
                                 ? .on
                                 : .off
                         ) { _ in
-
                             Self.setResolution(
                                 w: option.w,
                                 h: option.h,
@@ -1296,34 +1283,34 @@ class AppsListViewController: UIViewController,
                     )
                 }
 
-                menuActions.append(
+                resolutionActions.append(
                     UIAction(
                         title: "Custom Resolution...",
-                        image: UIImage(
-                            systemName: "slider.horizontal.3"
-                        )
+                        image: UIImage(systemName: "slider.horizontal.3")
                     ) { [weak self] _ in
-
                         self?.promptCustomResolution(for: app)
                     }
                 )
 
+                let resolutionMenu = UIMenu(
+                    title: "Screen Resolution",
+                    image: UIImage(systemName: "rectangle.on.rectangle"),
+                    children: resolutionActions
+                )
+
                 // MARK: FPS
 
-                let currentFps =
-                    Self.fpsLimit(for: app)
+                let currentFps = Self.fpsLimit(for: app)
+                var fpsActions: [UIAction] = []
 
                 for option in Self.fpsLimitOptions {
-
-                    menuActions.append(
+                    fpsActions.append(
                         UIAction(
-                            title: "FPS: \(option.label)",
-                            state:
-                                option.value == currentFps
+                            title: option.label,
+                            state: option.value == currentFps
                                 ? .on
                                 : .off
                         ) { _ in
-
                             Self.setFpsLimit(
                                 option.value,
                                 for: app
@@ -1332,34 +1319,46 @@ class AppsListViewController: UIViewController,
                     )
                 }
 
+                let fpsMenu = UIMenu(
+                    title: "FPS Limit",
+                    image: UIImage(systemName: "speedometer"),
+                    children: fpsActions
+                )
+
                 // MARK: Data
 
-                menuActions.append(
-                    UIAction(
-                        title: "Clear Game Data",
-                        image: UIImage(systemName: "eraser")
-                    ) { [weak self] _ in
-
-                        self?.confirmClearGameData(
-                            for: app
-                        )
-                    }
+                let dataMenu = UIMenu(
+                    title: "Data",
+                    image: UIImage(systemName: "externaldrive"),
+                    children: [
+                        UIAction(
+                            title: "Clear Game Data",
+                            image: UIImage(systemName: "eraser")
+                        ) { [weak self] _ in
+                            self?.confirmClearGameData(for: app)
+                        },
+                        UIAction(
+                            title: "Delete",
+                            image: UIImage(systemName: "trash"),
+                            attributes: .destructive
+                        ) { [weak self] _ in
+                            self?.confirmDeleteApp(for: app)
+                        }
+                    ]
                 )
 
-                menuActions.append(
-                    UIAction(
-                        title: "Delete",
-                        image: UIImage(systemName: "trash"),
-                        attributes: .destructive
-                    ) { [weak self] _ in
-
-                        self?.confirmDeleteApp(
-                            for: app
-                        )
-                    }
+                // Only the four category menus are shown at the root.
+                // Each category has its own disclosure arrow and can be
+                // expanded/collapsed independently.
+                return UIMenu(
+                    title: "JAR",
+                    children: [
+                        manageMenu,
+                        resolutionMenu,
+                        fpsMenu,
+                        dataMenu
+                    ]
                 )
-
-                return UIMenu(children: menuActions)
             }
         )
     }
