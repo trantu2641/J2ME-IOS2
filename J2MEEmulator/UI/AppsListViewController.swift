@@ -1171,209 +1171,242 @@ class AppsListViewController: UIViewController,
 
     // MARK: - Long press menu
 
+    // Keep the currently displayed system menu alive until UIKit has
+    // completely finished the context-menu interaction. On iOS 16.4,
+    // releasing a nested UIMenu too early can make UIKit crash while it
+    // restores the highlighted submenu index during collapse.
+    private var activeContextMenu: UIMenu?
+
+    private func buildContextMenu(for app: AppInfo) -> UIMenu {
+
+        // Rename.
+        let rename = UIAction(
+            title: "Rename",
+            image: UIImage(systemName: "pencil")
+        ) { [weak self] _ in
+
+            self?.renameApp(app)
+        }
+
+        // Change icon.
+        let changeIcon = UIAction(
+            title: "Change Icon...",
+            image: UIImage(systemName: "photo")
+        ) { [weak self] _ in
+
+            self?.changeIcon(for: app)
+        }
+
+        let iconActions: [UIAction]
+
+        if Self.hasCustomIcon(for: app) {
+
+            let resetIcon = UIAction(
+                title: "Restore Original Icon",
+                image: UIImage(systemName: "arrow.uturn.backward")
+            ) { [weak self] _ in
+
+                self?.resetCustomIcon(for: app)
+            }
+
+            iconActions = [
+                rename,
+                changeIcon,
+                resetIcon
+            ]
+
+        } else {
+
+            iconActions = [
+                rename,
+                changeIcon
+            ]
+        }
+
+        // Install another copy.
+        let duplicate = UIAction(
+            title: "Duplicate Install",
+            image: UIImage(systemName: "doc.on.doc")
+        ) { [weak self] _ in
+
+            self?.duplicateApp(app)
+        }
+
+        let manageMenu = UIMenu(
+            title: "Manage JAR",
+            image: UIImage(systemName: "app"),
+            children: iconActions + [
+                duplicate
+            ]
+        )
+
+        // 3D enhancement.
+        let ssEnabled = Self.is3DSupersampling(for: app)
+
+        let toggle3D = UIAction(
+            title: ssEnabled
+                ? "Disable 3D Enhancement"
+                : "Enable 3D Enhancement",
+            subtitle: nil,
+            image: UIImage(systemName: "cube"),
+            state: ssEnabled ? .on : .off
+        ) { _ in
+
+            Self.set3DSupersampling(
+                !ssEnabled,
+                for: app
+            )
+        }
+
+        // Screen resolution.
+        let currentRes = Self.resolution(for: app)
+
+        let resActions = Self.resolutionOptions.map { option in
+
+            UIAction(
+                title: option.label,
+                state: (
+                    option.w == currentRes.w &&
+                    option.h == currentRes.h
+                ) ? .on : .off
+            ) { _ in
+
+                Self.setResolution(
+                    w: option.w,
+                    h: option.h,
+                    for: app
+                )
+            }
+        }
+
+        let customResolution = UIAction(
+            title: "Custom Resolution...",
+            image: UIImage(systemName: "slider.horizontal.3")
+        ) { [weak self] _ in
+
+            self?.promptCustomResolution(for: app)
+        }
+
+        let resMenu = UIMenu(
+            title: "Screen Resolution",
+            image: UIImage(systemName: "aspectratio"),
+            children: resActions + [customResolution]
+        )
+
+        // FPS.
+        let currentFps = Self.fpsLimit(for: app)
+
+        let fpsActions = Self.fpsLimitOptions.map { option in
+
+            UIAction(
+                title: option.label,
+                state: option.value == currentFps ? .on : .off
+            ) { _ in
+
+                Self.setFpsLimit(
+                    option.value,
+                    for: app
+                )
+            }
+        }
+
+        let fpsMenu = UIMenu(
+            title: "FPS Limit",
+            image: UIImage(systemName: "speedometer"),
+            children: fpsActions
+        )
+
+        // Clear saved game data.
+        let clearData = UIAction(
+            title: "Clear Game Data",
+            image: UIImage(systemName: "eraser")
+        ) { [weak self] _ in
+
+            self?.confirmClearGameData(for: app)
+        }
+
+        // Delete JAR.
+        let delete = UIAction(
+            title: "Delete",
+            image: UIImage(systemName: "trash"),
+            attributes: .destructive
+        ) { [weak self] _ in
+
+            self?.confirmDeleteApp(for: app)
+        }
+
+        let actions = UIMenu(
+            options: .displayInline,
+            children: [
+                clearData,
+                delete
+            ]
+        )
+
+        // IMPORTANT: keep the requested system-menu order.
+        return UIMenu(
+            children: [
+                toggle3D,
+                manageMenu,
+                resMenu,
+                fpsMenu,
+                actions
+            ]
+        )
+    }
+
     func collectionView(
         _ collectionView: UICollectionView,
         contextMenuConfigurationForItemsAt indexPaths: [IndexPath],
         point: CGPoint
     ) -> UIContextMenuConfiguration? {
 
-        guard let indexPath = indexPaths.first else {
+        guard let indexPath = indexPaths.first,
+              indexPath.item >= 0,
+              indexPath.item < apps.count else {
             return nil
         }
 
         let app = apps[indexPath.item]
+        let identifier = NSString(string: Self.gameId(for: app))
 
         return UIContextMenuConfiguration(
+            identifier: identifier,
+            previewProvider: nil,
             actionProvider: { [weak self] _ in
 
-                // Rename.
-                let rename = UIAction(
-                    title: "Rename",
-                    image: UIImage(systemName: "pencil")
-                ) { _ in
-
-                    self?.renameApp(app)
+                guard let self else {
+                    return nil
                 }
 
-                // Change icon.
-                let changeIcon = UIAction(
-                    title: "Change Icon...",
-                    image: UIImage(systemName: "photo")
-                ) { _ in
+                // UIKit keeps using the returned UIMenu while the submenu
+                // highlight/collapse animation is running. Retain it until
+                // didEndContextMenuInteractionWith(_:animator:) is called.
+                let menu = self.buildContextMenu(for: app)
+                self.activeContextMenu = menu
 
-                    self?.changeIcon(for: app)
-                }
-
-                // Restore JAR's original icon.
-                let iconActions: [UIAction]
-
-                if Self.hasCustomIcon(for: app) {
-
-                    let resetIcon = UIAction(
-                        title: "Restore Original Icon",
-                        image: UIImage(systemName: "arrow.uturn.backward")
-                    ) { _ in
-
-                        self?.resetCustomIcon(for: app)
-                    }
-
-                    iconActions = [
-                        rename,
-                        changeIcon,
-                        resetIcon
-                    ]
-
-                } else {
-
-                    iconActions = [
-                        rename,
-                        changeIcon
-                    ]
-                }
-
-                // Install another copy.
-                let duplicate = UIAction(
-                    title: "Duplicate Install",
-                    image: UIImage(systemName: "doc.on.doc")
-                ) { _ in
-
-                    self?.duplicateApp(app)
-                }
-
-                let manageMenu = UIMenu(
-                    title: "Manage JAR",
-                    image: UIImage(systemName: "app"),
-                    children: iconActions + [
-                        duplicate
-                    ]
-                )
-
-                // 3D enhancement.
-                let ssEnabled = Self.is3DSupersampling(for: app)
-
-                let toggle3D = UIAction(
-                    title: ssEnabled
-                        ? "Disable 3D Enhancement"
-                        : "Enable 3D Enhancement",
-                    subtitle: nil,
-                    image: UIImage(systemName: "cube"),
-                    state: ssEnabled ? .on : .off
-                ) { _ in
-
-                    Self.set3DSupersampling(
-                        !ssEnabled,
-                        for: app
-                    )
-                }
-
-                // Screen resolution.
-                let currentRes = Self.resolution(for: app)
-
-                let resActions = Self.resolutionOptions.map { option in
-
-                    UIAction(
-                        title: option.label,
-                        state: (
-                            option.w == currentRes.w &&
-                            option.h == currentRes.h
-                        ) ? .on : .off
-                    ) { _ in
-
-                        Self.setResolution(
-                            w: option.w,
-                            h: option.h,
-                            for: app
-                        )
-                    }
-                }
-
-                let customResolution = UIAction(
-                    title: "Custom Resolution...",
-                    image: UIImage(systemName: "slider.horizontal.3")
-                ) { [weak self] _ in
-
-                    self?.promptCustomResolution(for: app)
-                }
-
-                let resMenu = UIMenu(
-                    title: "Screen Resolution",
-                    image: UIImage(systemName: "aspectratio"),
-                    children: resActions + [customResolution]
-                )
-
-                // Keep Settings as a real system submenu.
-                // The original .displayInline + nested Screen Resolution menu
-                // is the combination that triggers the collapse crash on
-                // iOS 16.4. Do not change the order or any other menu item.
-                let settings = UIMenu(
-                    title: "Settings",
-                    image: UIImage(systemName: "gearshape"),
-                    children: [
-                        toggle3D,
-                        resMenu
-                    ]
-                )
-
-                // FPS.
-                let currentFps = Self.fpsLimit(for: app)
-
-                let fpsActions = Self.fpsLimitOptions.map { option in
-
-                    UIAction(
-                        title: option.label,
-                        state: option.value == currentFps ? .on : .off
-                    ) { _ in
-
-                        Self.setFpsLimit(
-                            option.value,
-                            for: app
-                        )
-                    }
-                }
-
-                let fpsMenu = UIMenu(
-                    title: "FPS Limit",
-                    image: UIImage(systemName: "speedometer"),
-                    children: fpsActions
-                )
-
-                // Clear saved game data.
-                let clearData = UIAction(
-                    title: "Clear Game Data",
-                    image: UIImage(systemName: "eraser")
-                ) { _ in
-
-                    self?.confirmClearGameData(for: app)
-                }
-
-                // Delete JAR.
-                let delete = UIAction(
-                    title: "Delete",
-                    image: UIImage(systemName: "trash"),
-                    attributes: .destructive
-                ) { _ in
-
-                    self?.confirmDeleteApp(for: app)
-                }
-
-                let actions = UIMenu(
-                    options: .displayInline,
-                    children: [
-                        clearData,
-                        delete
-                    ]
-                )
-
-                return UIMenu(
-                    children: [
-                        manageMenu,
-                        settings,
-                        fpsMenu,
-                        actions
-                    ]
-                )
+                return menu
             }
         )
+    }
+
+    func collectionView(
+        _ collectionView: UICollectionView,
+        willEndContextMenuInteractionWith configuration: UIContextMenuConfiguration,
+        animator: UIContextMenuInteractionAnimating?
+    ) {
+        // Do not release activeContextMenu here. UIKit can still access the
+        // submenu during the collapse animation.
+    }
+
+    func collectionView(
+        _ collectionView: UICollectionView,
+        didEndContextMenuInteractionWith configuration: UIContextMenuConfiguration,
+        animator: UIContextMenuInteractionAnimating?
+    ) {
+        // The system has finished the interaction, so it is now safe to
+        // release the retained menu tree.
+        activeContextMenu = nil
     }
 
     // MARK: - Per-game settings
