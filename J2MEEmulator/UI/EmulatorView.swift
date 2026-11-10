@@ -1,7 +1,9 @@
 //
 // EmulatorView.swift
-// Optimized J2ME framebuffer rendering.
-// Uses CADisplayLink and a single pending-frame slot.
+// J2ME framebuffer rendering.
+// FPS limit is applied ONLY to display presentation,
+// never to MiniJVM / Java Canvas execution.
+//
 // Compatible with iOS 16.4+.
 //
 
@@ -37,6 +39,104 @@ final class EmulatorView: UIView {
         }
     }
 
+    // MARK: - Display FPS
+
+    //
+    // IMPORTANT:
+    //
+    // This FPS limit only controls how often the iOS display
+    // consumes a framebuffer.
+    //
+    // It does NOT slow down:
+    // - MiniJVM
+    // - Java Canvas
+    // - GIF decoding
+    // - Java game logic
+    // - Java timers
+    //
+    // Therefore setting 30 FPS cannot block an animated GIF
+    // simply because the emulator display is limited to 30 FPS.
+    //
+    private var displayFPS: Int = 0
+
+    func setDisplayFPS(_ fps: Int) {
+
+        let safeFPS: Int
+
+        switch fps {
+
+        case 0:
+            safeFPS = 0
+
+        case 15, 20, 30, 45:
+            safeFPS = fps
+
+        default:
+            safeFPS = 0
+        }
+
+        displayFPS = safeFPS
+
+        applyDisplayFPS()
+    }
+
+    private func applyDisplayFPS() {
+
+        guard Thread.isMainThread else {
+
+            DispatchQueue.main.async { [weak self] in
+                self?.applyDisplayFPS()
+            }
+
+            return
+        }
+
+        guard let link = displayLink else {
+            return
+        }
+
+        if #available(iOS 15.0, *) {
+
+            if displayFPS > 0 {
+
+                let maximum =
+                    UIScreen.main.maximumFramesPerSecond
+
+                let preferred =
+                    min(displayFPS, maximum)
+
+                link.preferredFrameRateRange =
+                    CAFrameRateRange(
+                        minimum: Float(preferred),
+                        maximum: Float(preferred),
+                        preferred: Float(preferred)
+                    )
+
+            } else {
+
+                let maximum =
+                    UIScreen.main.maximumFramesPerSecond
+
+                link.preferredFrameRateRange =
+                    CAFrameRateRange(
+                        minimum: 1,
+                        maximum: Float(maximum),
+                        preferred: Float(maximum)
+                    )
+            }
+
+        } else {
+
+            link.preferredFramesPerSecond =
+                displayFPS > 0
+                ? min(
+                    displayFPS,
+                    UIScreen.main.maximumFramesPerSecond
+                )
+                : UIScreen.main.maximumFramesPerSecond
+        }
+    }
+
     // MARK: - Rendering
 
     private let framebufferLayer = CALayer()
@@ -49,19 +149,26 @@ final class EmulatorView: UIView {
     // MARK: - Frame queue
 
     private let frameLock = NSLock()
+
     private var pendingFrame: CGImage?
 
-    // Frame timing counters are protected independently from frameLock.
+    // Frame timing counters
     private let metricsLock = NSLock()
-    private var metricsWindowStart = CACurrentMediaTime()
+
+    private var metricsWindowStart =
+        CACurrentMediaTime()
+
     private var metricsDisplayTicks = 0
     private var metricsFramesReceived = 0
     private var metricsFramesDisplayed = 0
     private var metricsFramesReplaced = 0
+
     private var metricsLayerTotalMs = 0.0
     private var metricsLayerMaxMs = 0.0
+
     private var metricsCallbackTotalMs = 0.0
     private var metricsCallbackMaxMs = 0.0
+
     private var metricsTickTotalMs = 0.0
     private var metricsTickMaxMs = 0.0
 
@@ -74,26 +181,32 @@ final class EmulatorView: UIView {
     // MARK: - Initialization
 
     override init(frame: CGRect) {
+
         super.init(frame: frame)
+
         setup()
     }
 
     required init?(coder: NSCoder) {
+
         super.init(coder: coder)
+
         setup()
     }
 
     deinit {
+
         displayLink?.invalidate()
     }
 
     private func setup() {
 
-        // Register the real iOS main pthread so the native CPU profiler
-        // can distinguish UIKit's main thread from MiniJVM workers.
         if Thread.isMainThread {
+
             jvm_bridge_register_main_thread()
+
         } else {
+
             DispatchQueue.main.async {
                 jvm_bridge_register_main_thread()
             }
@@ -110,10 +223,14 @@ final class EmulatorView: UIView {
         framebufferLayer.backgroundColor =
             UIColor.black.cgColor
 
-        framebufferLayer.contentsGravity = .resizeAspect
+        framebufferLayer.contentsGravity =
+            .resizeAspect
 
-        framebufferLayer.magnificationFilter = .nearest
-        framebufferLayer.minificationFilter = .nearest
+        framebufferLayer.magnificationFilter =
+            .nearest
+
+        framebufferLayer.minificationFilter =
+            .nearest
 
         framebufferLayer.contentsScale =
             UIScreen.main.scale
@@ -131,8 +248,11 @@ final class EmulatorView: UIView {
         super.didMoveToWindow()
 
         if window != nil {
+
             startDisplayLink()
+
         } else {
+
             stopDisplayLink()
         }
     }
@@ -140,9 +260,11 @@ final class EmulatorView: UIView {
     private func startDisplayLink() {
 
         guard Thread.isMainThread else {
+
             DispatchQueue.main.async { [weak self] in
                 self?.startDisplayLink()
             }
+
             return
         }
 
@@ -150,20 +272,28 @@ final class EmulatorView: UIView {
             return
         }
 
-        let target = EmulatorDisplayLinkTarget(owner: self)
+        let target =
+            EmulatorDisplayLinkTarget(owner: self)
 
-        let link = CADisplayLink(
-            target: target,
-            selector: #selector(EmulatorDisplayLinkTarget.tick(_:))
-        )
-
-        // Keep one display-link callback per display refresh.
-        // Frame submission only fills the pending slot and never dispatches
-        // an additional main-queue block for every frame.
-        link.isPaused = false
+        let link =
+            CADisplayLink(
+                target: target,
+                selector:
+                    #selector(
+                        EmulatorDisplayLinkTarget.tick(_:)
+                    )
+            )
 
         displayLinkTarget = target
         displayLink = link
+
+        //
+        // Apply the selected FPS BEFORE adding the display
+        // link to the run loop.
+        //
+        applyDisplayFPS()
+
+        link.isPaused = false
 
         link.add(
             to: .main,
@@ -174,13 +304,16 @@ final class EmulatorView: UIView {
     private func stopDisplayLink() {
 
         guard Thread.isMainThread else {
+
             DispatchQueue.main.async { [weak self] in
                 self?.stopDisplayLink()
             }
+
             return
         }
 
         displayLink?.invalidate()
+
         displayLink = nil
         displayLinkTarget = nil
     }
@@ -192,9 +325,11 @@ final class EmulatorView: UIView {
         super.layoutSubviews()
 
         CATransaction.begin()
+
         CATransaction.setDisableActions(true)
 
-        framebufferLayer.frame = bounds
+        framebufferLayer.frame =
+            bounds
 
         CATransaction.commit()
     }
@@ -222,59 +357,88 @@ final class EmulatorView: UIView {
             return .zero
         }
 
-        let pixelWidth = framebufferPixelWidth > 0
+        let pixelWidth =
+            framebufferPixelWidth > 0
             ? framebufferPixelWidth
             : max(1, canvasWidth)
 
-        let pixelHeight = framebufferPixelHeight > 0
+        let pixelHeight =
+            framebufferPixelHeight > 0
             ? framebufferPixelHeight
             : max(1, canvasHeight)
 
-        let sourceWidth = CGFloat(pixelWidth)
-        let sourceHeight = CGFloat(pixelHeight)
+        let sourceWidth =
+            CGFloat(pixelWidth)
 
-        let scale = min(
-            viewWidth / sourceWidth,
-            viewHeight / sourceHeight
-        )
+        let sourceHeight =
+            CGFloat(pixelHeight)
 
-        let displayedWidth = sourceWidth * scale
-        let displayedHeight = sourceHeight * scale
+        let scale =
+            min(
+                viewWidth / sourceWidth,
+                viewHeight / sourceHeight
+            )
+
+        let displayedWidth =
+            sourceWidth * scale
+
+        let displayedHeight =
+            sourceHeight * scale
 
         return CGRect(
-            x: (viewWidth - displayedWidth) * 0.5,
-            y: (viewHeight - displayedHeight) * 0.5,
-            width: displayedWidth,
-            height: displayedHeight
+            x:
+                (viewWidth - displayedWidth) * 0.5,
+
+            y:
+                (viewHeight - displayedHeight) * 0.5,
+
+            width:
+                displayedWidth,
+
+            height:
+                displayedHeight
         )
     }
 
     // MARK: - Framebuffer submission
 
-    /// Called by the native renderer before creating a CGImage snapshot.
-    /// Returning 0 tells native code to skip this frame.
     func canAcceptFrame() -> Int32 {
 
         frameLock.lock()
+
         defer {
             frameLock.unlock()
         }
 
-        return pendingFrame == nil ? 1 : 0
+        //
+        // Only one frame is allowed to wait.
+        //
+        // Newer frames replace the old waiting frame.
+        //
+        return pendingFrame == nil
+            ? 1
+            : 0
     }
 
-    func displayImage(_ cgImage: CGImage) {
+    func displayImage(
+        _ cgImage: CGImage
+    ) {
 
         frameLock.lock()
 
-        let replacedPendingFrame = pendingFrame != nil
+        let replacedPendingFrame =
+            pendingFrame != nil
 
-        // Keep the newest frame if another frame arrives.
-        pendingFrame = cgImage
+        //
+        // Always keep the newest frame.
+        //
+        pendingFrame =
+            cgImage
 
         frameLock.unlock()
 
         metricsLock.lock()
+
         metricsFramesReceived += 1
 
         if replacedPendingFrame {
@@ -293,7 +457,9 @@ final class EmulatorView: UIView {
         tickMs: Double
     ) {
 
-        let now = CACurrentMediaTime()
+        let now =
+            CACurrentMediaTime()
+
         var logLine: String?
 
         metricsLock.lock()
@@ -301,60 +467,97 @@ final class EmulatorView: UIView {
         metricsDisplayTicks += 1
 
         if frameDisplayed {
+
             metricsFramesDisplayed += 1
 
-            metricsLayerTotalMs += layerMs
-            metricsLayerMaxMs = max(metricsLayerMaxMs, layerMs)
+            metricsLayerTotalMs +=
+                layerMs
 
-            metricsCallbackTotalMs += callbackMs
-            metricsCallbackMaxMs = max(metricsCallbackMaxMs, callbackMs)
+            metricsLayerMaxMs =
+                max(
+                    metricsLayerMaxMs,
+                    layerMs
+                )
 
-            metricsTickTotalMs += tickMs
-            metricsTickMaxMs = max(metricsTickMaxMs, tickMs)
+            metricsCallbackTotalMs +=
+                callbackMs
+
+            metricsCallbackMaxMs =
+                max(
+                    metricsCallbackMaxMs,
+                    callbackMs
+                )
+
+            metricsTickTotalMs +=
+                tickMs
+
+            metricsTickMaxMs =
+                max(
+                    metricsTickMaxMs,
+                    tickMs
+                )
         }
 
-        let elapsed = now - metricsWindowStart
+        let elapsed =
+            now - metricsWindowStart
 
         if elapsed >= 5.0 {
 
             let ticksPerSecond =
-                Double(metricsDisplayTicks) / elapsed
+                Double(metricsDisplayTicks)
+                / elapsed
 
             let receivedPerSecond =
-                Double(metricsFramesReceived) / elapsed
+                Double(metricsFramesReceived)
+                / elapsed
 
             let displayedPerSecond =
-                Double(metricsFramesDisplayed) / elapsed
+                Double(metricsFramesDisplayed)
+                / elapsed
 
             let replacedPerSecond =
-                Double(metricsFramesReplaced) / elapsed
+                Double(metricsFramesReplaced)
+                / elapsed
 
-            let frameCount = max(1, metricsFramesDisplayed)
+            let frameCount =
+                max(
+                    1,
+                    metricsFramesDisplayed
+                )
 
             logLine = String(
                 format:
-                    "[UI Frame Perf] displayLink/s=%.1f received/s=%.1f displayed/s=%.1f replaced/s=%.1f avgLayerMs=%.3f maxLayerMs=%.3f avgCallbackMs=%.3f maxCallbackMs=%.3f avgTickMs=%.3f maxTickMs=%.3f",
+                    "[UI Frame Perf] displayLink/s=%.1f received/s=%.1f displayed/s=%.1f replaced/s=%.1f avgLayerMs=%.3f maxLayerMs=%.3f avgCallbackMs=%.3f maxCallbackMs=%.3f avgTickMs=%.3f maxTickMs=%.3f fps=%d",
                 ticksPerSecond,
                 receivedPerSecond,
                 displayedPerSecond,
                 replacedPerSecond,
-                metricsLayerTotalMs / Double(frameCount),
+                metricsLayerTotalMs /
+                    Double(frameCount),
                 metricsLayerMaxMs,
-                metricsCallbackTotalMs / Double(frameCount),
+                metricsCallbackTotalMs /
+                    Double(frameCount),
                 metricsCallbackMaxMs,
-                metricsTickTotalMs / Double(frameCount),
-                metricsTickMaxMs
+                metricsTickTotalMs /
+                    Double(frameCount),
+                metricsTickMaxMs,
+                displayFPS
             )
 
-            metricsWindowStart = now
+            metricsWindowStart =
+                now
+
             metricsDisplayTicks = 0
             metricsFramesReceived = 0
             metricsFramesDisplayed = 0
             metricsFramesReplaced = 0
+
             metricsLayerTotalMs = 0
             metricsLayerMaxMs = 0
+
             metricsCallbackTotalMs = 0
             metricsCallbackMaxMs = 0
+
             metricsTickTotalMs = 0
             metricsTickMaxMs = 0
         }
@@ -374,11 +577,14 @@ final class EmulatorView: UIView {
             condition: .onQueue(.main)
         )
 
-        let tickStart = CACurrentMediaTime()
+        let tickStart =
+            CACurrentMediaTime()
 
         frameLock.lock()
 
-        let cgImage = pendingFrame
+        let cgImage =
+            pendingFrame
+
         pendingFrame = nil
 
         frameLock.unlock()
@@ -389,28 +595,42 @@ final class EmulatorView: UIView {
                 frameDisplayed: false,
                 layerMs: 0,
                 callbackMs: 0,
-                tickMs: (CACurrentMediaTime() - tickStart) * 1000.0
+                tickMs:
+                    (
+                        CACurrentMediaTime()
+                        - tickStart
+                    ) * 1000.0
             )
 
             return
         }
 
-        framebufferPixelWidth = cgImage.width
-        framebufferPixelHeight = cgImage.height
+        framebufferPixelWidth =
+            cgImage.width
 
-        let layerStart = CACurrentMediaTime()
+        framebufferPixelHeight =
+            cgImage.height
+
+        let layerStart =
+            CACurrentMediaTime()
 
         CATransaction.begin()
+
         CATransaction.setDisableActions(true)
 
-        framebufferLayer.contents = cgImage
+        framebufferLayer.contents =
+            cgImage
 
         CATransaction.commit()
 
         let layerMs =
-            (CACurrentMediaTime() - layerStart) * 1000.0
+            (
+                CACurrentMediaTime()
+                - layerStart
+            ) * 1000.0
 
-        let callbackStart = CACurrentMediaTime()
+        let callbackStart =
+            CACurrentMediaTime()
 
         onFrame?(cgImage)
 
@@ -418,17 +638,25 @@ final class EmulatorView: UIView {
 
             hasDisplayedFirstFrame = true
 
-            let callback = onFirstFrame
+            let callback =
+                onFirstFrame
+
             onFirstFrame = nil
 
             callback?()
         }
 
         let callbackMs =
-            (CACurrentMediaTime() - callbackStart) * 1000.0
+            (
+                CACurrentMediaTime()
+                - callbackStart
+            ) * 1000.0
 
         let tickMs =
-            (CACurrentMediaTime() - tickStart) * 1000.0
+            (
+                CACurrentMediaTime()
+                - tickStart
+            ) * 1000.0
 
         recordDisplayMetrics(
             frameDisplayed: true,
@@ -445,7 +673,8 @@ final class EmulatorView: UIView {
         clampToImage: Bool
     ) -> (Int, Int)? {
 
-        let rect = fittedImageRect()
+        let rect =
+            fittedImageRect()
 
         guard rect.width > 0,
               rect.height > 0,
@@ -455,37 +684,54 @@ final class EmulatorView: UIView {
             return nil
         }
 
-        if !clampToImage && !rect.contains(point) {
+        if !clampToImage &&
+            !rect.contains(point) {
+
             return nil
         }
 
-        let x = min(
-            max(point.x, rect.minX),
-            rect.maxX.nextDown
-        )
+        let x =
+            min(
+                max(point.x, rect.minX),
+                rect.maxX.nextDown
+            )
 
-        let y = min(
-            max(point.y, rect.minY),
-            rect.maxY.nextDown
-        )
+        let y =
+            min(
+                max(point.y, rect.minY),
+                rect.maxY.nextDown
+            )
 
         let normalizedX =
-            (x - rect.minX) / rect.width
+            (x - rect.minX)
+            / rect.width
 
         let normalizedY =
-            (y - rect.minY) / rect.height
+            (y - rect.minY)
+            / rect.height
 
-        let virtualX = Int(
-            normalizedX * CGFloat(canvasWidth)
-        )
+        let virtualX =
+            Int(
+                normalizedX
+                * CGFloat(canvasWidth)
+            )
 
-        let virtualY = Int(
-            normalizedY * CGFloat(canvasHeight)
-        )
+        let virtualY =
+            Int(
+                normalizedY
+                * CGFloat(canvasHeight)
+            )
 
         return (
-            min(max(virtualX, 0), canvasWidth - 1),
-            min(max(virtualY, 0), canvasHeight - 1)
+            min(
+                max(virtualX, 0),
+                canvasWidth - 1
+            ),
+
+            min(
+                max(virtualY, 0),
+                canvasHeight - 1
+            )
         )
     }
 
@@ -498,15 +744,21 @@ final class EmulatorView: UIView {
 
         for touch in touches {
 
-            guard let (x, y) = virtualPoint(
-                for: touch.location(in: self),
-                clampToImage: false
-            ) else {
+            guard let (x, y) =
+                virtualPoint(
+                    for:
+                        touch.location(
+                            in: self
+                        ),
+                    clampToImage: false
+                ) else {
                 continue
             }
 
             j2me_input_post_touch(
-                Int32(J2ME_INPUT_POINTER_PRESSED),
+                Int32(
+                    J2ME_INPUT_POINTER_PRESSED
+                ),
                 Int32(x),
                 Int32(y)
             )
@@ -520,15 +772,21 @@ final class EmulatorView: UIView {
 
         for touch in touches {
 
-            guard let (x, y) = virtualPoint(
-                for: touch.location(in: self),
-                clampToImage: true
-            ) else {
+            guard let (x, y) =
+                virtualPoint(
+                    for:
+                        touch.location(
+                            in: self
+                        ),
+                    clampToImage: true
+                ) else {
                 continue
             }
 
             j2me_input_post_touch(
-                Int32(J2ME_INPUT_POINTER_DRAGGED),
+                Int32(
+                    J2ME_INPUT_POINTER_DRAGGED
+                ),
                 Int32(x),
                 Int32(y)
             )
@@ -542,15 +800,21 @@ final class EmulatorView: UIView {
 
         for touch in touches {
 
-            guard let (x, y) = virtualPoint(
-                for: touch.location(in: self),
-                clampToImage: true
-            ) else {
+            guard let (x, y) =
+                virtualPoint(
+                    for:
+                        touch.location(
+                            in: self
+                        ),
+                    clampToImage: true
+                ) else {
                 continue
             }
 
             j2me_input_post_touch(
-                Int32(J2ME_INPUT_POINTER_RELEASED),
+                Int32(
+                    J2ME_INPUT_POINTER_RELEASED
+                ),
                 Int32(x),
                 Int32(y)
             )
@@ -562,40 +826,57 @@ final class EmulatorView: UIView {
         with event: UIEvent?
     ) {
 
-        touchesEnded(touches, with: event)
+        touchesEnded(
+            touches,
+            with: event
+        )
     }
 }
 
 // MARK: - Global framebuffer callbacks
 
-private weak var globalEmulatorView: EmulatorView?
+private weak var globalEmulatorView:
+    EmulatorView?
 
-func setGlobalEmulatorView(_ view: EmulatorView?) {
+func setGlobalEmulatorView(
+    _ view: EmulatorView?
+) {
     globalEmulatorView = view
 }
 
-let flushReadyCallback: @convention(c) () -> Int32 = {
+let flushReadyCallback:
+    @convention(c) () -> Int32 = {
 
-    guard let view = globalEmulatorView else {
+    guard let view =
+        globalEmulatorView else {
         return 0
     }
 
     return view.canAcceptFrame()
 }
 
-let flushCallback: @convention(c) (
-    UnsafeMutableRawPointer?,
-    Int32,
-    Int32
-) -> Void = { cgImagePointer, _, _ in
+let flushCallback:
+    @convention(c) (
+        UnsafeMutableRawPointer?,
+        Int32,
+        Int32
+    ) -> Void = {
+
+    cgImagePointer,
+    _,
+    _ in
 
     guard let cgImagePointer else {
         return
     }
 
-    let cgImage = Unmanaged<CGImage>
-        .fromOpaque(cgImagePointer)
-        .takeRetainedValue()
+    let cgImage =
+        Unmanaged<CGImage>
+            .fromOpaque(
+                cgImagePointer
+            )
+            .takeRetainedValue()
 
-    globalEmulatorView?.displayImage(cgImage)
+    globalEmulatorView?
+        .displayImage(cgImage)
 }
