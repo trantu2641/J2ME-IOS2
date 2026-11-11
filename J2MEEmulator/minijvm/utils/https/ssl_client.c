@@ -2,12 +2,61 @@
 #include "ssl_client.h"
 #include "ca_cert.h"
 
+#include <sys/socket.h>
+#include <sys/time.h>
+#include <unistd.h>
+
 //#define SERVER_PORT "443"
 //#define SERVER_NAME "www.baidu.com"
 //#define GET_REQUEST "GET / HTTP/1.0\r\n\r\n"
 
 #define DEBUG_LEVEL 4
 int ca_inited = 0;
+
+/*
+ * iOS/MiniJVM HTTPS safety:
+ *
+ * The original MiniJVM HTTPS path uses a blocking mbedtls_net_recv().
+ * If the peer stops sending after the TLS handshake, mbedtls_ssl_read()
+ * can remain inside mbedtls_ssl_fetch_input() indefinitely.
+ *
+ * Give the underlying socket a finite receive/send timeout.  mbedTLS
+ * converts EAGAIN/EWOULDBLOCK from recv() into WANT_READ, which is then
+ * handled by sslc_read() below.
+ */
+static void sslc_set_socket_timeout(SSLC_Entry *entry, int timeout_ms) {
+    if (entry == NULL || entry->server_fd.fd < 0 || timeout_ms <= 0) {
+        return;
+    }
+
+    struct timeval tv;
+    tv.tv_sec = timeout_ms / 1000;
+    tv.tv_usec = (timeout_ms % 1000) * 1000;
+
+    (void) setsockopt(
+        entry->server_fd.fd,
+        SOL_SOCKET,
+        SO_RCVTIMEO,
+        &tv,
+        sizeof(tv)
+    );
+
+    (void) setsockopt(
+        entry->server_fd.fd,
+        SOL_SOCKET,
+        SO_SNDTIMEO,
+        &tv,
+        sizeof(tv)
+    );
+}
+
+static long long sslc_now_ms(void) {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return ((long long) tv.tv_sec * 1000LL)
+         + ((long long) tv.tv_usec / 1000LL);
+}
+
 char ca_crt_rsa[ca_crt_rsa_size];
 char *ca_ders[] = {
 //        "##\r\n"
@@ -3724,9 +3773,6 @@ int sslc_wrap(SSLC_Entry *entry, int netfd, char *hostname) {
     mbedtls_ssl_conf_authmode(&entry->conf, MBEDTLS_SSL_VERIFY_OPTIONAL);
     mbedtls_ssl_conf_ca_chain(&entry->conf, &entry->cacert, NULL);
     mbedtls_ssl_conf_rng(&entry->conf, mbedtls_ctr_drbg_random, &entry->ctr_drbg);
-
-    /* Prevent a stalled TLS response from blocking the MiniJVM thread forever. */
-    mbedtls_ssl_conf_read_timeout(&entry->conf, 10000);
     mbedtls_ssl_conf_dbg(&entry->conf, my_debug, stdout);
 
     if ((ret = mbedtls_ssl_setup(&entry->ssl, &entry->conf)) != 0) {
@@ -3739,7 +3785,7 @@ int sslc_wrap(SSLC_Entry *entry, int netfd, char *hostname) {
         return -1;
     }
 
-    mbedtls_ssl_set_bio(&entry->ssl, &entry->server_fd, mbedtls_net_send, mbedtls_net_recv_timeout, NULL);
+    mbedtls_ssl_set_bio(&entry->ssl, &entry->server_fd, mbedtls_net_send, mbedtls_net_recv, NULL);
 
     /*
      * 4. Handshake
@@ -3755,6 +3801,13 @@ int sslc_wrap(SSLC_Entry *entry, int netfd, char *hostname) {
     }
 
     SSL_LOG_PRINTF(" ok\n");
+
+    /*
+     * Do not allow a stalled HTTPS response to block the MiniJVM forever.
+     * The timeout is applied after the TLS handshake so the handshake keeps
+     * the original blocking behaviour and existing JARs remain compatible.
+     */
+    sslc_set_socket_timeout(entry, 10000);
 
     /*
      * 5. Verify the server certificate
@@ -3838,9 +3891,6 @@ int sslc_connect(SSLC_Entry *entry, char *hostname, char *port) {
     mbedtls_ssl_conf_authmode(&entry->conf, MBEDTLS_SSL_VERIFY_OPTIONAL);
     mbedtls_ssl_conf_ca_chain(&entry->conf, &entry->cacert, NULL);
     mbedtls_ssl_conf_rng(&entry->conf, mbedtls_ctr_drbg_random, &entry->ctr_drbg);
-
-    /* Prevent a stalled TLS response from blocking the MiniJVM thread forever. */
-    mbedtls_ssl_conf_read_timeout(&entry->conf, 10000);
     mbedtls_ssl_conf_dbg(&entry->conf, my_debug, stdout);
 
     if ((ret = mbedtls_ssl_setup(&entry->ssl, &entry->conf)) != 0) {
@@ -3853,7 +3903,7 @@ int sslc_connect(SSLC_Entry *entry, char *hostname, char *port) {
         return -1;
     }
 
-    mbedtls_ssl_set_bio(&entry->ssl, &entry->server_fd, mbedtls_net_send, mbedtls_net_recv_timeout, NULL);
+    mbedtls_ssl_set_bio(&entry->ssl, &entry->server_fd, mbedtls_net_send, mbedtls_net_recv, NULL);
 
     /*
      * 4. Handshake
@@ -3869,6 +3919,13 @@ int sslc_connect(SSLC_Entry *entry, char *hostname, char *port) {
     }
 
     SSL_LOG_PRINTF(" ok\n");
+
+    /*
+     * Do not allow a stalled HTTPS response to block the MiniJVM forever.
+     * The timeout is applied after the TLS handshake so the handshake keeps
+     * the original blocking behaviour and existing JARs remain compatible.
+     */
+    sslc_set_socket_timeout(entry, 10000);
 
     /*
      * 5. Verify the server certificate
@@ -3915,45 +3972,63 @@ int sslc_write(SSLC_Entry *entry, char *buf, int len) {
 int sslc_read(SSLC_Entry *entry, char *buf, int len) {
     /*
      * 7. Read the HTTP response
+     *
+     * IMPORTANT:
+     * mbedtls_ssl_read() may return WANT_READ after the socket receive
+     * timeout expires.  The old code immediately continued forever.
+     * Bound the whole read operation and return an error so the Java
+     * HTTP layer can close this request and move on to the next icon.
      */
-    //SSL_LOG_PRINTF("  < Read from server:");
-    //fflush(stdout);
-
     int ret;
-    do { ;
+    const long long deadline_ms = sslc_now_ms() + 10000LL;
+
+    do {
         memset(buf, 0, len);
-        ret = mbedtls_ssl_read(&entry->ssl, (unsigned char *) buf, len);
 
-        if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE)
+        ret = mbedtls_ssl_read(
+            &entry->ssl,
+            (unsigned char *) buf,
+            len
+        );
+
+        if (ret == MBEDTLS_ERR_SSL_WANT_READ ||
+            ret == MBEDTLS_ERR_SSL_WANT_WRITE) {
+
+            if (sslc_now_ms() >= deadline_ms) {
+                SSL_LOG_PRINTF(
+                    "\n\nTLS read timeout after 10000 ms\n\n"
+                );
+                return -1;
+            }
+
+            /*
+             * Avoid a tight CPU spin while the remote peer is not sending.
+             * 10 ms keeps normal icon/image downloads responsive.
+             */
+            usleep(10000);
             continue;
-
-#ifdef MBEDTLS_ERR_SSL_TIMEOUT
-        if (ret == MBEDTLS_ERR_SSL_TIMEOUT) {
-            SSL_LOG_PRINTF("\n\nTLS read timeout\n\n");
-            ret = -1;
-            break;
         }
-#endif
 
         if (ret == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY) {
-            ret = -1;
-            break;
+            return -1;
         }
+
         if (ret < 0) {
-            SSL_LOG_PRINTF("failed\n  ! mbedtls_ssl_read returned %d\n\n", ret);
-            ret = -1;
-            break;
+            SSL_LOG_PRINTF(
+                "failed\n  ! mbedtls_ssl_read returned %d\n\n",
+                ret
+            );
+            return -1;
         }
 
         if (ret == 0) {
             SSL_LOG_PRINTF("\n\nEOF\n\n");
-            break;
+            return 0;
         }
 
-        break;
-    } while (1);
+        return ret;
 
-    return ret;
+    } while (1);
 }
 
 
