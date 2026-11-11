@@ -395,36 +395,92 @@ s32 org_mini_net_SocketNative_connect0(Runtime *runtime, JClass *clazz) {
  * @param runtime
  * @return
  */
+/*
+ * Socket receive policy for MiniJVM.
+ *
+ * The old implementation used a 100 ms select timeout, but retried forever
+ * whenever Java had not explicitly configured SO_TIMEOUT. That converted a
+ * bounded native wait into an unbounded Java read and could leave a game
+ * network worker blocked forever when a server stopped sending data.
+ *
+ * Preserve the J2ME contract:
+ *   - explicitly configured SO_TIMEOUT: return -2 on timeout;
+ *   - no explicit SO_TIMEOUT: wait in interruptible 100 ms slices for up to
+ *     15 seconds, then return -1 so the Java stream reports an I/O failure;
+ *   - nonblocking socket: return 0 when no data is immediately available;
+ *   - VM/thread interruption: return -1 promptly.
+ *
+ * A timeout does not close the socket here. The Java protocol/stream layer
+ * owns the connection lifecycle and can close/reconnect the affected socket.
+ */
+#define MINI_SOCK_DEFAULT_READ_SLICE_MS 100
+#define MINI_SOCK_DEFAULT_READ_LIMIT_MS 15000
+
 static s32 sock_recv(VmSock *vmsock, u8 *buf, s32 count, Runtime *runtime) {
-    s32 ret;
-    while (1) {
+    s32 ret = -1;
+    s32 elapsed_ms = 0;
+
+    if (vmsock == NULL || count < 0 || (count > 0 && buf == NULL)) {
+        return -1;
+    }
+    if (count == 0) {
+        return 0;
+    }
+
+    for (;;) {
+        s32 wait_ms;
+
+        if (runtime == NULL || runtime->thrd_info == NULL ||
+            runtime->thrd_info->is_interrupt) {
+            return -1;
+        }
+
         if (vmsock->non_block) {
-            ret = mbedtls_net_recv(&vmsock->contex, buf, count);
+            ret = mbedtls_net_recv(&vmsock->contex, buf, (size_t) count);
         } else {
-            ret = mbedtls_net_recv_timeout(&vmsock->contex, buf, count, vmsock->rcv_time_out ? vmsock->rcv_time_out : 100);
+            wait_ms = vmsock->rcv_time_out > 0
+                ? vmsock->rcv_time_out
+                : MINI_SOCK_DEFAULT_READ_SLICE_MS;
+
+            ret = mbedtls_net_recv_timeout(
+                &vmsock->contex,
+                buf,
+                (size_t) count,
+                (uint32_t) wait_ms
+            );
         }
-        if (runtime->thrd_info->is_interrupt) {//vm waiting for destroy
-            ret = -1;
-            break;
+
+        /* Check interruption immediately after every native wait as well. */
+        if (runtime->thrd_info->is_interrupt) {
+            return -1;
         }
+
         if (ret == MBEDTLS_ERR_SSL_TIMEOUT) {
-            if (vmsock->rcv_time_out) {
-                ret = -2;
-                break;
+            /* J2ME SocketConnection.setSocketOption(SO_TIMEOUT) was used. */
+            if (vmsock->rcv_time_out > 0) {
+                return -2;
             }
+
+            elapsed_ms += MINI_SOCK_DEFAULT_READ_SLICE_MS;
+            if (elapsed_ms >= MINI_SOCK_DEFAULT_READ_LIMIT_MS) {
+                return -1;
+            }
+
             thrd_yield();
             continue;
-        } else if (ret == MBEDTLS_ERR_SSL_WANT_READ) {//nonblock
-            ret = 0;
-            break;
-        } else if (ret <= 0) {
-            ret = -1;
-            break;
-        } else {
-            break;
         }
+
+        if (ret == MBEDTLS_ERR_SSL_WANT_READ) {
+            /* Nonblocking mode: no bytes available right now. */
+            return 0;
+        }
+
+        if (ret <= 0) {
+            return -1;
+        }
+
+        return ret;
     }
-    return ret;
 }
 
 s32 org_mini_net_SocketNative_readBuf(Runtime *runtime, JClass *clazz) {
