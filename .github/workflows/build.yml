@@ -3,146 +3,246 @@ name: Build J2ME iOS
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    branches:
+      - main
 
 permissions:
   contents: read
 
 jobs:
   build:
-    runs-on: macos-26
+    runs-on: macos-15
     timeout-minutes: 60
 
     steps:
+
+      # ============================================================
+      # 1. Checkout
+      # ============================================================
+
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Show toolchain
+
+      # ============================================================
+      # 2. Toolchain
+      # ============================================================
+
+      - name: Show Xcode
         run: |
+          set -e
+
           xcodebuild -version
           xcodebuild -showsdks
 
-      - name: Set up Java for J2ME API build
+
+      # ============================================================
+      # 3. Java 17
+      # ============================================================
+
+      - name: Setup Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: "17"
 
-      - name: Patch and rebuild MiniJVM runtime
-        shell: bash
-        run: |
-          set -euo pipefail
 
-          MINI_JVM_DIR="$RUNNER_TEMP/miniJVM"
-          MINI_JVM_COMMIT="76f904ea4008a8058db5155bf5ee2cfe94d19e60"
+      # ============================================================
+      # 4. Verify MiniJVM runtime
+      #
+      # IMPORTANT:
+      # Do NOT rebuild or patch minijvm_rt.jar here.
+      #
+      # The current crash happens inside MiniJVM itself.
+      # ============================================================
 
-          git clone \
-            --filter=blob:none \
-            https://github.com/digitalgust/miniJVM.git \
-            "$MINI_JVM_DIR"
-
-          git -C "$MINI_JVM_DIR" checkout --detach "$MINI_JVM_COMMIT"
-
-          PROTOCOL="$MINI_JVM_DIR/minijvm/java/src/main/java/org/mini/net/http/Protocol.java"
-
-          python3 - "$PROTOCOL" <<'PY'
-          from pathlib import Path
-          import sys
-
-          path = Path(sys.argv[1])
-          text = path.read_text(encoding="utf-8")
-
-          old = "private static boolean nonPersistentFlag;"
-          new = "private static boolean nonPersistentFlag = true;"
-
-          if old not in text:
-              raise SystemExit(
-                  "PATCH ERROR: nonPersistentFlag not found"
-              )
-
-          text = text.replace(old, new, 1)
-
-          old = """conn.openPrim("//" + hostAndPort, Connector.READ_WRITE, true);"""
-
-          new = """conn.openPrim("//" + hostAndPort, Connector.READ_WRITE, true);
-          conn.setSocketOption(SocketConnection.TIMEOUT, 10000);"""
-
-          if old not in text:
-              raise SystemExit(
-                  "PATCH ERROR: direct HTTP connection block not found"
-              )
-
-          text = text.replace(old, new, 1)
-
-          old = """conn.openPrim("//" + proxyHost + ":" + proxyPort, Connector.READ_WRITE, true);"""
-
-          new = """conn.openPrim("//" + proxyHost + ":" + proxyPort, Connector.READ_WRITE, true);
-          conn.setSocketOption(SocketConnection.TIMEOUT, 10000);"""
-
-          if old not in text:
-              raise SystemExit(
-                  "PATCH ERROR: proxy HTTP connection block not found"
-              )
-
-          text = text.replace(old, new, 1)
-
-          path.write_text(text, encoding="utf-8")
-
-          print("======================================")
-          print("MiniJVM HTTP patch applied")
-          print("Persistent connection reuse: disabled")
-          print("Socket timeout: 10 seconds")
-          print("======================================")
-          PY
-
-          echo "Building MiniJVM..."
-
-          mvn -q \
-            -DskipTests \
-            package \
-            -f "$MINI_JVM_DIR/minijvm/java/pom.xml"
-
-          test -s \
-            "$MINI_JVM_DIR/minijvm/java/target/minijvm_rt.jar"
-
-          cp \
-            "$MINI_JVM_DIR/minijvm/java/target/minijvm_rt.jar" \
-            J2MEEmulator/Resources/jars/minijvm_rt.jar
-
-          ls -lh \
-            J2MEEmulator/Resources/jars/minijvm_rt.jar
-
-      - name: Build J2ME API runtime JAR
-        shell: bash
+      - name: Verify bundled MiniJVM
         run: |
           set -e
 
-          test -f \
-            J2MEEmulator/Resources/jars/minijvm_rt.jar
+          RUNTIME="J2MEEmulator/Resources/jars/minijvm_rt.jar"
+
+          if [ ! -s "$RUNTIME" ]; then
+            echo ""
+            echo "ERROR: minijvm_rt.jar is missing."
+            echo ""
+            exit 1
+          fi
+
+          echo ""
+          echo "========================================"
+          echo "MiniJVM runtime"
+          echo "========================================"
+
+          ls -lh "$RUNTIME"
+
+          echo ""
+          echo "Checking MiniJVM HTTP classes:"
+
+          jar tf "$RUNTIME" | grep \
+            -E 'org/mini/net/http/(Protocol|StreamConnectionPool|StreamConnectionElement)\.class'
+
+          echo ""
+          echo "MiniJVM runtime OK."
+
+
+      # ============================================================
+      # 5. Build j2me_api.jar
+      #
+      # Build from current source.
+      # Use the EXISTING minijvm_rt.jar.
+      # ============================================================
+
+      - name: Build J2ME API
+        run: |
+          set -e
+
+          echo ""
+          echo "========================================"
+          echo "Building j2me_api.jar"
+          echo "========================================"
 
           bash j2me_api/build.sh
 
-          test -s \
-            J2MEEmulator/Resources/jars/j2me_api.jar
+          API="J2MEEmulator/Resources/jars/j2me_api.jar"
 
-          echo "J2ME runtime JARs:"
-          ls -lh \
-            J2MEEmulator/Resources/jars/minijvm_rt.jar \
-            J2MEEmulator/Resources/jars/j2me_api.jar
+          if [ ! -s "$API" ]; then
+            echo ""
+            echo "ERROR: j2me_api.jar was not generated."
+            exit 1
+          fi
 
-      - name: Verify Xcode project
-        shell: bash
+          echo ""
+          echo "Built:"
+          ls -lh "$API"
+
+
+      # ============================================================
+      # 6. CRITICAL runtime verification
+      # ============================================================
+
+      - name: Verify MIDletRunner
         run: |
           set -e
 
-          test -d J2MEEmulator.xcodeproj
+          API="J2MEEmulator/Resources/jars/j2me_api.jar"
+
+          echo ""
+          echo "========================================"
+          echo "Checking MIDletRunner"
+          echo "========================================"
+
+          if ! jar tf "$API" | grep -q \
+            '^javax/microedition/shell/MIDletRunner\.class$'
+          then
+
+            echo ""
+            echo "ERROR:"
+            echo "MIDletRunner.class is missing from j2me_api.jar"
+            echo ""
+
+            echo "Available shell classes:"
+            jar tf "$API" | grep \
+              '^javax/microedition/shell/' || true
+
+            exit 1
+          fi
+
+          echo ""
+          echo "OK:"
+          echo "javax/microedition/shell/MIDletRunner.class"
+
+          echo ""
+          echo "J2ME API class count:"
+          jar tf "$API" | wc -l
+
+
+      # ============================================================
+      # 7. Verify required J2ME classes
+      # ============================================================
+
+      - name: Verify J2ME classes
+        run: |
+          set -e
+
+          API="J2MEEmulator/Resources/jars/j2me_api.jar"
+
+          REQUIRED="
+          javax/microedition/midlet/MIDlet.class
+          javax/microedition/shell/MIDletRunner.class
+          javax/microedition/lcdui/Canvas.class
+          javax/microedition/lcdui/Display.class
+          javax/microedition/lcdui/Image.class
+          javax/microedition/io/Connector.class
+          javax/microedition/io/HttpConnection.class
+          "
+
+          for CLASS in $REQUIRED
+          do
+            if ! jar tf "$API" | grep -q "^$CLASS$"
+            then
+              echo ""
+              echo "ERROR: Missing class:"
+              echo "$CLASS"
+              exit 1
+            fi
+          done
+
+          echo ""
+          echo "All required J2ME classes exist."
+
+
+      # ============================================================
+      # 8. Verify source MIDletRunner
+      # ============================================================
+
+      - name: Verify MIDletRunner source
+        run: |
+          set -e
+
+          SRC="j2me_api/src/javax/microedition/shell/MIDletRunner.java"
+
+          if [ ! -f "$SRC" ]; then
+            echo "ERROR: MIDletRunner.java not found."
+            exit 1
+          fi
+
+          echo ""
+          echo "MIDletRunner source found:"
+          echo "$SRC"
+
+          grep -n \
+            "public static void main" \
+            "$SRC"
+
+          grep -n \
+            "Class.forName" \
+            "$SRC"
+
+
+      # ============================================================
+      # 9. Verify Xcode project
+      # ============================================================
+
+      - name: Verify Xcode project
+        run: |
+          set -e
+
+          if [ ! -d "J2MEEmulator.xcodeproj" ]; then
+            echo "ERROR: J2MEEmulator.xcodeproj not found."
+            exit 1
+          fi
 
           xcodebuild \
             -list \
             -project J2MEEmulator.xcodeproj
 
-      - name: Build app for iOS 16.4
-        shell: bash
+
+      # ============================================================
+      # 10. Build iOS 16.4
+      # ============================================================
+
+      - name: Build iOS app
         run: |
           set -o pipefail
 
@@ -159,24 +259,112 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY='' \
-            build 2>&1 | tee "$RUNNER_TEMP/xcodebuild.log"
+            build \
+            2>&1 | tee "$RUNNER_TEMP/xcodebuild.log"
 
-      - name: Verify app and package IPA
-        shell: bash
+
+      # ============================================================
+      # 11. Locate app
+      # ============================================================
+
+      - name: Locate built app
+        run: |
+          set -e
+
+          echo ""
+          echo "Searching for built app..."
+
+          find "$RUNNER_TEMP/DerivedData" \
+            -name "*.app" \
+            -type d \
+            -print
+
+          APP="$RUNNER_TEMP/DerivedData/Build/Products/Release-iphoneos/JarBox.app"
+
+          if [ ! -d "$APP" ]; then
+            echo ""
+            echo "ERROR: JarBox.app not found."
+            exit 1
+          fi
+
+          echo ""
+          echo "APP:"
+          echo "$APP"
+
+          ls -lh "$APP"
+
+
+      # ============================================================
+      # 12. Replace bundled runtime files explicitly
+      #
+      # This guarantees the IPA contains exactly the verified
+      # runtime files from this checkout.
+      # ============================================================
+
+      - name: Install verified runtime into app
         run: |
           set -e
 
           APP="$RUNNER_TEMP/DerivedData/Build/Products/Release-iphoneos/JarBox.app"
 
-          if [ ! -d "$APP" ]; then
-            echo "ERROR: JarBox.app was not found."
-            echo "Available app bundles:"
-            find "$RUNNER_TEMP/DerivedData" \
-              -name '*.app' \
-              -type d \
-              -print || true
+          cp \
+            "J2MEEmulator/Resources/jars/minijvm_rt.jar" \
+            "$APP/minijvm_rt.jar"
+
+          cp \
+            "J2MEEmulator/Resources/jars/j2me_api.jar" \
+            "$APP/j2me_api.jar"
+
+          echo ""
+          echo "Runtime files inside app:"
+
+          ls -lh \
+            "$APP/minijvm_rt.jar" \
+            "$APP/j2me_api.jar"
+
+
+      # ============================================================
+      # 13. Verify files INSIDE .app
+      # ============================================================
+
+      - name: Verify runtime inside app
+        run: |
+          set -e
+
+          APP="$RUNNER_TEMP/DerivedData/Build/Products/Release-iphoneos/JarBox.app"
+
+          API="$APP/j2me_api.jar"
+
+          RUNTIME="$APP/minijvm_rt.jar"
+
+          test -s "$API"
+          test -s "$RUNTIME"
+
+          echo ""
+          echo "Checking MIDletRunner inside final app..."
+
+          if ! jar tf "$API" | grep -q \
+            '^javax/microedition/shell/MIDletRunner\.class$'
+          then
+            echo ""
+            echo "FATAL:"
+            echo "Final app does not contain MIDletRunner.class"
             exit 1
           fi
+
+          echo ""
+          echo "MIDletRunner verified inside final app."
+
+
+      # ============================================================
+      # 14. Check minimum iOS version
+      # ============================================================
+
+      - name: Verify iOS deployment target
+        run: |
+          set -e
+
+          APP="$RUNNER_TEMP/DerivedData/Build/Products/Release-iphoneos/JarBox.app"
 
           MIN_OS=$(
             /usr/libexec/PlistBuddy \
@@ -184,29 +372,34 @@ jobs:
               "$APP/Info.plist"
           )
 
-          echo "Built MinimumOSVersion: $MIN_OS"
+          echo ""
+          echo "MinimumOSVersion = $MIN_OS"
 
           if [ "$MIN_OS" != "16.4" ]; then
-            echo "ERROR: Expected iOS 16.4, got $MIN_OS"
+            echo ""
+            echo "ERROR: Expected iOS 16.4"
             exit 1
           fi
 
-          cp \
-            J2MEEmulator/Resources/jars/minijvm_rt.jar \
-            "$APP/minijvm_rt.jar"
 
-          cp \
-            J2MEEmulator/Resources/jars/j2me_api.jar \
-            "$APP/j2me_api.jar"
+      # ============================================================
+      # 15. Package IPA
+      # ============================================================
 
-          test -s "$APP/minijvm_rt.jar"
-          test -s "$APP/j2me_api.jar"
+      - name: Package IPA
+        run: |
+          set -e
 
+          APP="$RUNNER_TEMP/DerivedData/Build/Products/Release-iphoneos/JarBox.app"
+
+          rm -rf Payload
           mkdir -p Payload
 
           ditto \
             "$APP" \
-            Payload/J2MEPlayer.app
+            "Payload/J2MEPlayer.app"
+
+          rm -f J2ME-iOS-unsigned.ipa
 
           /usr/bin/zip \
             -qry \
@@ -215,21 +408,73 @@ jobs:
 
           test -s J2ME-iOS-unsigned.ipa
 
-          echo "Verifying runtime files in IPA:"
-
-          unzip -Z1 J2ME-iOS-unsigned.ipa \
-            | grep -E \
-              '^Payload/J2MEPlayer\.app/(minijvm_rt|j2me_api)\.jar$'
-
+          echo ""
+          echo "IPA:"
           ls -lh J2ME-iOS-unsigned.ipa
 
-      - name: Upload unsigned IPA
+
+      # ============================================================
+      # 16. Verify IPA contents
+      # ============================================================
+
+      - name: Verify IPA
+        run: |
+          set -e
+
+          echo ""
+          echo "========================================"
+          echo "IPA runtime verification"
+          echo "========================================"
+
+          unzip -Z1 J2ME-iOS-unsigned.ipa \
+            | grep \
+              -E '^Payload/J2MEPlayer\.app/(minijvm_rt|j2me_api)\.jar$'
+
+          echo ""
+          echo "Checking MIDletRunner inside IPA..."
+
+          TMP_IPA="$RUNNER_TEMP/ipa_check"
+
+          rm -rf "$TMP_IPA"
+
+          mkdir -p "$TMP_IPA"
+
+          unzip -q \
+            J2ME-iOS-unsigned.ipa \
+            -d "$TMP_IPA"
+
+          API="$TMP_IPA/Payload/J2MEPlayer.app/j2me_api.jar"
+
+          if ! jar tf "$API" | grep -q \
+            '^javax/microedition/shell/MIDletRunner\.class$'
+          then
+            echo ""
+            echo "ERROR: MIDletRunner missing from final IPA."
+            exit 1
+          fi
+
+          echo ""
+          echo "========================================"
+          echo "FINAL RUNTIME CHECK: PASS"
+          echo "========================================"
+
+
+      # ============================================================
+      # 17. Upload IPA
+      # ============================================================
+
+      - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
           name: J2ME-iOS-unsigned
           path: J2ME-iOS-unsigned.ipa
           if-no-files-found: error
           retention-days: 14
+
+
+      # ============================================================
+      # 18. Upload build log
+      # ============================================================
 
       - name: Upload build log
         if: always()
