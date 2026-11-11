@@ -3724,6 +3724,9 @@ int sslc_wrap(SSLC_Entry *entry, int netfd, char *hostname) {
     mbedtls_ssl_conf_authmode(&entry->conf, MBEDTLS_SSL_VERIFY_OPTIONAL);
     mbedtls_ssl_conf_ca_chain(&entry->conf, &entry->cacert, NULL);
     mbedtls_ssl_conf_rng(&entry->conf, mbedtls_ctr_drbg_random, &entry->ctr_drbg);
+
+    /* Prevent a stalled TLS response from blocking the MiniJVM thread forever. */
+    mbedtls_ssl_conf_read_timeout(&entry->conf, 10000);
     mbedtls_ssl_conf_dbg(&entry->conf, my_debug, stdout);
 
     if ((ret = mbedtls_ssl_setup(&entry->ssl, &entry->conf)) != 0) {
@@ -3736,7 +3739,7 @@ int sslc_wrap(SSLC_Entry *entry, int netfd, char *hostname) {
         return -1;
     }
 
-    mbedtls_ssl_set_bio(&entry->ssl, &entry->server_fd, mbedtls_net_send, mbedtls_net_recv, NULL);
+    mbedtls_ssl_set_bio(&entry->ssl, &entry->server_fd, mbedtls_net_send, mbedtls_net_recv_timeout, NULL);
 
     /*
      * 4. Handshake
@@ -3835,6 +3838,9 @@ int sslc_connect(SSLC_Entry *entry, char *hostname, char *port) {
     mbedtls_ssl_conf_authmode(&entry->conf, MBEDTLS_SSL_VERIFY_OPTIONAL);
     mbedtls_ssl_conf_ca_chain(&entry->conf, &entry->cacert, NULL);
     mbedtls_ssl_conf_rng(&entry->conf, mbedtls_ctr_drbg_random, &entry->ctr_drbg);
+
+    /* Prevent a stalled TLS response from blocking the MiniJVM thread forever. */
+    mbedtls_ssl_conf_read_timeout(&entry->conf, 10000);
     mbedtls_ssl_conf_dbg(&entry->conf, my_debug, stdout);
 
     if ((ret = mbedtls_ssl_setup(&entry->ssl, &entry->conf)) != 0) {
@@ -3847,7 +3853,7 @@ int sslc_connect(SSLC_Entry *entry, char *hostname, char *port) {
         return -1;
     }
 
-    mbedtls_ssl_set_bio(&entry->ssl, &entry->server_fd, mbedtls_net_send, mbedtls_net_recv, NULL);
+    mbedtls_ssl_set_bio(&entry->ssl, &entry->server_fd, mbedtls_net_send, mbedtls_net_recv_timeout, NULL);
 
     /*
      * 4. Handshake
@@ -3920,6 +3926,14 @@ int sslc_read(SSLC_Entry *entry, char *buf, int len) {
 
         if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE)
             continue;
+
+#ifdef MBEDTLS_ERR_SSL_TIMEOUT
+        if (ret == MBEDTLS_ERR_SSL_TIMEOUT) {
+            SSL_LOG_PRINTF("\n\nTLS read timeout\n\n");
+            ret = -1;
+            break;
+        }
+#endif
 
         if (ret == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY) {
             ret = -1;
