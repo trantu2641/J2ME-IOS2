@@ -242,8 +242,8 @@ final class EmulatorView: UIView {
         framebufferLayer.backgroundColor =
             UIColor { trait in
                 trait.userInterfaceStyle == .dark
-                    ? UIColor.black.cgColor
-                    : UIColor.systemBackground.cgColor
+                    ? .black
+                    : .systemBackground
             }.cgColor
 
         framebufferLayer.contentsGravity =
@@ -262,26 +262,6 @@ final class EmulatorView: UIView {
         framebufferLayer.contents = nil
 
         layer.addSublayer(framebufferLayer)
-    }
-
-    override func traitCollectionDidChange(
-        _ previousTraitCollection: UITraitCollection?
-    ) {
-        super.traitCollectionDidChange(previousTraitCollection)
-
-        guard previousTraitCollection?.userInterfaceStyle !=
-                traitCollection.userInterfaceStyle else {
-            return
-        }
-
-        let background = UIColor { trait in
-            trait.userInterfaceStyle == .dark
-                ? .black
-                : .systemBackground
-        }
-
-        backgroundColor = background
-        framebufferLayer.backgroundColor = background.cgColor
     }
 
     // MARK: - Display link lifecycle
@@ -359,6 +339,26 @@ final class EmulatorView: UIView {
 
         displayLink = nil
         displayLinkTarget = nil
+    }
+
+    override func traitCollectionDidChange(
+        _ previousTraitCollection: UITraitCollection?
+    ) {
+        super.traitCollectionDidChange(previousTraitCollection)
+
+        guard previousTraitCollection?.userInterfaceStyle
+                != traitCollection.userInterfaceStyle else {
+            return
+        }
+
+        let dynamicBackground = UIColor { trait in
+            trait.userInterfaceStyle == .dark
+                ? .black
+                : .systemBackground
+        }
+
+        backgroundColor = dynamicBackground
+        framebufferLayer.backgroundColor = dynamicBackground.cgColor
     }
 
     // MARK: - Layout
