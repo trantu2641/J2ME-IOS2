@@ -227,8 +227,8 @@ final class EmulatorView: UIView {
 
         framebufferLayer.backgroundColor = UIColor { trait in
             trait.userInterfaceStyle == .dark
-                ? UIColor.black.cgColor
-                : UIColor.systemBackground.cgColor
+                ? .black
+                : .systemBackground
         }.cgColor
     }
 
