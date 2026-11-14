@@ -9,67 +9,106 @@ extern "C" {
  * Forward declaration.
  *
  * jvm_bridge.h chỉ dùng MiniJVM dưới dạng con trỏ nên không cần
- * include jvm.h ở đây. jvm.h cũng khai báo MiniJVM bằng đúng
- * kiểu struct _MiniJVM.
+ * include jvm.h ở đây.
+ *
+ * jvm.h cũng khai báo MiniJVM bằng:
+ *
+ * typedef struct _MiniJVM MiniJVM;
  */
 typedef struct _MiniJVM MiniJVM;
 
-/// 3D supersampling scale factor (shared by M3G and MascotCapsule).
-/// Set by jvm_bridge_init, read by j2me_m3g_jni.c and MC3D via system property.
+/**
+ * 3D supersampling scale factor.
+ *
+ * Shared by M3G and MascotCapsule.
+ * Set by jvm_bridge_init(), read by j2me_m3g_jni.c
+ * and MC3D via system property.
+ */
 extern int g_render_3d_scale;
 
-/// Register the calling thread as the iOS main UI thread for CPU profiling.
-/// Call from the main thread before starting a MIDlet.
+/*
+ * Register the current thread as the JVM main thread.
+ */
 void jvm_bridge_register_main_thread(void);
 
-/// Initialize miniJVM with the given resource and save directories.
-/// @param res_root         Path to directory containing runtime JARs
-/// @param save_root        Path to writable directory for app data
-/// @param midlet_jar       Path to the MIDlet JAR to include in classpath
-/// @param screen_width     J2ME virtual screen width (e.g. 240)
-/// @param screen_height    J2ME virtual screen height (e.g. 320)
-/// @param render_3d_scale  3D supersampling factor for M3G & MC3D (1=native, 2=2x, 3=3x)
-/// @param fps_limit        Max frames per second (0 = unlimited)
-/// @return 0 on success, non-zero on failure
-int jvm_bridge_init(const char *res_root, const char *save_root, const char *midlet_jar,
-                    int screen_width, int screen_height, int render_3d_scale,
+/*
+ * Initialize the JVM bridge.
+ */
+int jvm_bridge_init(const char *res_root,
+                    const char *save_root,
+                    const char *midlet_jar,
+                    int screen_width,
+                    int screen_height,
+                    int render_3d_scale,
                     int fps_limit);
 
-/// Run a MIDlet from a JAR file via MIDletRunner.
-/// @param midlet_jar_path Path to the MIDlet JAR file
-/// @return 0 on success, non-zero on failure
+/*
+ * Run a MIDlet from a JAR path.
+ */
 int jvm_bridge_run_midlet(const char *midlet_jar_path);
 
-/// Multi-session JAR runtime API. Each session owns an independent MiniJVM.
-/// The active session is the only session whose framebuffer is presented to UIKit.
-int jvm_bridge_session_create(const char *res_root, const char *save_root, const char *midlet_jar,
-                              int screen_width, int screen_height, int render_3d_scale,
+/*
+ * Create a new JVM/MIDlet session.
+ */
+int jvm_bridge_session_create(const char *res_root,
+                              const char *save_root,
+                              const char *midlet_jar,
+                              int screen_width,
+                              int screen_height,
+                              int render_3d_scale,
                               int fps_limit);
 
+/*
+ * Start an existing session.
+ */
 int jvm_bridge_session_start(int session_id);
 
+/*
+ * Set which session is currently active.
+ */
 void jvm_bridge_session_set_active(int session_id);
 
+/*
+ * Check whether a session is still running.
+ */
 int jvm_bridge_session_is_running(int session_id);
 
+/*
+ * Request a session to stop.
+ */
 void jvm_bridge_session_request_stop(int session_id);
 
+/*
+ * Destroy a session.
+ */
 void jvm_bridge_session_destroy(int session_id);
 
+/*
+ * Destroy all sessions.
+ */
 void jvm_bridge_session_destroy_all(void);
 
-/// Session-aware stop query used by native MIDP input.
+/*
+ * Check whether stop has been requested for a specific MiniJVM.
+ *
+ * MiniJVM is forward-declared above because this header only needs
+ * the pointer type.
+ */
 int jvm_bridge_is_stop_requested_for_vm(MiniJVM *jvm);
 
-/// Destroy the JVM instance and free resources.
+/*
+ * Destroy the JVM bridge.
+ */
 void jvm_bridge_destroy(void);
 
-/// Request graceful MIDlet stop (non-blocking, thread-safe).
-/// Can be called from any thread (e.g. main UI thread).
-/// The Display event loop will detect this and call notifyDestroyed().
+/*
+ * Request global JVM stop.
+ */
 void jvm_bridge_request_stop(void);
 
-/// Check if stop has been requested. Called from native methods on JVM thread.
+/*
+ * Check whether global JVM stop has been requested.
+ */
 int jvm_bridge_is_stop_requested(void);
 
 #ifdef __cplusplus
