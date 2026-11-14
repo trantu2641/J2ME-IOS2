@@ -266,9 +266,9 @@ final class EmulatorView: UIView {
 
         framebufferLayer.backgroundColor = UIColor { trait in
             trait.userInterfaceStyle == .dark
-                ? UIColor.black.cgColor
-                : UIColor.systemBackground.cgColor
-        }
+                ? UIColor.black
+                : UIColor.systemBackground
+        }.cgColor
 
         framebufferLayer.contentsGravity =
             .resizeAspect
