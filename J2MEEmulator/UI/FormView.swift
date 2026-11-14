@@ -633,16 +633,18 @@ class FormView: UIView, UIGestureRecognizerDelegate {
         // Cancel/Back/Exit/Stop intentionally
         // discard native edits.
 
-        let commandType =
-            sender.accessibilityIdentifier?
-                .replacingOccurrences(
-                    of: "j2me-command-type-",
-                    with: ""
-                )
-                .flatMap {
-                    Int32($0)
-                }
-                ?? 1
+        let commandType: Int32 =
+            if let identifier = sender.accessibilityIdentifier,
+               let value = Int32(
+                   identifier.replacingOccurrences(
+                       of: "j2me-command-type-",
+                       with: ""
+                   )
+               ) {
+                value
+            } else {
+                1
+            }
 
         endEditing(true)
 
