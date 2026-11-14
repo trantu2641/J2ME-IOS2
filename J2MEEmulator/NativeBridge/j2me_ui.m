@@ -314,6 +314,7 @@ static java_native_method j2me_ui_methods[] = {
     {CLS, "formBegin",        "(Ljava/lang/String;I)V",                          n_formBegin},
     {CLS, "formAddStringItem","(Ljava/lang/String;Ljava/lang/String;I)V",        n_formAddStringItem},
     {CLS, "formAddTextField", "(Ljava/lang/String;Ljava/lang/String;II)V",       n_formAddTextField},
+    {CLS, "formAddChoiceItem","(Ljava/lang/String;Ljava/lang/String;ZI)V",       n_formAddChoiceItem},
     {CLS, "formAddCommand",   "(Ljava/lang/String;III)V",                        n_formAddCommand},
     {CLS, "formShow",         "()V",                                             n_formShow},
     {CLS, "showCanvas",       "()V",                                             n_showCanvas},
