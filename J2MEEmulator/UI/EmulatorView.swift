@@ -25,6 +25,36 @@ private final class EmulatorDisplayLinkTarget: NSObject {
 
 final class EmulatorView: UIView {
 
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+
+        // This is only the area surrounding the JAR framebuffer.
+        // The framebuffer image itself is never recolored.
+        backgroundColor = UIColor { trait in
+            trait.userInterfaceStyle == .dark
+                ? .black
+                : .systemBackground
+        }
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
+        super.traitCollectionDidChange(previousTraitCollection)
+
+        guard previousTraitCollection?.userInterfaceStyle != traitCollection.userInterfaceStyle else {
+            return
+        }
+
+        backgroundColor = UIColor { trait in
+            trait.userInterfaceStyle == .dark
+                ? .black
+                : .systemBackground
+        }
+    }
+
     // MARK: - Virtual resolution
 
     var canvasWidth: Int = 240 {
@@ -227,11 +257,7 @@ final class EmulatorView: UIView {
             }
         }
 
-        backgroundColor = UIColor { trait in
-            trait.userInterfaceStyle == .dark
-                ? .black
-                : .systemBackground
-        }
+        backgroundColor = .black
 
         isOpaque = true
         clipsToBounds = true
@@ -240,11 +266,7 @@ final class EmulatorView: UIView {
         isUserInteractionEnabled = true
 
         framebufferLayer.backgroundColor =
-            UIColor { trait in
-                trait.userInterfaceStyle == .dark
-                    ? .black
-                    : .systemBackground
-            }.cgColor
+            UIColor.black.cgColor
 
         framebufferLayer.contentsGravity =
             .resizeAspect
@@ -339,26 +361,6 @@ final class EmulatorView: UIView {
 
         displayLink = nil
         displayLinkTarget = nil
-    }
-
-    override func traitCollectionDidChange(
-        _ previousTraitCollection: UITraitCollection?
-    ) {
-        super.traitCollectionDidChange(previousTraitCollection)
-
-        guard previousTraitCollection?.userInterfaceStyle
-                != traitCollection.userInterfaceStyle else {
-            return
-        }
-
-        let dynamicBackground = UIColor { trait in
-            trait.userInterfaceStyle == .dark
-                ? .black
-                : .systemBackground
-        }
-
-        backgroundColor = dynamicBackground
-        framebufferLayer.backgroundColor = dynamicBackground.cgColor
     }
 
     // MARK: - Layout
