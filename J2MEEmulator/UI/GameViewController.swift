@@ -134,6 +134,12 @@ final class GameViewController:
     private let exitButton =
         UIButton(type: .system)
 
+    private let moreButton =
+        UIButton(type: .system)
+
+    private var moreMenuOverlay: UIView?
+    private var moreMenuPanel: UIView?
+
     private let keyboardInput =
         J2MEKeyboardInputView(frame: .zero)
 
@@ -253,6 +259,10 @@ final class GameViewController:
         super.viewDidLoad()
 
         view.backgroundColor = .black
+
+        if UserDefaults.standard.bool(forKey: "J2MEKeepScreenOn") {
+            UIApplication.shared.isIdleTimerDisabled = true
+        }
 
         emulatorView.canvasWidth =
             canvasWidth
@@ -424,6 +434,12 @@ final class GameViewController:
             accessibility: "Exit emulator"
         )
 
+        configureHeaderButton(
+            moreButton,
+            symbol: "ellipsis",
+            accessibility: "More options"
+        )
+
         addJarButton.addTarget(
             self,
             action: #selector(addJarTapped),
@@ -451,6 +467,12 @@ final class GameViewController:
         exitButton.addTarget(
             self,
             action: #selector(backTapped),
+            for: .touchUpInside
+        )
+
+        moreButton.addTarget(
+            self,
+            action: #selector(showMoreMenu),
             for: .touchUpInside
         )
 
@@ -487,6 +509,7 @@ final class GameViewController:
         headerStack.addArrangedSubview(addJarButton)
         headerStack.addArrangedSubview(removeJarButton)
         headerStack.addArrangedSubview(toggleKeypadButton)
+        headerStack.addArrangedSubview(moreButton)
         headerStack.addArrangedSubview(systemKeyboardButton)
         headerStack.addArrangedSubview(exitButton)
 
@@ -687,124 +710,24 @@ final class GameViewController:
         }
     }
 
-    // MARK: - Installed JAR picker
-
     private func scanInstalledJARs() -> [(name: String, path: String, icon: UIImage)] {
+        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+        let gamesDir = docs.appendingPathComponent("games", isDirectory: true)
+        let files = (try? FileManager.default.contentsOfDirectory(
+            at: gamesDir,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        )) ?? []
 
-        let documentsURL =
-            FileManager.default.urls(
-                for: .documentDirectory,
-                in: .userDomainMask
-            ).first!
-
-        // AppsListViewController imports JAR files into:
-        // Documents/games
-        let gamesURL =
-            documentsURL.appendingPathComponent(
-                "games",
-                isDirectory: true
-            )
-
-        let fm =
-            FileManager.default
-
-        guard fm.fileExists(
-            atPath:
-                gamesURL.path
-        ) else {
-
-            print(
-                "[JAR Picker] games directory does not exist: \(gamesURL.path)"
-            )
-
-            return []
-        }
-
-        guard let urls =
-                try? fm.contentsOfDirectory(
-                    at:
-                        gamesURL,
-                    includingPropertiesForKeys:
-                        [
-                            .isRegularFileKey
-                        ],
-                    options:
-                        [
-                            .skipsHiddenFiles
-                        ]
-        else {
-
-            print(
-                "[JAR Picker] Cannot read: \(gamesURL.path)"
-            )
-
-            return []
-        }
-
-        var result:
-            [(name: String, path: String, icon: UIImage)] = []
-
-        for url in urls {
-
-            guard url.pathExtension.lowercased() == "jar"
-            else {
-                continue
+        return files
+            .filter { $0.pathExtension.lowercased() == "jar" }
+            .sorted { $0.lastPathComponent.localizedCaseInsensitiveCompare($1.lastPathComponent) == .orderedAscending }
+            .map { url in
+                let metadata = JARMetadata.read(from: url.path)
+                let name = metadata?.midletName ?? url.deletingPathExtension().lastPathComponent
+                let icon = metadata?.readIcon(from: url.path) ?? UIImage(systemName: "gamecontroller")!
+                return (name: name, path: url.path, icon: icon)
             }
-
-            let metadata =
-                JARMetadata.read(
-                    from:
-                        url.path
-                )
-
-            let name =
-                metadata?.midletName
-                ?? url
-                    .deletingPathExtension()
-                    .lastPathComponent
-
-            let icon =
-                metadata?.readIcon(
-                    from:
-                        url.path
-                )
-                ?? UIImage(
-                    systemName:
-                        "gamecontroller.fill"
-                )
-                ?? UIImage()
-
-            result.append(
-                (
-                    name:
-                        name,
-                    path:
-                        url.path,
-                    icon:
-                        icon
-                )
-            )
-        }
-
-        result.sort {
-
-            $0.name.localizedCaseInsensitiveCompare(
-                $1.name
-            ) == .orderedAscending
-        }
-
-        print(
-            "[JAR Picker] Found \(result.count) JAR(s)"
-        )
-
-        for item in result {
-
-            print(
-                "[JAR Picker] \(item.name) -> \(item.path)"
-            )
-        }
-
-        return result
     }
 
     @objc private func addJarTapped() {
@@ -812,538 +735,361 @@ final class GameViewController:
     }
 
     private func showJarPicker() {
+        if jarPickerOverlay != nil { return }
 
-        if jarPickerOverlay != nil {
-            return
-        }
+        let overlay = UIView()
+        overlay.backgroundColor = UIColor(white: 0.04, alpha: 0.98)
+        overlay.translatesAutoresizingMaskIntoConstraints = false
 
-        // Dim background.
-        let dimView =
-            UIControl()
+        let title = UILabel()
+        title.text = "DANH SÁCH JAR"
+        title.textColor = .white
+        title.font = .systemFont(ofSize: 20, weight: .bold)
+        title.textAlignment = .center
+        title.translatesAutoresizingMaskIntoConstraints = false
 
-        dimView.backgroundColor =
-            UIColor.black.withAlphaComponent(
-                0.55
-            )
+        let table = UITableView(frame: .zero, style: .plain)
+        table.backgroundColor = .clear
+        table.separatorColor = UIColor(white: 0.25, alpha: 1)
+        table.translatesAutoresizingMaskIntoConstraints = false
+        table.register(J2MEJarPickerCell.self, forCellReuseIdentifier: "jar")
+        table.dataSource = self
+        table.delegate = self
 
-        dimView.translatesAutoresizingMaskIntoConstraints =
-            false
+        let exit = UIButton(type: .system)
+        exit.setTitle("THOÁT", for: .normal)
+        exit.setTitleColor(.white, for: .normal)
+        exit.titleLabel?.font = .systemFont(ofSize: 17, weight: .semibold)
+        exit.backgroundColor = UIColor(white: 0.16, alpha: 1)
+        exit.layer.cornerRadius = 10
+        exit.addTarget(self, action: #selector(closeJarPicker), for: .touchUpInside)
+        exit.translatesAutoresizingMaskIntoConstraints = false
 
-        dimView.addTarget(
-            self,
-            action:
-                #selector(
-                    closeJarPicker
-                ),
-            for:
-                .touchUpInside
-        )
-
-        // Centered rounded panel.
-        let panel =
-            UIView()
-
-        panel.backgroundColor =
-            UIColor(
-                white:
-                    0.04,
-                alpha:
-                    0.98
-            )
-
-        panel.layer.cornerRadius =
-            20
-
-        panel.layer.masksToBounds =
-            true
-
-        panel.translatesAutoresizingMaskIntoConstraints =
-            false
-
-        // Title.
-        let title =
-            UILabel()
-
-        title.text =
-            "DANH SÁCH JAR"
-
-        title.textColor =
-            .white
-
-        title.font =
-            .systemFont(
-                ofSize:
-                    22,
-                weight:
-                    .bold
-            )
-
-        title.textAlignment =
-            .center
-
-        title.translatesAutoresizingMaskIntoConstraints =
-            false
-
-        // Table.
-        let table =
-            UITableView(
-                frame:
-                    .zero,
-                style:
-                    .plain
-            )
-
-        table.backgroundColor =
-            .clear
-
-        table.separatorColor =
-            UIColor(
-                white:
-                    0.25,
-                alpha:
-                    1
-            )
-
-        table.showsVerticalScrollIndicator =
-            true
-
-        table.translatesAutoresizingMaskIntoConstraints =
-            false
-
-        table.register(
-            J2MEJarPickerCell.self,
-            forCellReuseIdentifier:
-                "jar"
-        )
-
-        table.dataSource =
-            self
-
-        table.delegate =
-            self
-
-        // Empty state.
-        let emptyLabel =
-            UILabel()
-
-        emptyLabel.text =
-            "Không tìm thấy JAR\n\nHãy thêm file .jar vào ứng dụng."
-
-        emptyLabel.textColor =
-            UIColor(
-                white:
-                    0.65,
-                alpha:
-                    1
-            )
-
-        emptyLabel.font =
-            .systemFont(
-                ofSize:
-                    16,
-                weight:
-                    .medium
-            )
-
-        emptyLabel.textAlignment =
-            .center
-
-        emptyLabel.numberOfLines =
-            0
-
-        emptyLabel.isHidden =
-            !scanInstalledJARs().isEmpty
-
-        emptyLabel.translatesAutoresizingMaskIntoConstraints =
-            false
-
-        // Exit.
-        let exit =
-            UIButton(
-                type:
-                    .system
-            )
-
-        exit.setTitle(
-            "THOÁT",
-            for:
-                .normal
-        )
-
-        exit.setTitleColor(
-            .white,
-            for:
-                .normal
-        )
-
-        exit.titleLabel?.font =
-            .systemFont(
-                ofSize:
-                    17,
-                weight:
-                    .semibold
-            )
-
-        exit.backgroundColor =
-            UIColor(
-                white:
-                    0.16,
-                alpha:
-                    1
-            )
-
-        exit.layer.cornerRadius =
-            12
-
-        exit.addTarget(
-            self,
-            action:
-                #selector(
-                    closeJarPicker
-                ),
-            for:
-                .touchUpInside
-        )
-
-        exit.translatesAutoresizingMaskIntoConstraints =
-            false
-
-        view.addSubview(
-            dimView
-        )
-
-        view.addSubview(
-            panel
-        )
-
-        panel.addSubview(
-            title
-        )
-
-        panel.addSubview(
-            table
-        )
-
-        panel.addSubview(
-            emptyLabel
-        )
-
-        panel.addSubview(
-            exit
-        )
+        overlay.addSubview(title)
+        overlay.addSubview(table)
+        overlay.addSubview(exit)
+        view.addSubview(overlay)
 
         NSLayoutConstraint.activate([
+            title.topAnchor.constraint(equalTo: overlay.safeAreaLayoutGuide.topAnchor, constant: 14),
+            title.leadingAnchor.constraint(equalTo: overlay.leadingAnchor, constant: 20),
+            title.trailingAnchor.constraint(equalTo: overlay.trailingAnchor, constant: -20),
+            title.heightAnchor.constraint(equalToConstant: 32),
 
-            // Full-screen dim background.
-            dimView.topAnchor.constraint(
-                equalTo:
-                    view.topAnchor
-            ),
+            table.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 12),
+            table.leadingAnchor.constraint(equalTo: overlay.leadingAnchor, constant: 12),
+            table.trailingAnchor.constraint(equalTo: overlay.trailingAnchor, constant: -12),
+            table.bottomAnchor.constraint(equalTo: exit.topAnchor, constant: -12),
 
-            dimView.leadingAnchor.constraint(
-                equalTo:
-                    view.leadingAnchor
-            ),
-
-            dimView.trailingAnchor.constraint(
-                equalTo:
-                    view.trailingAnchor
-            ),
-
-            dimView.bottomAnchor.constraint(
-                equalTo:
-                    view.bottomAnchor
-            ),
-
-            // Centered panel.
-            panel.centerXAnchor.constraint(
-                equalTo:
-                    view.centerXAnchor
-            ),
-
-            panel.centerYAnchor.constraint(
-                equalTo:
-                    view.centerYAnchor
-            ),
-
-            panel.leadingAnchor.constraint(
-                equalTo:
-                    view.leadingAnchor,
-                constant:
-                    20
-            ),
-
-            panel.trailingAnchor.constraint(
-                equalTo:
-                    view.trailingAnchor,
-                constant:
-                    -20
-            ),
-
-            panel.heightAnchor.constraint(
-                equalTo:
-                    view.heightAnchor,
-                multiplier:
-                    0.68
-            ),
-
-            // Title.
-            title.topAnchor.constraint(
-                equalTo:
-                    panel.topAnchor,
-                constant:
-                    18
-            ),
-
-            title.leadingAnchor.constraint(
-                equalTo:
-                    panel.leadingAnchor,
-                constant:
-                    20
-            ),
-
-            title.trailingAnchor.constraint(
-                equalTo:
-                    panel.trailingAnchor,
-                constant:
-                    -20
-            ),
-
-            title.heightAnchor.constraint(
-                equalToConstant:
-                    32
-            ),
-
-            // Table.
-            table.topAnchor.constraint(
-                equalTo:
-                    title.bottomAnchor,
-                constant:
-                    12
-            ),
-
-            table.leadingAnchor.constraint(
-                equalTo:
-                    panel.leadingAnchor,
-                constant:
-                    10
-            ),
-
-            table.trailingAnchor.constraint(
-                equalTo:
-                    panel.trailingAnchor,
-                constant:
-                    -10
-            ),
-
-            table.bottomAnchor.constraint(
-                equalTo:
-                    exit.topAnchor,
-                constant:
-                    -12
-            ),
-
-            // Empty state.
-            emptyLabel.centerXAnchor.constraint(
-                equalTo:
-                    table.centerXAnchor
-            ),
-
-            emptyLabel.centerYAnchor.constraint(
-                equalTo:
-                    table.centerYAnchor
-            ),
-
-            emptyLabel.leadingAnchor.constraint(
-                greaterThanOrEqualTo:
-                    table.leadingAnchor,
-                constant:
-                    20
-            ),
-
-            emptyLabel.trailingAnchor.constraint(
-                lessThanOrEqualTo:
-                    table.trailingAnchor,
-                constant:
-                    -20
-            ),
-
-            // Exit.
-            exit.leadingAnchor.constraint(
-                equalTo:
-                    panel.leadingAnchor,
-                constant:
-                    20
-            ),
-
-            exit.trailingAnchor.constraint(
-                equalTo:
-                    panel.trailingAnchor,
-                constant:
-                    -20
-            ),
-
-            exit.bottomAnchor.constraint(
-                equalTo:
-                    panel.bottomAnchor,
-                constant:
-                    -16
-            ),
-
-            exit.heightAnchor.constraint(
-                equalToConstant:
-                    48
-            )
+            exit.leadingAnchor.constraint(equalTo: overlay.leadingAnchor, constant: 20),
+            exit.trailingAnchor.constraint(equalTo: overlay.trailingAnchor, constant: -20),
+            exit.bottomAnchor.constraint(equalTo: overlay.safeAreaLayoutGuide.bottomAnchor, constant: -12),
+            exit.heightAnchor.constraint(equalToConstant: 48)
         ])
 
-        jarPickerOverlay =
-            panel
-
-        jarPickerTableView =
-            table
-
+        jarPickerOverlay = overlay
+        jarPickerTableView = table
         table.reloadData()
-
-        panel.alpha =
-            0
-
-        panel.transform =
-            CGAffineTransform(
-                scaleX:
-                    0.94,
-                y:
-                    0.94
-            )
-
-        dimView.alpha =
-            0
-
-        UIView.animate(
-            withDuration:
-                0.18,
-            delay:
-                0,
-            options:
-                [
-                    .curveEaseOut
-                ],
-            animations: {
-
-                dimView.alpha =
-                    1
-
-                panel.alpha =
-                    1
-
-                panel.transform =
-                    .identity
-            }
-        )
     }
 
     @objc private func closeJarPicker() {
-
-        jarPickerTableView?.delegate =
-            nil
-
-        jarPickerTableView?.dataSource =
-            nil
-
-        jarPickerTableView =
-            nil
-
-        guard let panel =
-                jarPickerOverlay
-        else {
-            return
-        }
-
-        let dimView =
-            view.subviews.first {
-                $0 is UIControl &&
-                $0 !== panel
-            }
-
-        UIView.animate(
-            withDuration:
-                0.15,
-            animations: {
-
-                panel.alpha =
-                    0
-
-                panel.transform =
-                    CGAffineTransform(
-                        scaleX:
-                            0.94,
-                        y:
-                            0.94
-                    )
-
-                dimView?.alpha =
-                    0
-            },
-            completion: { _ in
-
-                panel.removeFromSuperview()
-
-                dimView?.removeFromSuperview()
-
-                self.jarPickerOverlay =
-                    nil
-            }
-        )
+        jarPickerTableView?.delegate = nil
+        jarPickerTableView?.dataSource = nil
+        jarPickerTableView = nil
+        jarPickerOverlay?.removeFromSuperview()
+        jarPickerOverlay = nil
     }
 
     @objc private func removeCurrentJarTapped() {
-
-        guard !runningSessions.isEmpty else {
-            return
-        }
-
-        let session =
-            runningSessions[
-                activeSessionIndex
-            ]
-
-        jvm_bridge_session_request_stop(
-            session.id
-        )
-
-        jvm_bridge_session_destroy(
-            session.id
-        )
-
-        runningSessions.remove(
-            at:
-                activeSessionIndex
-        )
+        guard !runningSessions.isEmpty else { return }
+        let session = runningSessions[activeSessionIndex]
+        jvm_bridge_session_request_stop(session.id)
+        jvm_bridge_session_destroy(session.id)
+        runningSessions.remove(at: activeSessionIndex)
 
         if runningSessions.isEmpty {
-
-            userRequestedExit =
-                true
-
-            dismiss(
-                animated:
-                    true
-            )
-
+            userRequestedExit = true
+            dismiss(animated: true)
             return
         }
 
-        activeSessionIndex =
-            min(
-                activeSessionIndex,
-                runningSessions.count - 1
+        activeSessionIndex = min(activeSessionIndex, runningSessions.count - 1)
+        rebuildTabs()
+        switchToSession(at: activeSessionIndex)
+    }
+
+    // MARK: - More options menu
+
+    @objc private func showMoreMenu() {
+        if moreMenuOverlay != nil {
+            closeMoreMenu()
+            return
+        }
+
+        let overlay = UIControl()
+        overlay.backgroundColor = UIColor.black.withAlphaComponent(0.28)
+        overlay.translatesAutoresizingMaskIntoConstraints = false
+        overlay.addTarget(self, action: #selector(closeMoreMenu), for: .touchUpInside)
+
+        let panel = UIView()
+        panel.backgroundColor = UIColor.black.withAlphaComponent(0.88)
+        panel.layer.cornerRadius = 20
+        panel.layer.masksToBounds = true
+        panel.translatesAutoresizingMaskIntoConstraints = false
+
+        let stack = UIStackView()
+        stack.axis = .vertical
+        stack.spacing = 0
+        stack.translatesAutoresizingMaskIntoConstraints = false
+
+        stack.addArrangedSubview(makeMoreMenuButton(
+            title: "Ẩn ứng dụng",
+            color: .systemBlue,
+            action: #selector(hideApplicationFromMenu)
+        ))
+
+        stack.addArrangedSubview(makeMoreMenuButton(
+            title: UIApplication.shared.isIdleTimerDisabled ? "✓ Treo tắt màn" : "Treo tắt màn",
+            color: .systemBlue,
+            action: #selector(toggleKeepScreenOnFromMenu)
+        ))
+
+        stack.addArrangedSubview(makeMoreMenuButton(
+            title: "Cỡ màn hình",
+            color: .systemBlue,
+            action: #selector(showScreenSizeMenu)
+        ))
+
+        stack.addArrangedSubview(makeMoreMenuButton(
+            title: "Proxy",
+            color: .systemBlue,
+            action: #selector(showProxyMenu)
+        ))
+
+        stack.addArrangedSubview(makeMoreMenuButton(
+            title: "Thoát",
+            color: .systemRed,
+            action: #selector(exitFromMoreMenu)
+        ))
+
+        stack.addArrangedSubview(makeMoreMenuButton(
+            title: "Hủy",
+            color: .systemBlue,
+            action: #selector(closeMoreMenu)
+        ))
+
+        view.addSubview(overlay)
+        view.addSubview(panel)
+        panel.addSubview(stack)
+
+        NSLayoutConstraint.activate([
+            overlay.topAnchor.constraint(equalTo: view.topAnchor),
+            overlay.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            overlay.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            overlay.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+
+            panel.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            panel.centerYAnchor.constraint(equalTo: view.centerYAnchor),
+            panel.leadingAnchor.constraint(greaterThanOrEqualTo: view.leadingAnchor, constant: 24),
+            panel.trailingAnchor.constraint(lessThanOrEqualTo: view.trailingAnchor, constant: -24),
+            panel.widthAnchor.constraint(equalToConstant: min(520, max(280, UIScreen.main.bounds.width - 48))),
+
+            stack.topAnchor.constraint(equalTo: panel.topAnchor),
+            stack.leadingAnchor.constraint(equalTo: panel.leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: panel.trailingAnchor),
+            stack.bottomAnchor.constraint(equalTo: panel.bottomAnchor)
+        ])
+
+        moreMenuOverlay = overlay
+        moreMenuPanel = panel
+
+        overlay.alpha = 0
+        panel.alpha = 0
+        panel.transform = CGAffineTransform(scaleX: 0.94, y: 0.94)
+
+        UIView.animate(withDuration: 0.16) {
+            overlay.alpha = 1
+            panel.alpha = 1
+            panel.transform = .identity
+        }
+    }
+
+    private func makeMoreMenuButton(
+        title: String,
+        color: UIColor,
+        action: Selector
+    ) -> UIButton {
+        let button = UIButton(type: .system)
+        button.setTitle(title, for: .normal)
+        button.setTitleColor(color, for: .normal)
+        button.titleLabel?.font = .systemFont(ofSize: 22, weight: .regular)
+        button.contentHorizontalAlignment = .center
+        button.heightAnchor.constraint(equalToConstant: 72).isActive = true
+        button.addTarget(self, action: action, for: .touchUpInside)
+        return button
+    }
+
+    @objc private func closeMoreMenu() {
+        guard let overlay = moreMenuOverlay else { return }
+
+        let panel = moreMenuPanel
+        moreMenuOverlay = nil
+        moreMenuPanel = nil
+
+        UIView.animate(withDuration: 0.12, animations: {
+            overlay.alpha = 0
+            panel?.alpha = 0
+        }, completion: { _ in
+            panel?.removeFromSuperview()
+            overlay.removeFromSuperview()
+        })
+    }
+
+    @objc private func hideApplicationFromMenu() {
+        closeMoreMenu()
+
+        // Same behavior as the IPA: request iOS to suspend the current app.
+        // This selector is private and is intentionally used only on the
+        // jailbreak/emulator build where the reference IPA uses this behavior.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+            let selector = NSSelectorFromString("suspend")
+            let application = UIApplication.shared
+            if application.responds(to: selector) {
+                _ = application.perform(selector)
+            }
+        }
+    }
+
+    @objc private func toggleKeepScreenOnFromMenu() {
+        let newValue = !UIApplication.shared.isIdleTimerDisabled
+        UIApplication.shared.isIdleTimerDisabled = newValue
+        UserDefaults.standard.set(newValue, forKey: "J2MEKeepScreenOn")
+        closeMoreMenu()
+    }
+
+    @objc private func showScreenSizeMenu() {
+        closeMoreMenu()
+
+        guard !runningSessions.isEmpty else { return }
+
+        let session = runningSessions[activeSessionIndex]
+        let alert = UIAlertController(
+            title: "Cỡ màn hình",
+            message: "Nhập độ phân giải Canvas cho JAR hiện tại.",
+            preferredStyle: .alert
+        )
+
+        alert.addTextField { field in
+            field.placeholder = "Rộng"
+            field.text = "\(session.canvasWidth)"
+            field.keyboardType = .numberPad
+        }
+
+        alert.addTextField { field in
+            field.placeholder = "Cao"
+            field.text = "\(session.canvasHeight)"
+            field.keyboardType = .numberPad
+        }
+
+        alert.addAction(UIAlertAction(title: "Hủy", style: .cancel))
+        alert.addAction(UIAlertAction(title: "OK", style: .default) { [weak self, weak alert] _ in
+            guard let self, let alert,
+                  let width = Int(alert.textFields?[0].text ?? ""),
+                  let height = Int(alert.textFields?[1].text ?? ""),
+                  width > 0, height > 0,
+                  width <= 4096, height <= 4096 else { return }
+
+            let old = self.runningSessions[self.activeSessionIndex]
+            let updated = J2MERunningSession(
+                id: old.id,
+                name: old.name,
+                path: old.path,
+                icon: old.icon,
+                canvasWidth: width,
+                canvasHeight: height,
+                render3dScale: old.render3dScale,
+                fpsLimit: old.fpsLimit
             )
 
-        rebuildTabs()
+            self.runningSessions[self.activeSessionIndex] = updated
+            self.emulatorView.canvasWidth = width
+            self.emulatorView.canvasHeight = height
+            self.emulatorView.setNeedsLayout()
+            self.emulatorView.setNeedsDisplay()
 
-        switchToSession(
-            at:
-                activeSessionIndex
+            let id = self.gameID(forPath: old.path)
+            UserDefaults.standard.set(width, forKey: "resW_\(id)")
+            UserDefaults.standard.set(height, forKey: "resH_\(id)")
+        })
+
+        present(alert, animated: true)
+    }
+
+    @objc private func showProxyMenu() {
+        closeMoreMenu()
+
+        let defaults = UserDefaults.standard
+        let host = defaults.string(forKey: "J2MEProxyHost") ?? ""
+        let port = defaults.object(forKey: "J2MEProxyPort") as? Int ?? 0
+        let enabled = defaults.bool(forKey: "J2MEProxyEnabled")
+
+        let alert = UIAlertController(
+            title: "Proxy",
+            message: enabled ? "Proxy đang bật." : "Proxy đang tắt.",
+            preferredStyle: .alert
         )
+
+        alert.addTextField { field in
+            field.placeholder = "Địa chỉ proxy"
+            field.text = host
+            field.keyboardType = .URL
+            field.autocapitalizationType = .none
+            field.autocorrectionType = .no
+        }
+
+        alert.addTextField { field in
+            field.placeholder = "Cổng"
+            field.text = port > 0 ? "\(port)" : ""
+            field.keyboardType = .numberPad
+        }
+
+        alert.addAction(UIAlertAction(title: "Tắt Proxy", style: .destructive) { _ in
+            defaults.set(false, forKey: "J2MEProxyEnabled")
+            defaults.removeObject(forKey: "J2MEProxyHost")
+            defaults.removeObject(forKey: "J2MEProxyPort")
+            unsetenv("HTTP_PROXY")
+            unsetenv("HTTPS_PROXY")
+            unsetenv("ALL_PROXY")
+        })
+
+        alert.addAction(UIAlertAction(title: "Hủy", style: .cancel))
+
+        alert.addAction(UIAlertAction(title: "Lưu", style: .default) { [weak alert] _ in
+            let h = alert?.textFields?[0].text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let p = Int(alert?.textFields?[1].text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "") ?? 0
+            guard !h.isEmpty, p > 0, p <= 65535 else { return }
+
+            let value = "http://\(h):\(p)"
+            defaults.set(true, forKey: "J2MEProxyEnabled")
+            defaults.set(h, forKey: "J2MEProxyHost")
+            defaults.set(p, forKey: "J2MEProxyPort")
+
+            // Export the conventional proxy variables so networking layers
+            // that honor process proxy environment variables use the same
+            // configuration immediately.
+            setenv("HTTP_PROXY", value, 1)
+            setenv("HTTPS_PROXY", value, 1)
+            setenv("ALL_PROXY", value, 1)
+        })
+
+        present(alert, animated: true)
+    }
+
+    @objc private func exitFromMoreMenu() {
+        closeMoreMenu()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
+            self?.backTapped()
+        }
     }
 
     // MARK: - Viewport and keypad layout
@@ -1717,8 +1463,7 @@ final class GameViewController:
         let keyboardFrame =
             view.convert(
                 screenFrame,
-                from:
-                    nil
+                from: nil
             )
 
         let intersection =
@@ -2521,138 +2266,48 @@ private final class J2MEJarPickerCell: UITableViewCell {
         ])
     }
 
-    required init?(coder: NSCoder) {
-        fatalError(
-            "init(coder:) has not been implemented"
-        )
-    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 }
 
-extension GameViewController:
-    UITableViewDataSource,
-    UITableViewDelegate {
-
-    func tableView(
-        _ tableView: UITableView,
-        numberOfRowsInSection section: Int
-    ) -> Int {
-
+extension GameViewController: UITableViewDataSource, UITableViewDelegate {
+    func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
         scanInstalledJARs().count
     }
 
-    func tableView(
-        _ tableView: UITableView,
-        cellForRowAt indexPath: IndexPath
-    ) -> UITableViewCell {
-
-        let items =
-            scanInstalledJARs()
-
-        let cell =
-            tableView.dequeueReusableCell(
-                withIdentifier:
-                    "jar",
-                for:
-                    indexPath
-            ) as! J2MEJarPickerCell
-
-        let item =
-            items[
-                indexPath.row
-            ]
-
-        cell.nameLabel.text =
-            item.name
-
-        cell.iconView.image =
-            item.icon
-
+    func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
+        let items = scanInstalledJARs()
+        let cell = tableView.dequeueReusableCell(withIdentifier: "jar", for: indexPath) as! J2MEJarPickerCell
+        let item = items[indexPath.row]
+        cell.nameLabel.text = item.name
+        cell.iconView.image = item.icon
         return cell
     }
 
-    func tableView(
-        _ tableView: UITableView,
-        didSelectRowAt indexPath: IndexPath
-    ) {
-
-        let item =
-            scanInstalledJARs()[
-                indexPath.row
-            ]
-
+    func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
+        let item = scanInstalledJARs()[indexPath.row]
         closeJarPicker()
 
-        let resolution =
-            UserDefaults.standard.object(
-                forKey:
-                    "resW_\(gameID(forPath: item.path))"
-            ) as? Int
-            ?? 240
-
-        let resolutionH =
-            UserDefaults.standard.object(
-                forKey:
-                    "resH_\(gameID(forPath: item.path))"
-            ) as? Int
-            ?? 320
-
-        let fps =
-            UserDefaults.standard.object(
-                forKey:
-                    "fpsLimit_\(gameID(forPath: item.path))"
-            ) as? Int
-            ?? 0
-
-        let scale =
-            UserDefaults.standard.object(
-                forKey:
-                    "ss3d_\(gameID(forPath: item.path))"
-            ) as? Bool == true
-            ? 3
-            : 1
+        let resolution = UserDefaults.standard.object(forKey: "resW_\(gameID(forPath: item.path))") as? Int ?? 240
+        let resolutionH = UserDefaults.standard.object(forKey: "resH_\(gameID(forPath: item.path))") as? Int ?? 320
+        let fps = UserDefaults.standard.object(forKey: "fpsLimit_\(gameID(forPath: item.path))") as? Int ?? 0
+        let scale = UserDefaults.standard.object(forKey: "ss3d_\(gameID(forPath: item.path))") as? Bool == true ? 3 : 1
 
         addRunningJar(
-            path:
-                item.path,
-            name:
-                item.name,
-            icon:
-                item.icon,
-            canvasWidth:
-                max(
-                    1,
-                    resolution
-                ),
-            canvasHeight:
-                max(
-                    1,
-                    resolutionH
-                ),
-            render3dScale:
-                scale,
-            fpsLimit:
-                fps
+            path: item.path,
+            name: item.name,
+            icon: item.icon,
+            canvasWidth: max(1, resolution),
+            canvasHeight: max(1, resolutionH),
+            render3dScale: scale,
+            fpsLimit: fps
         )
     }
 
-    private func gameID(
-        forPath path: String
-    ) -> String {
-
-        URL(
-            fileURLWithPath:
-                path
-        )
-        .deletingPathExtension()
-        .lastPathComponent
-        .replacingOccurrences(
-            of:
-                "[^a-zA-Z0-9._-]",
-            with:
-                "_",
-            options:
-                .regularExpression
-        )
+    private func gameID(forPath path: String) -> String {
+        URL(fileURLWithPath: path)
+            .deletingPathExtension()
+            .lastPathComponent
+            .replacingOccurrences(of: "[^a-zA-Z0-9._-]", with: "_", options: .regularExpression)
     }
 }
 
