@@ -122,7 +122,6 @@ final class GameViewController:
     private var jarPickerOverlay: UIView?
     private var jarPickerPanel: UIView?
     private var jarPickerTableView: UITableView?
-    private var jarPickerItems: [(name: String, path: String, icon: UIImage)] = []
     private var jarPickerMessageLabel: UILabel?
     private var jarPickerMessageWork: DispatchWorkItem?
 
@@ -823,15 +822,13 @@ final class GameViewController:
         label.alpha = 0
         label.translatesAutoresizingMaskIntoConstraints = false
 
-        // Put the "already open" notice just below the tab/header area
-        // instead of at the bottom of the JAR picker.
-        view.addSubview(label)
+        panel.addSubview(label)
 
         NSLayoutConstraint.activate([
-            label.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-            label.topAnchor.constraint(equalTo: headerStack.bottomAnchor, constant: 20),
-            label.leadingAnchor.constraint(greaterThanOrEqualTo: view.leadingAnchor, constant: 20),
-            label.trailingAnchor.constraint(lessThanOrEqualTo: view.trailingAnchor, constant: -20),
+            label.centerXAnchor.constraint(equalTo: panel.centerXAnchor),
+            label.bottomAnchor.constraint(equalTo: panel.bottomAnchor, constant: -66),
+            label.leadingAnchor.constraint(greaterThanOrEqualTo: panel.leadingAnchor, constant: 20),
+            label.trailingAnchor.constraint(lessThanOrEqualTo: panel.trailingAnchor, constant: -20),
             label.heightAnchor.constraint(equalToConstant: 38)
         ])
 
@@ -894,7 +891,7 @@ final class GameViewController:
         let title = UILabel()
         title.text = "DANH SÁCH JAR"
         title.textColor = uiPrimaryTextColor
-        title.font = .systemFont(ofSize: 19, weight: .semibold)
+        title.font = .systemFont(ofSize: 21, weight: .semibold)
         title.textAlignment = .center
         title.translatesAutoresizingMaskIntoConstraints = false
 
@@ -961,7 +958,6 @@ final class GameViewController:
         jarPickerOverlay = overlay
         jarPickerPanel = panel
         jarPickerTableView = table
-        jarPickerItems.removeAll(keepingCapacity: false)
         table.reloadData()
 
         overlay.alpha = 0
@@ -976,26 +972,6 @@ final class GameViewController:
                 panel.transform = .identity
             }
         )
-
-        // Do the expensive JAR metadata/icon scan off the main thread.
-        // The table only receives the finished array, so opening and scrolling
-        // remain responsive even when many JARs are installed.
-        DispatchQueue.global(qos: .userInitiated).async { [weak self, weak table, weak overlay] in
-            guard let self else { return }
-            let items = self.scanInstalledJARs()
-
-            DispatchQueue.main.async {
-                guard let table,
-                      let overlay,
-                      overlay.superview != nil,
-                      self.jarPickerTableView === table else {
-                    return
-                }
-
-                self.jarPickerItems = items
-                table.reloadData()
-            }
-        }
     }
 
     @objc private func closeJarPicker() {
@@ -1019,7 +995,6 @@ final class GameViewController:
             table.removeFromSuperview()
         }
         jarPickerTableView = nil
-        jarPickerItems.removeAll(keepingCapacity: false)
 
         if let panel = jarPickerPanel {
             panel.layer.removeAllAnimations()
@@ -1175,9 +1150,9 @@ final class GameViewController:
         let button = UIButton(type: .system)
         button.setTitle(title, for: .normal)
         button.setTitleColor(color, for: .normal)
-        button.titleLabel?.font = .systemFont(ofSize: 18, weight: .regular)
+        button.titleLabel?.font = .systemFont(ofSize: 22, weight: .regular)
         button.contentHorizontalAlignment = .center
-        button.heightAnchor.constraint(equalToConstant: 58).isActive = true
+        button.heightAnchor.constraint(equalToConstant: 72).isActive = true
         button.addTarget(self, action: action, for: .touchUpInside)
         return button
     }
@@ -2497,7 +2472,7 @@ private final class J2MEJarPickerCell: UITableViewCell {
         iconView.contentMode = .scaleAspectFit
         iconView.translatesAutoresizingMaskIntoConstraints = false
         nameLabel.textColor = .label
-        nameLabel.font = .systemFont(ofSize: 14, weight: .medium)
+        nameLabel.font = .systemFont(ofSize: 16, weight: .medium)
         nameLabel.translatesAutoresizingMaskIntoConstraints = false
         contentView.addSubview(iconView)
         contentView.addSubview(nameLabel)
@@ -2518,22 +2493,20 @@ private final class J2MEJarPickerCell: UITableViewCell {
 
 extension GameViewController: UITableViewDataSource, UITableViewDelegate {
     func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
-        jarPickerItems.count
+        scanInstalledJARs().count
     }
 
     func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
+        let items = scanInstalledJARs()
         let cell = tableView.dequeueReusableCell(withIdentifier: "jar", for: indexPath) as! J2MEJarPickerCell
-        guard indexPath.row >= 0, indexPath.row < jarPickerItems.count else {
-            return cell
-        }
-        let item = jarPickerItems[indexPath.row]
+        let item = items[indexPath.row]
         cell.nameLabel.text = item.name
         cell.iconView.image = item.icon
         return cell
     }
 
     func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
-        let items = jarPickerItems
+        let items = scanInstalledJARs()
         guard indexPath.row >= 0, indexPath.row < items.count else {
             return
         }
@@ -2564,9 +2537,9 @@ extension GameViewController: UITableViewDataSource, UITableViewDelegate {
         let defaults = UserDefaults.standard
 
         let resolution =
-            defaults.object(forKey: "resW_\(id)") as? Int ?? 320
+            defaults.object(forKey: "resW_\(id)") as? Int ?? 240
         let resolutionH =
-            defaults.object(forKey: "resH_\(id)") as? Int ?? 400
+            defaults.object(forKey: "resH_\(id)") as? Int ?? 320
         let fps =
             defaults.object(forKey: "fpsLimit_\(id)") as? Int ?? 0
         let scale =

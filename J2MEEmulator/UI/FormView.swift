@@ -204,19 +204,6 @@ class FormView: UIView, UIGestureRecognizerDelegate {
             case 1:
                 addTextField(label: label, text: text)
 
-            case 2:
-                // ChoiceGroup items are rendered as native check controls.
-                // intParam1 = J2ME choice type (EXCLUSIVE/MULTIPLE),
-                // intParam2 = initial selected state.
-                let choiceType = j2me_ui_get_form_item_param1(Int32(i))
-                let selected = j2me_ui_get_form_item_param2(Int32(i)) != 0
-                addChoiceItem(
-                    label: label,
-                    text: text,
-                    choiceType: choiceType,
-                    selected: selected
-                )
-
             default:
                 addStringItem(label: label, text: text)
             }
@@ -281,76 +268,6 @@ class FormView: UIView, UIGestureRecognizerDelegate {
         }
 
         stackView.addArrangedSubview(container)
-    }
-
-    // MARK: - Choice / checkbox item
-
-    private func addChoiceItem(
-        label: String,
-        text: String,
-        choiceType: Int32,
-        selected: Bool
-    ) {
-        let row = UIStackView()
-        row.axis = .horizontal
-        row.alignment = .center
-        row.spacing = 10
-        row.layoutMargins = UIEdgeInsets(top: 4, left: 0, bottom: 4, right: 0)
-        row.isLayoutMarginsRelativeArrangement = true
-
-        if !label.isEmpty {
-            let labelView = UILabel()
-            labelView.text = label
-            labelView.font = .systemFont(ofSize: 14, weight: .medium)
-            labelView.textColor = .secondaryLabel
-            labelView.numberOfLines = 0
-            labelView.setContentHuggingPriority(.defaultLow, for: .horizontal)
-            labelView.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-            row.addArrangedSubview(labelView)
-        }
-
-        let button = UIButton(type: .system)
-        button.accessibilityLabel = text
-        button.accessibilityValue = selected ? "Đã chọn" : "Chưa chọn"
-        button.titleLabel?.font = .systemFont(ofSize: 16, weight: .regular)
-        button.setTitle(text, for: .normal)
-        button.setTitleColor(.label, for: .normal)
-        button.contentHorizontalAlignment = .leading
-        button.titleLabel?.numberOfLines = 0
-
-        let isExclusive = (choiceType == 1) // Choice.EXCLUSIVE
-        button.setImage(
-            UIImage(systemName: selected
-                ? (isExclusive ? "largecircle.fill.circle" : "checkmark.square.fill")
-                : (isExclusive ? "circle" : "square")
-            ),
-            for: .normal
-        )
-        button.tintColor = .systemBlue
-        button.semanticContentAttribute = .forceLeftToRight
-        button.imageEdgeInsets = UIEdgeInsets(top: 0, left: 0, bottom: 0, right: 8)
-        button.tag = selected ? 1 : 0
-
-        button.addAction(
-            UIAction { [weak button] _ in
-                guard let button else { return }
-
-                let checked = button.tag == 1
-                let newChecked = !checked
-                button.tag = newChecked ? 1 : 0
-                button.accessibilityValue = newChecked ? "Đã chọn" : "Chưa chọn"
-
-                let symbol = newChecked
-                    ? (isExclusive ? "largecircle.fill.circle" : "checkmark.square.fill")
-                    : (isExclusive ? "circle" : "square")
-
-                button.setImage(UIImage(systemName: symbol), for: .normal)
-            },
-            for: .touchUpInside
-        )
-
-        row.addArrangedSubview(button)
-        stackView.addArrangedSubview(row)
     }
 
     // MARK: - Text field

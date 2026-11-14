@@ -171,7 +171,7 @@ class AppsListViewController: UIViewController,
         duplicateInstallBarButtonItem.tintColor = j2meToolbarTintColor
 
         duplicateInstallBarButtonItem.accessibilityLabel =
-            "Sao chép một JAR khác"
+            "Install another copy of a JAR"
 
         navigationItem.rightBarButtonItems = [
             addButton,
@@ -225,7 +225,7 @@ class AppsListViewController: UIViewController,
 
     private func setupEmptyState() {
 
-        emptyStateLabel.text = "Chưa có trò chơi\nNhấn + để thêm tệp .jar"
+        emptyStateLabel.text = "No Games Yet\nTap + to add a .jar file"
         emptyStateLabel.textColor = .secondaryLabel
         emptyStateLabel.font = .systemFont(ofSize: 17)
         emptyStateLabel.textAlignment = .center
@@ -1359,7 +1359,7 @@ class AppsListViewController: UIViewController,
 
         // Rename.
         let rename = UIAction(
-            title: "Đổi tên",
+            title: "Rename",
             image: UIImage(systemName: "pencil")
         ) { [weak self] _ in
 
@@ -1368,7 +1368,7 @@ class AppsListViewController: UIViewController,
 
         // Change icon.
         let changeIcon = UIAction(
-            title: "Đổi biểu tượng...",
+            title: "Change Icon...",
             image: UIImage(systemName: "photo")
         ) { [weak self] _ in
 
@@ -1380,7 +1380,7 @@ class AppsListViewController: UIViewController,
         if Self.hasCustomIcon(for: app) {
 
             let resetIcon = UIAction(
-                title: "Khôi phục biểu tượng gốc",
+                title: "Restore Original Icon",
                 image: UIImage(systemName: "arrow.uturn.backward")
             ) { [weak self] _ in
 
@@ -1403,7 +1403,7 @@ class AppsListViewController: UIViewController,
 
         // Install another copy.
         let duplicate = UIAction(
-            title: "Sao chép JAR",
+            title: "Duplicate Install",
             image: UIImage(systemName: "doc.on.doc")
         ) { [weak self] _ in
 
@@ -1411,7 +1411,7 @@ class AppsListViewController: UIViewController,
         }
 
         let manageMenu = UIMenu(
-            title: "Quản lý JAR",
+            title: "Manage JAR",
             image: UIImage(systemName: "app"),
             children: iconActions + [
                 duplicate
@@ -1423,8 +1423,8 @@ class AppsListViewController: UIViewController,
 
         let toggle3D = UIAction(
             title: ssEnabled
-                ? "Tắt tăng cường 3D"
-                : "Bật tăng cường 3D",
+                ? "Disable 3D Enhancement"
+                : "Enable 3D Enhancement",
             subtitle: nil,
             image: UIImage(systemName: "cube"),
             state: ssEnabled ? .on : .off
@@ -1458,7 +1458,7 @@ class AppsListViewController: UIViewController,
         }
 
         let customResolution = UIAction(
-            title: "Độ phân giải tùy chỉnh...",
+            title: "Custom Resolution...",
             image: UIImage(systemName: "slider.horizontal.3")
         ) { [weak self] _ in
 
@@ -1466,7 +1466,7 @@ class AppsListViewController: UIViewController,
         }
 
         let resMenu = UIMenu(
-            title: "Độ phân giải màn hình",
+            title: "Screen Resolution",
             image: UIImage(systemName: "aspectratio"),
             children: resActions + [customResolution]
         )
@@ -1489,14 +1489,14 @@ class AppsListViewController: UIViewController,
         }
 
         let fpsMenu = UIMenu(
-            title: "Giới hạn FPS",
+            title: "FPS Limit",
             image: UIImage(systemName: "speedometer"),
             children: fpsActions
         )
 
         // Clear saved game data.
         let clearData = UIAction(
-            title: "Xóa dữ liệu trò chơi",
+            title: "Clear Game Data",
             image: UIImage(systemName: "eraser")
         ) { [weak self] _ in
 
@@ -1505,7 +1505,7 @@ class AppsListViewController: UIViewController,
 
         // Delete JAR.
         let delete = UIAction(
-            title: "Xóa JAR",
+            title: "Delete",
             image: UIImage(systemName: "trash"),
             attributes: .destructive
         ) { [weak self] _ in
@@ -1610,10 +1610,23 @@ class AppsListViewController: UIViewController,
     private static let resolutionOptions: [
         (label: String, w: Int, h: Int)
     ] = [
-        ("320×400", 320, 400),
-        ("330×360", 330, 360),
-        ("360×450", 360, 450),
-        ("400×500", 400, 500)
+
+        ("101×80",   101,  80),
+        ("128×128",  128, 128),
+        ("128×160",  128, 160),
+        ("132×176",  132, 176),
+        ("160×128",  160, 128),
+        ("176×208",  176, 208),
+        ("176×220",  176, 220),
+        ("208×208",  208, 208),
+        ("220×220",  220, 220),
+        ("240×266",  240, 266),
+        ("240×320",  240, 320),
+        ("240×400",  240, 400),
+        ("320×480",  320, 480),
+        ("352×416",  352, 416),
+        ("360×640",  360, 640),
+        ("480×800",  480, 800)
     ]
 
     static func resolution(
@@ -1624,11 +1637,11 @@ class AppsListViewController: UIViewController,
 
         let width = UserDefaults.standard.object(
             forKey: "resW_\(id)"
-        ) as? Int ?? 320
+        ) as? Int ?? 240
 
         let height = UserDefaults.standard.object(
             forKey: "resH_\(id)"
-        ) as? Int ?? 400
+        ) as? Int ?? 320
 
         return (width, height)
     }
@@ -1705,30 +1718,30 @@ class AppsListViewController: UIViewController,
         let current = Self.resolution(for: app)
 
         let alert = UIAlertController(
-            title: "Độ phân giải J2ME tùy chỉnh",
-            message: "Nhập chiều rộng và chiều cao màn hình ảo.",
+            title: "Custom J2ME Resolution",
+            message: "Enter the virtual screen width and height.",
             preferredStyle: .alert
         )
 
         alert.addTextField { field in
-            field.placeholder = "Rộng"
+            field.placeholder = "Width"
             field.keyboardType = .numberPad
             field.text = "\(current.w)"
         }
 
         alert.addTextField { field in
-            field.placeholder = "Cao"
+            field.placeholder = "Height"
             field.keyboardType = .numberPad
             field.text = "\(current.h)"
         }
 
         alert.addAction(
-            UIAlertAction(title: "Hủy", style: .cancel)
+            UIAlertAction(title: "Cancel", style: .cancel)
         )
 
         alert.addAction(
             UIAlertAction(
-                title: "Áp dụng",
+                title: "Apply",
                 style: .default
             ) { [weak self] _ in
 
@@ -1742,8 +1755,8 @@ class AppsListViewController: UIViewController,
                       (1...4096).contains(height) else {
 
                     let error = UIAlertController(
-                        title: "Độ phân giải không hợp lệ",
-                        message: "Chiều rộng và chiều cao phải từ 1 đến 4096.",
+                        title: "Invalid Resolution",
+                        message: "Width and height must be between 1 and 4096.",
                         preferredStyle: .alert
                     )
 
@@ -1772,13 +1785,13 @@ class AppsListViewController: UIViewController,
     private func confirmClearGameData(for app: AppInfo) {
 
         let alert = UIAlertController(
-            title: "Xóa dữ liệu trò chơi",
+            title: "Clear Game Data",
             message: "Delete all save data for \(app.name)?",
             preferredStyle: .alert
         )
 
         alert.addAction(
-            UIAlertAction(title: "Hủy", style: .cancel)
+            UIAlertAction(title: "Cancel", style: .cancel)
         )
 
         alert.addAction(
@@ -1814,12 +1827,12 @@ class AppsListViewController: UIViewController,
         )
 
         alert.addAction(
-            UIAlertAction(title: "Hủy", style: .cancel)
+            UIAlertAction(title: "Cancel", style: .cancel)
         )
 
         alert.addAction(
             UIAlertAction(
-                title: "Xóa JAR",
+                title: "Delete",
                 style: .destructive
             ) { [weak self] _ in
 
