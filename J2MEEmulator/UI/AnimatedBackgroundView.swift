@@ -35,7 +35,12 @@ final class AnimatedBackgroundView: UIView {
     }
 
     private func setup() {
-        backgroundColor = .black
+        backgroundColor = UIColor { trait in
+            trait.userInterfaceStyle == .dark
+                ? .black
+                : .systemBackground
+        }
+
         clipsToBounds = true
 
         circlesContainer.clipsToBounds = true
@@ -48,10 +53,11 @@ final class AnimatedBackgroundView: UIView {
             circleViews.append(circle)
         }
 
-        blurView.backgroundColor = UIColor(
-            white: 0,
-            alpha: 0.3
-        )
+        blurView.backgroundColor = UIColor { trait in
+            trait.userInterfaceStyle == .dark
+                ? UIColor(white: 0, alpha: 0.30)
+                : UIColor(white: 1, alpha: 0.18)
+        }
 
         addSubview(blurView)
     }
@@ -91,6 +97,30 @@ final class AnimatedBackgroundView: UIView {
             animating = true
             startAnimations()
         }
+    }
+
+    override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
+        super.traitCollectionDidChange(previousTraitCollection)
+
+        guard previousTraitCollection?.userInterfaceStyle != traitCollection.userInterfaceStyle else {
+            return
+        }
+
+        // Keep the animated background itself synchronized with the system
+        // Light/Dark appearance. The colored blobs remain unchanged.
+        backgroundColor = UIColor { trait in
+            trait.userInterfaceStyle == .dark
+                ? .black
+                : .systemBackground
+        }
+
+        blurView.backgroundColor = UIColor { trait in
+            trait.userInterfaceStyle == .dark
+                ? UIColor(white: 0, alpha: 0.30)
+                : UIColor(white: 1, alpha: 0.18)
+        }
+
+        setNeedsDisplay()
     }
 
     private func startAnimations() {
