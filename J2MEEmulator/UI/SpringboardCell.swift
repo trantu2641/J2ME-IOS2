@@ -14,15 +14,24 @@ class SpringboardCell: UICollectionViewCell {
     let iconView = UIImageView()
     let nameLabel = UILabel()
 
-    // Pre-built attributes with NSShadow (avoids expensive layer shadow)
+    // Pre-built attributes with dynamic Light/Dark colors.
+    // The icon image itself is never recolored.
     private static let labelAttributes: [NSAttributedString.Key: Any] = {
         let shadow = NSShadow()
-        shadow.shadowColor = UIColor.black.withAlphaComponent(0.6)
+        shadow.shadowColor = UIColor { trait in
+            trait.userInterfaceStyle == .dark
+                ? UIColor.black.withAlphaComponent(0.60)
+                : UIColor.white.withAlphaComponent(0.65)
+        }
         shadow.shadowOffset = CGSize(width: 0, height: 0.5)
         shadow.shadowBlurRadius = 1.5
         return [
             .font: UIFont.systemFont(ofSize: 11.5, weight: .medium),
-            .foregroundColor: UIColor.white,
+            .foregroundColor: UIColor { trait in
+                trait.userInterfaceStyle == .dark
+                    ? UIColor.white
+                    : UIColor.black
+            },
             .shadow: shadow,
         ]
     }()
@@ -60,6 +69,22 @@ class SpringboardCell: UICollectionViewCell {
         fatalError("init(coder:) has not been implemented")
     }
 
+    override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
+        super.traitCollectionDidChange(previousTraitCollection)
+
+        guard previousTraitCollection?.userInterfaceStyle != traitCollection.userInterfaceStyle else {
+            return
+        }
+
+        // Re-apply the attributed label so Light/Dark colors are refreshed immediately.
+        if let text = nameLabel.attributedText?.string {
+            nameLabel.attributedText = NSAttributedString(
+                string: text,
+                attributes: Self.labelAttributes
+            )
+        }
+    }
+
     override func prepareForReuse() {
         super.prepareForReuse()
         iconView.image = nil
@@ -79,7 +104,9 @@ class SpringboardCell: UICollectionViewCell {
 
     func configure(name: String, icon: UIImage) {
         iconView.image = icon
-        nameLabel.attributedText = NSAttributedString(string: name,
-                                                      attributes: Self.labelAttributes)
+        nameLabel.attributedText = NSAttributedString(
+            string: name,
+            attributes: Self.labelAttributes
+        )
     }
 }
