@@ -120,6 +120,7 @@ final class GameViewController:
     private var runningSessions: [J2MERunningSession] = []
     private var activeSessionIndex = 0
     private var jarPickerOverlay: UIView?
+    private var jarPickerPanel: UIView?
     private var jarPickerTableView: UITableView?
 
     private let titleLabel =
@@ -805,6 +806,7 @@ final class GameViewController:
         ])
 
         jarPickerOverlay = overlay
+        jarPickerPanel = panel
         jarPickerTableView = table
         table.reloadData()
 
@@ -826,6 +828,8 @@ final class GameViewController:
         jarPickerTableView?.delegate = nil
         jarPickerTableView?.dataSource = nil
         jarPickerTableView = nil
+        jarPickerPanel?.removeFromSuperview()
+        jarPickerPanel = nil
         jarPickerOverlay?.removeFromSuperview()
         jarPickerOverlay = nil
     }
