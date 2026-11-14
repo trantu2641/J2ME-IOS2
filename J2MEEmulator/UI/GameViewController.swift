@@ -36,7 +36,7 @@ private final class J2MEKeyboardInputView:
     }
 
     var keyboardType: UIKeyboardType = .default
-    var keyboardAppearance: UIKeyboardAppearance = .dark
+    var keyboardAppearance: UIKeyboardAppearance = .default
     var autocorrectionType: UITextAutocorrectionType = .no
     var spellCheckingType: UITextSpellCheckingType = .no
     var smartQuotesType: UITextSmartQuotesType = .no
@@ -258,7 +258,7 @@ final class GameViewController:
 
         super.viewDidLoad()
 
-        view.backgroundColor = .black
+        view.backgroundColor = .systemBackground
 
         if UserDefaults.standard.bool(forKey: "J2MEKeepScreenOn") {
             UIApplication.shared.isIdleTimerDisabled = true
@@ -400,6 +400,53 @@ final class GameViewController:
         startGame()
     }
 
+    // MARK: - Interface style
+
+    // Keep the emulator UI synchronized with the iPhone's Light/Dark appearance.
+    // The game Canvas itself is not recolored; these colors apply only to the
+    // J2ME emulator controls, menus, picker and surrounding UI.
+    private var uiControlBackgroundColor: UIColor {
+        UIColor { trait in
+            trait.userInterfaceStyle == .dark
+                ? UIColor(white: 0.16, alpha: 1)
+                : UIColor(white: 0.90, alpha: 1)
+        }
+    }
+
+    private var uiPanelBackgroundColor: UIColor {
+        UIColor { trait in
+            trait.userInterfaceStyle == .dark
+                ? UIColor.black.withAlphaComponent(0.88)
+                : UIColor.systemBackground.withAlphaComponent(0.96)
+        }
+    }
+
+    private var uiPrimaryTextColor: UIColor {
+        UIColor { trait in
+            trait.userInterfaceStyle == .dark ? .white : .black
+        }
+    }
+
+    private var uiSeparatorColor: UIColor {
+        UIColor { trait in
+            trait.userInterfaceStyle == .dark
+                ? UIColor(white: 0.35, alpha: 0.55)
+                : UIColor(white: 0.70, alpha: 0.70)
+        }
+    }
+
+    override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
+        super.traitCollectionDidChange(previousTraitCollection)
+
+        guard previousTraitCollection?.userInterfaceStyle != traitCollection.userInterfaceStyle else {
+            return
+        }
+
+        // Dynamic UIColor values update automatically. Rebuild the tab buttons
+        // so their selected/unselected backgrounds also follow the new style.
+        rebuildTabs()
+    }
+
     // MARK: - Header
 
     private func buildHeader() {
@@ -524,8 +571,8 @@ final class GameViewController:
             for: .normal
         )
 
-        button.tintColor = .white
-        button.backgroundColor = UIColor(white: 0.16, alpha: 1)
+        button.tintColor = uiPrimaryTextColor
+        button.backgroundColor = uiControlBackgroundColor
         button.layer.cornerRadius = 9
         button.clipsToBounds = true
         button.contentHorizontalAlignment = .center
@@ -552,17 +599,21 @@ final class GameViewController:
             let button = UIButton(type: .system)
             button.tag = index
             button.setTitle("\(index + 1)", for: .normal)
-            button.setTitleColor(.white, for: .normal)
+            button.setTitleColor(
+                index == activeSessionIndex ? .white : uiPrimaryTextColor,
+                for: .normal
+            )
             button.titleLabel?.font = .systemFont(ofSize: 15, weight: .semibold)
             button.backgroundColor = index == activeSessionIndex
                 ? UIColor.systemBlue
-                : UIColor(white: 0.16, alpha: 1)
+                : uiControlBackgroundColor
             button.layer.cornerRadius = 9
             button.accessibilityLabel = "JAR \(index + 1): \(session.name)"
             button.addTarget(self, action: #selector(tabTapped(_:)), for: .touchUpInside)
             button.translatesAutoresizingMaskIntoConstraints = false
             NSLayoutConstraint.activate([
-                button.widthAnchor.constraint(equalToConstant: 31),
+                // JAR tabs use the exact same button box as the function buttons.
+                button.widthAnchor.constraint(equalToConstant: 38),
                 button.heightAnchor.constraint(equalToConstant: 34)
             ])
             tabStack.addArrangedSubview(button)
@@ -595,7 +646,7 @@ final class GameViewController:
         emulatorView.canvasHeight = session.canvasHeight
         emulatorView.setDisplayFPS(session.fpsLimit)
 
-        toggleKeypadButton.tintColor = .white
+        toggleKeypadButton.tintColor = uiPrimaryTextColor
         rebuildTabs()
     }
 
@@ -751,10 +802,10 @@ final class GameViewController:
 
         let label = UILabel()
         label.text = text
-        label.textColor = .white
+        label.textColor = uiPrimaryTextColor
         label.font = .systemFont(ofSize: 15, weight: .medium)
         label.textAlignment = .center
-        label.backgroundColor = UIColor(white: 0.08, alpha: 0.96)
+        label.backgroundColor = uiControlBackgroundColor
         label.layer.cornerRadius = 10
         label.layer.masksToBounds = true
         label.alpha = 0
@@ -810,7 +861,9 @@ final class GameViewController:
 
         // JAR picker uses the same centered modal style as the three-dot menu.
         let overlay = UIControl()
-        overlay.backgroundColor = UIColor.black.withAlphaComponent(0.28)
+        overlay.backgroundColor = UIColor.black.withAlphaComponent(
+            traitCollection.userInterfaceStyle == .dark ? 0.28 : 0.18
+        )
         overlay.translatesAutoresizingMaskIntoConstraints = false
         overlay.addTarget(
             self,
@@ -819,21 +872,21 @@ final class GameViewController:
         )
 
         let panel = UIView()
-        panel.backgroundColor = UIColor.black.withAlphaComponent(0.86)
+        panel.backgroundColor = uiPanelBackgroundColor
         panel.layer.cornerRadius = 20
         panel.layer.masksToBounds = true
         panel.translatesAutoresizingMaskIntoConstraints = false
 
         let title = UILabel()
         title.text = "DANH SÁCH JAR"
-        title.textColor = .white
+        title.textColor = uiPrimaryTextColor
         title.font = .systemFont(ofSize: 21, weight: .semibold)
         title.textAlignment = .center
         title.translatesAutoresizingMaskIntoConstraints = false
 
         let table = UITableView(frame: .zero, style: .plain)
         table.backgroundColor = .clear
-        table.separatorColor = UIColor(white: 0.35, alpha: 0.55)
+        table.separatorColor = uiSeparatorColor
         table.separatorInset = UIEdgeInsets(top: 0, left: 18, bottom: 0, right: 18)
         table.showsVerticalScrollIndicator = true
         table.alwaysBounceVertical = true
@@ -941,20 +994,37 @@ final class GameViewController:
 
     @objc private func removeCurrentJarTapped() {
         guard !runningSessions.isEmpty else { return }
-        let session = runningSessions[activeSessionIndex]
-        jvm_bridge_session_request_stop(session.id)
-        jvm_bridge_session_destroy(session.id)
-        runningSessions.remove(at: activeSessionIndex)
 
-        if runningSessions.isEmpty {
-            userRequestedExit = true
-            dismiss(animated: true)
-            return
-        }
+        let alert = UIAlertController(
+            title: nil,
+            message: "Bạn có muốn đóng cửa sổ không",
+            preferredStyle: .alert
+        )
 
-        activeSessionIndex = min(activeSessionIndex, runningSessions.count - 1)
-        rebuildTabs()
-        switchToSession(at: activeSessionIndex)
+        alert.addAction(UIAlertAction(title: "Hủy", style: .cancel))
+        alert.addAction(UIAlertAction(title: "Đóng", style: .destructive) { [weak self] _ in
+            guard let self, !self.runningSessions.isEmpty else { return }
+
+            let session = self.runningSessions[self.activeSessionIndex]
+            jvm_bridge_session_request_stop(session.id)
+            jvm_bridge_session_destroy(session.id)
+            self.runningSessions.remove(at: self.activeSessionIndex)
+
+            if self.runningSessions.isEmpty {
+                self.userRequestedExit = true
+                self.dismiss(animated: true)
+                return
+            }
+
+            self.activeSessionIndex = min(
+                self.activeSessionIndex,
+                self.runningSessions.count - 1
+            )
+            self.rebuildTabs()
+            self.switchToSession(at: self.activeSessionIndex)
+        })
+
+        present(alert, animated: true)
     }
 
     // MARK: - More options menu
@@ -966,12 +1036,14 @@ final class GameViewController:
         }
 
         let overlay = UIControl()
-        overlay.backgroundColor = UIColor.black.withAlphaComponent(0.28)
+        overlay.backgroundColor = UIColor.black.withAlphaComponent(
+            traitCollection.userInterfaceStyle == .dark ? 0.28 : 0.18
+        )
         overlay.translatesAutoresizingMaskIntoConstraints = false
         overlay.addTarget(self, action: #selector(closeMoreMenu), for: .touchUpInside)
 
         let panel = UIView()
-        panel.backgroundColor = UIColor.black.withAlphaComponent(0.88)
+        panel.backgroundColor = uiPanelBackgroundColor
         panel.layer.cornerRadius = 20
         panel.layer.masksToBounds = true
         panel.translatesAutoresizingMaskIntoConstraints = false
@@ -1139,26 +1211,20 @@ final class GameViewController:
                   width <= 4096, height <= 4096 else { return }
 
             let old = self.runningSessions[self.activeSessionIndex]
-            let updated = J2MERunningSession(
-                id: old.id,
-                name: old.name,
-                path: old.path,
-                icon: old.icon,
-                canvasWidth: width,
-                canvasHeight: height,
-                render3dScale: old.render3dScale,
-                fpsLimit: old.fpsLimit
-            )
 
-            self.runningSessions[self.activeSessionIndex] = updated
-            self.emulatorView.canvasWidth = width
-            self.emulatorView.canvasHeight = height
-            self.emulatorView.setNeedsLayout()
-            self.emulatorView.setNeedsDisplay()
-
+            // Resolution changes are intentionally deferred until this JAR
+            // is restarted. Do not resize the currently running Canvas here.
             let id = self.gameID(forPath: old.path)
             UserDefaults.standard.set(width, forKey: "resW_\(id)")
             UserDefaults.standard.set(height, forKey: "resH_\(id)")
+
+            let notice = UIAlertController(
+                title: "Cỡ màn hình",
+                message: "Cần khởi động lại JAR để thay đổi độ phân giải.",
+                preferredStyle: .alert
+            )
+            notice.addAction(UIAlertAction(title: "OK", style: .default))
+            self.present(notice, animated: true)
         })
 
         present(alert, animated: true)
@@ -2385,7 +2451,7 @@ private final class J2MEJarPickerCell: UITableViewCell {
         contentView.backgroundColor = .clear
         iconView.contentMode = .scaleAspectFit
         iconView.translatesAutoresizingMaskIntoConstraints = false
-        nameLabel.textColor = .white
+        nameLabel.textColor = .label
         nameLabel.font = .systemFont(ofSize: 16, weight: .medium)
         nameLabel.translatesAutoresizingMaskIntoConstraints = false
         contentView.addSubview(iconView)
