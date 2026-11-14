@@ -55,6 +55,16 @@ public class Form extends Screen {
                 TextField tf = (TextField) item;
                 NativeBridge.formAddTextField(item.getItemLabel(), item.getItemText(),
                         tf.getMaxSize(), tf.getConstraints());
+            } else if (type == 2) { // ChoiceGroup
+                ChoiceGroup cg = (ChoiceGroup) item;
+                for (int j = 0; j < cg.size(); j++) {
+                    NativeBridge.formAddChoiceItem(
+                        item.getItemLabel(),
+                        cg.getString(j),
+                        cg.isSelected(j),
+                        cg.getChoiceType()
+                    );
+                }
             } else {
                 // Fallback: show as string
                 NativeBridge.formAddStringItem(item.getItemLabel(), item.getItemText(), 0);
