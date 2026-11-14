@@ -258,7 +258,13 @@ final class GameViewController:
 
         super.viewDidLoad()
 
-        view.backgroundColor = .systemBackground
+        // Only the surrounding emulator UI follows Light/Dark.
+        // The JAR framebuffer itself is never recolored.
+        view.backgroundColor = UIColor { trait in
+            trait.userInterfaceStyle == .dark
+                ? .black
+                : .systemBackground
+        }
 
         if UserDefaults.standard.bool(forKey: "J2MEKeepScreenOn") {
             UIApplication.shared.isIdleTimerDisabled = true
@@ -445,6 +451,11 @@ final class GameViewController:
         // Dynamic UIColor values update automatically. Rebuild the tab buttons
         // so their selected/unselected backgrounds also follow the new style.
         rebuildTabs()
+        toggleKeypadButton.tintColor = uiPrimaryTextColor
+        systemKeyboardButton.tintColor = uiPrimaryTextColor
+        addJarButton.tintColor = uiPrimaryTextColor
+        removeJarButton.tintColor = uiPrimaryTextColor
+        moreButton.tintColor = uiPrimaryTextColor
     }
 
     // MARK: - Header
@@ -612,7 +623,7 @@ final class GameViewController:
             button.addTarget(self, action: #selector(tabTapped(_:)), for: .touchUpInside)
             button.translatesAutoresizingMaskIntoConstraints = false
             NSLayoutConstraint.activate([
-                // JAR tabs use the exact same button box as the function buttons.
+                // JAR tabs use exactly the same box as the function icons.
                 button.widthAnchor.constraint(equalToConstant: 38),
                 button.heightAnchor.constraint(equalToConstant: 34)
             ])
@@ -964,15 +975,20 @@ final class GameViewController:
     }
 
     @objc private func closeJarPicker() {
-        // Close the picker synchronously. This is shared by HỦY, the
-        // outside-tap overlay, and normal JAR selection.
+        // Closing is intentionally idempotent. This prevents a stale picker
+        // overlay/table from surviving a HỦY tap after a selection.
+        guard jarPickerOverlay != nil || jarPickerPanel != nil || jarPickerTableView != nil else {
+            return
+        }
+
+        // Cancel any temporary duplicate-JAR message.
         jarPickerMessageWork?.cancel()
         jarPickerMessageWork = nil
-
-        jarPickerMessageLabel?.layer.removeAllAnimations()
         jarPickerMessageLabel?.removeFromSuperview()
         jarPickerMessageLabel = nil
 
+        // Detach the table before removing the panel so there is no stale
+        // delegate/data-source interaction after the picker is dismissed.
         if let table = jarPickerTableView {
             table.delegate = nil
             table.dataSource = nil
@@ -1298,35 +1314,6 @@ final class GameViewController:
         }
     }
 
-    override func traitCollectionDidChange(
-        _ previousTraitCollection: UITraitCollection?
-    ) {
-        super.traitCollectionDidChange(previousTraitCollection)
-
-        guard previousTraitCollection?.userInterfaceStyle
-                != traitCollection.userInterfaceStyle else {
-            return
-        }
-
-        let dynamicBackground = UIColor { trait in
-            trait.userInterfaceStyle == .dark
-                ? .black
-                : .systemBackground
-        }
-
-        view.backgroundColor = dynamicBackground
-        emulatorView.backgroundColor = dynamicBackground
-
-        let keypadVisible =
-            !keypadView.isHidden && !keyboardIsVisible
-
-        toggleKeypadButton.tintColor = keypadVisible
-            ? UIColor { trait in
-                trait.userInterfaceStyle == .dark ? .white : .black
-            }
-            : .systemGreen
-    }
-
     // MARK: - Viewport and keypad layout
 
     private func buildGameLayout() {
@@ -1334,6 +1321,8 @@ final class GameViewController:
         emulatorView.translatesAutoresizingMaskIntoConstraints =
             false
 
+        // Background outside the JAR framebuffer.
+        // The game image itself remains untouched.
         emulatorView.backgroundColor = UIColor { trait in
             trait.userInterfaceStyle == .dark
                 ? .black
@@ -1885,11 +1874,7 @@ final class GameViewController:
             !shouldShow
 
         toggleKeypadButton.tintColor =
-            shouldShow
-            ? UIColor { trait in
-                trait.userInterfaceStyle == .dark ? .white : .black
-            }
-            : .systemGreen
+            uiPrimaryTextColor
 
         let changes = {
 
