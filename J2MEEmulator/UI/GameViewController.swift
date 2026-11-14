@@ -120,6 +120,7 @@ final class GameViewController:
     private var runningSessions: [J2MERunningSession] = []
     private var activeSessionIndex = 0
     private var jarPickerOverlay: UIView?
+    private var jarPickerPanel: UIView?
     private var jarPickerTableView: UITableView?
     private var jarPickerMessageLabel: UILabel?
     private var jarPickerMessageWork: DispatchWorkItem?
@@ -508,38 +509,34 @@ final class GameViewController:
         accessibility: String
     ) {
 
+        // Keep every header control on the exact same 38 x 34 box and
+        // normalize the SF Symbol drawing size as well. Without an explicit
+        // symbol configuration, symbols such as `ellipsis`, `keyboard`,
+        // `text.cursor`, `plus` and `minus` have different visual bounds.
+        let symbolConfiguration = UIImage.SymbolConfiguration(
+            pointSize: 17,
+            weight: .medium,
+            scale: .medium
+        )
+
         button.setImage(
-            UIImage(systemName: symbol),
+            UIImage(systemName: symbol, withConfiguration: symbolConfiguration),
             for: .normal
         )
 
-        button.tintColor =
-            .white
-
-        button.backgroundColor =
-            UIColor(
-                white: 0.16,
-                alpha: 1
-            )
-
-        button.layer.cornerRadius =
-            9
-
-        button.accessibilityLabel =
-            accessibility
-
-        button.translatesAutoresizingMaskIntoConstraints =
-            false
+        button.tintColor = .white
+        button.backgroundColor = UIColor(white: 0.16, alpha: 1)
+        button.layer.cornerRadius = 9
+        button.clipsToBounds = true
+        button.contentHorizontalAlignment = .center
+        button.contentVerticalAlignment = .center
+        button.imageView?.contentMode = .center
+        button.accessibilityLabel = accessibility
+        button.translatesAutoresizingMaskIntoConstraints = false
 
         NSLayoutConstraint.activate([
-
-            button.widthAnchor.constraint(
-                equalToConstant: 38
-            ),
-
-            button.heightAnchor.constraint(
-                equalToConstant: 34
-            )
+            button.widthAnchor.constraint(equalToConstant: 38),
+            button.heightAnchor.constraint(equalToConstant: 34)
         ])
     }
 
@@ -699,6 +696,8 @@ final class GameViewController:
     private func scanInstalledJARs() -> [(name: String, path: String, icon: UIImage)] {
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
         let gamesDir = docs.appendingPathComponent("games", isDirectory: true)
+        let iconsDir = docs.appendingPathComponent("Game Icons", isDirectory: true)
+
         let files = (try? FileManager.default.contentsOfDirectory(
             at: gamesDir,
             includingPropertiesForKeys: nil,
@@ -707,13 +706,99 @@ final class GameViewController:
 
         return files
             .filter { $0.pathExtension.lowercased() == "jar" }
-            .sorted { $0.lastPathComponent.localizedCaseInsensitiveCompare($1.lastPathComponent) == .orderedAscending }
+            .sorted {
+                $0.lastPathComponent.localizedCaseInsensitiveCompare(
+                    $1.lastPathComponent
+                ) == .orderedAscending
+            }
             .map { url in
+                let id = gameID(forPath: url.path)
+                let defaults = UserDefaults.standard
+
+                // AppsListViewController stores the renamed/external name here.
+                // Use it first so the + picker is identical to the home list.
+                let savedDisplayName =
+                    defaults.string(forKey: "jarbox_display_name_\(id)")?
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+
                 let metadata = JARMetadata.read(from: url.path)
-                let name = metadata?.midletName ?? url.deletingPathExtension().lastPathComponent
-                let icon = metadata?.readIcon(from: url.path) ?? UIImage(systemName: "gamecontroller")!
+
+                let name: String
+                if let savedDisplayName, !savedDisplayName.isEmpty {
+                    name = savedDisplayName
+                } else {
+                    name = metadata?.midletName ??
+                        url.deletingPathExtension().lastPathComponent
+                }
+
+                let customIconURL = iconsDir.appendingPathComponent("\(id).png")
+                let customIcon = UIImage(contentsOfFile: customIconURL.path)
+
+                let icon =
+                    customIcon ??
+                    metadata?.readIcon(from: url.path) ??
+                    UIImage(systemName: "gamecontroller")!
+
                 return (name: name, path: url.path, icon: icon)
             }
+    }
+
+    private func showJarPickerMessage(_ text: String) {
+        jarPickerMessageWork?.cancel()
+        jarPickerMessageLabel?.removeFromSuperview()
+
+        guard let panel = jarPickerPanel else { return }
+
+        let label = UILabel()
+        label.text = text
+        label.textColor = .white
+        label.font = .systemFont(ofSize: 15, weight: .medium)
+        label.textAlignment = .center
+        label.backgroundColor = UIColor(white: 0.08, alpha: 0.96)
+        label.layer.cornerRadius = 10
+        label.layer.masksToBounds = true
+        label.alpha = 0
+        label.translatesAutoresizingMaskIntoConstraints = false
+
+        panel.addSubview(label)
+
+        NSLayoutConstraint.activate([
+            label.centerXAnchor.constraint(equalTo: panel.centerXAnchor),
+            label.bottomAnchor.constraint(equalTo: panel.bottomAnchor, constant: -66),
+            label.leadingAnchor.constraint(greaterThanOrEqualTo: panel.leadingAnchor, constant: 20),
+            label.trailingAnchor.constraint(lessThanOrEqualTo: panel.trailingAnchor, constant: -20),
+            label.heightAnchor.constraint(equalToConstant: 38)
+        ])
+
+        jarPickerMessageLabel = label
+
+        UIView.animate(withDuration: 0.12) {
+            label.alpha = 1
+        }
+
+        let work = DispatchWorkItem { [weak self, weak label] in
+            guard let self, let label else { return }
+
+            UIView.animate(
+                withDuration: 0.15,
+                animations: {
+                    label.alpha = 0
+                },
+                completion: { _ in
+                    label.removeFromSuperview()
+                    if self.jarPickerMessageLabel === label {
+                        self.jarPickerMessageLabel = nil
+                    }
+                }
+            )
+        }
+
+        jarPickerMessageWork = work
+
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + 2.0,
+            execute: work
+        )
     }
 
     @objc private func addJarTapped() {
@@ -807,6 +892,7 @@ final class GameViewController:
         ])
 
         jarPickerOverlay = overlay
+        jarPickerPanel = panel
         jarPickerTableView = table
         table.reloadData()
 
@@ -824,65 +910,32 @@ final class GameViewController:
         )
     }
 
-    private func showJarPickerMessage(_ message: String) {
-        jarPickerMessageWork?.cancel()
-
-        if jarPickerMessageLabel == nil {
-            let label = UILabel()
-            label.textColor = .white
-            label.backgroundColor = UIColor(white: 0.12, alpha: 0.96)
-            label.font = .systemFont(ofSize: 15, weight: .medium)
-            label.textAlignment = .center
-            label.numberOfLines = 1
-            label.layer.cornerRadius = 10
-            label.layer.masksToBounds = true
-            label.translatesAutoresizingMaskIntoConstraints = false
-            view.addSubview(label)
-
-            NSLayoutConstraint.activate([
-                label.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-                label.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -24),
-                label.leadingAnchor.constraint(greaterThanOrEqualTo: view.leadingAnchor, constant: 30),
-                label.trailingAnchor.constraint(lessThanOrEqualTo: view.trailingAnchor, constant: -30),
-                label.heightAnchor.constraint(equalToConstant: 42)
-            ])
-
-            jarPickerMessageLabel = label
-        }
-
-        guard let label = jarPickerMessageLabel else { return }
-        label.text = message
-        label.alpha = 0
-
-        UIView.animate(withDuration: 0.15) {
-            label.alpha = 1
-        }
-
-        let work = DispatchWorkItem { [weak self, weak label] in
-            UIView.animate(withDuration: 0.15, animations: {
-                label?.alpha = 0
-            }, completion: { _ in
-                label?.removeFromSuperview()
-                if self?.jarPickerMessageLabel === label {
-                    self?.jarPickerMessageLabel = nil
-                }
-            })
-        }
-
-        jarPickerMessageWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0, execute: work)
-    }
-
     @objc private func closeJarPicker() {
+        // Cancel any temporary duplicate-JAR message.
         jarPickerMessageWork?.cancel()
         jarPickerMessageWork = nil
         jarPickerMessageLabel?.removeFromSuperview()
         jarPickerMessageLabel = nil
 
-        jarPickerTableView?.delegate = nil
-        jarPickerTableView?.dataSource = nil
+        // Detach the table before removing the panel so there is no stale
+        // delegate/data-source interaction after the picker is dismissed.
+        if let table = jarPickerTableView {
+            table.delegate = nil
+            table.dataSource = nil
+            table.removeFromSuperview()
+        }
         jarPickerTableView = nil
-        jarPickerOverlay?.removeFromSuperview()
+
+        if let panel = jarPickerPanel {
+            panel.layer.removeAllAnimations()
+            panel.removeFromSuperview()
+        }
+        jarPickerPanel = nil
+
+        if let overlay = jarPickerOverlay {
+            overlay.layer.removeAllAnimations()
+            overlay.removeFromSuperview()
+        }
         jarPickerOverlay = nil
     }
 
@@ -2367,23 +2420,44 @@ extension GameViewController: UITableViewDataSource, UITableViewDelegate {
     }
 
     func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
-        let item = scanInstalledJARs()[indexPath.row]
+        let items = scanInstalledJARs()
+        guard indexPath.row >= 0, indexPath.row < items.count else {
+            return
+        }
 
-        let normalizedPath = URL(fileURLWithPath: item.path).standardizedFileURL.path
+        let item = items[indexPath.row]
+
+        let normalizedPath =
+            URL(fileURLWithPath: item.path)
+                .standardizedFileURL
+                .path
+
+        // If this JAR is already running, keep the picker OPEN and only
+        // show a temporary message. This is intentional.
         if runningSessions.contains(where: {
-            URL(fileURLWithPath: $0.path).standardizedFileURL.path == normalizedPath
+            URL(fileURLWithPath: $0.path)
+                .standardizedFileURL
+                .path == normalizedPath
         }) {
             showJarPickerMessage("JAR này đang được mở")
             tableView.deselectRow(at: indexPath, animated: true)
             return
         }
 
+        // A normal selection closes the picker immediately.
         closeJarPicker()
 
-        let resolution = UserDefaults.standard.object(forKey: "resW_\(gameID(forPath: item.path))") as? Int ?? 240
-        let resolutionH = UserDefaults.standard.object(forKey: "resH_\(gameID(forPath: item.path))") as? Int ?? 320
-        let fps = UserDefaults.standard.object(forKey: "fpsLimit_\(gameID(forPath: item.path))") as? Int ?? 0
-        let scale = UserDefaults.standard.object(forKey: "ss3d_\(gameID(forPath: item.path))") as? Bool == true ? 3 : 1
+        let id = gameID(forPath: item.path)
+        let defaults = UserDefaults.standard
+
+        let resolution =
+            defaults.object(forKey: "resW_\(id)") as? Int ?? 240
+        let resolutionH =
+            defaults.object(forKey: "resH_\(id)") as? Int ?? 320
+        let fps =
+            defaults.object(forKey: "fpsLimit_\(id)") as? Int ?? 0
+        let scale =
+            defaults.bool(forKey: "ss3d_\(id)") ? 3 : 1
 
         addRunningJar(
             path: item.path,
