@@ -1,916 +1,259 @@
 //
 // EmulatorView.swift
-// J2ME framebuffer rendering.
-// FPS limit is applied ONLY to display presentation,
-// never to MiniJVM / Java Canvas execution.
-//
-// Compatible with iOS 16.4+.
+// J2ME framebuffer viewport: preserve the virtual canvas, fit the complete
+// image into the available iPhone area, and map touches back to JAR coordinates.
+// iOS 16.4+
 //
 
 import UIKit
-import QuartzCore
-
-private final class EmulatorDisplayLinkTarget: NSObject {
-
-    weak var owner: EmulatorView?
-
-    init(owner: EmulatorView) {
-        self.owner = owner
-    }
-
-    @objc func tick(_ displayLink: CADisplayLink) {
-        owner?.displayPendingFrame()
-    }
-}
 
 final class EmulatorView: UIView {
 
-    // MARK: - Virtual resolution
-
+    /// MIDP logical screen resolution selected for the running JAR.
     var canvasWidth: Int = 240 {
-        didSet {
-            setNeedsLayout()
-        }
+        didSet { setNeedsLayout() }
     }
 
     var canvasHeight: Int = 320 {
-        didSet {
-            setNeedsLayout()
-        }
+        didSet { setNeedsLayout() }
     }
 
-    // MARK: - Display FPS
-
-    //
-    // IMPORTANT:
-    //
-    // This FPS limit only controls how often the iOS display
-    // consumes a framebuffer.
-    //
-    // It does NOT slow down:
-    // - MiniJVM
-    // - Java Canvas
-    // - GIF decoding
-    // - Java game logic
-    // - Java timers
-    //
-    // Therefore setting 30 FPS cannot block an animated GIF
-    // simply because the emulator display is limited to 30 FPS.
-    //
-    private var displayFPS: Int = 0
-
-    // Software presentation cap. CADisplayLink's preferredFrameRateRange is
-    // only a scheduling hint, so it is not enough to guarantee 30/20/15 FPS.
-    // This timestamp gate makes the limit deterministic while MiniJVM itself
-    // continues running without a Java-side FPS throttle.
-    private var lastPresentedFrameTime: CFTimeInterval = 0
-    private var displayFrameInterval: CFTimeInterval = 0
-
-    func setDisplayFPS(_ fps: Int) {
-
-        let safeFPS: Int
-
-        switch fps {
-
-        case 0:
-            safeFPS = 0
-
-        case 15, 20, 30, 45:
-            safeFPS = fps
-
-        default:
-            safeFPS = 0
-        }
-
-        displayFPS = safeFPS
-        displayFrameInterval =
-            safeFPS > 0
-            ? (1.0 / Double(safeFPS))
-            : 0
-
-        if safeFPS == 0 {
-            lastPresentedFrameTime = 0
-        }
-
-        applyDisplayFPS()
-    }
-
-    private func applyDisplayFPS() {
-
-        guard Thread.isMainThread else {
-
-            DispatchQueue.main.async { [weak self] in
-                self?.applyDisplayFPS()
-            }
-
-            return
-        }
-
-        guard let link = displayLink else {
-            return
-        }
-
-        if #available(iOS 15.0, *) {
-
-            if displayFPS > 0 {
-
-                let maximum =
-                    UIScreen.main.maximumFramesPerSecond
-
-                let preferred =
-                    min(displayFPS, maximum)
-
-                link.preferredFrameRateRange =
-                    CAFrameRateRange(
-                        minimum: Float(preferred),
-                        maximum: Float(preferred),
-                        preferred: Float(preferred)
-                    )
-
-            } else {
-
-                let maximum =
-                    UIScreen.main.maximumFramesPerSecond
-
-                link.preferredFrameRateRange =
-                    CAFrameRateRange(
-                        minimum: 1,
-                        maximum: Float(maximum),
-                        preferred: Float(maximum)
-                    )
-            }
-
-        } else {
-
-            link.preferredFramesPerSecond =
-                displayFPS > 0
-                ? min(
-                    displayFPS,
-                    UIScreen.main.maximumFramesPerSecond
-                )
-                : UIScreen.main.maximumFramesPerSecond
-        }
-    }
-
-    // MARK: - Rendering
-
-    private let framebufferLayer = CALayer()
-
+    private let framebufferView = UIImageView()
     private var framebufferPixelWidth = 0
     private var framebufferPixelHeight = 0
-
     private var hasDisplayedFirstFrame = false
-
-    // MARK: - Frame queue
-
-    private let frameLock = NSLock()
-
-    private var pendingFrame: CGImage?
-
-    // Frame timing counters
-    private let metricsLock = NSLock()
-
-    private var metricsWindowStart =
-        CACurrentMediaTime()
-
-    private var metricsDisplayTicks = 0
-    private var metricsFramesReceived = 0
-    private var metricsFramesDisplayed = 0
-    private var metricsFramesReplaced = 0
-
-    private var metricsLayerTotalMs = 0.0
-    private var metricsLayerMaxMs = 0.0
-
-    private var metricsCallbackTotalMs = 0.0
-    private var metricsCallbackMaxMs = 0.0
-
-    private var metricsTickTotalMs = 0.0
-    private var metricsTickMaxMs = 0.0
-
-    private var displayLink: CADisplayLink?
-    private var displayLinkTarget: EmulatorDisplayLinkTarget?
 
     var onFirstFrame: (() -> Void)?
     var onFrame: ((CGImage) -> Void)?
 
-    // MARK: - Initialization
-
     override init(frame: CGRect) {
-
         super.init(frame: frame)
-
         setup()
     }
 
     required init?(coder: NSCoder) {
-
         super.init(coder: coder)
-
         setup()
     }
 
-    deinit {
-
-        displayLink?.invalidate()
-    }
-
     private func setup() {
-
-        if Thread.isMainThread {
-
-            jvm_bridge_register_main_thread()
-
-        } else {
-
-            DispatchQueue.main.async {
-                jvm_bridge_register_main_thread()
-            }
+        // The framebuffer image itself is untouched. This color is only the
+        // surrounding viewport area (the bars visible when the JAR aspect
+        // ratio does not fill the whole iPhone viewport).
+        backgroundColor = UIColor { trait in
+            trait.userInterfaceStyle == .dark
+                ? .black
+                : .systemBackground
         }
 
-        backgroundColor = .black
-
-        isOpaque = true
         clipsToBounds = true
-
         isMultipleTouchEnabled = true
         isUserInteractionEnabled = true
 
-        framebufferLayer.backgroundColor =
-            UIColor.black.cgColor
-
-        framebufferLayer.contentsGravity =
-            .resizeAspect
-
-        framebufferLayer.magnificationFilter =
-            .nearest
-
-        framebufferLayer.minificationFilter =
-            .nearest
-
-        framebufferLayer.contentsScale =
-            UIScreen.main.scale
-
-        framebufferLayer.isOpaque = true
-        framebufferLayer.contents = nil
-
-        layer.addSublayer(framebufferLayer)
+        framebufferView.translatesAutoresizingMaskIntoConstraints = true
+        framebufferView.backgroundColor = .black
+        framebufferView.contentMode = .scaleToFill
+        framebufferView.clipsToBounds = true
+        framebufferView.isUserInteractionEnabled = false
+        framebufferView.layer.magnificationFilter = .nearest
+        framebufferView.layer.minificationFilter = .nearest
+        addSubview(framebufferView)
     }
 
-    // MARK: - Display link lifecycle
-
-    override func didMoveToWindow() {
-
-        super.didMoveToWindow()
-
-        if window != nil {
-
-            startDisplayLink()
-
-        } else {
-
-            stopDisplayLink()
-        }
-    }
-
-    private func startDisplayLink() {
-
-        guard Thread.isMainThread else {
-
-            DispatchQueue.main.async { [weak self] in
-                self?.startDisplayLink()
-            }
-
-            return
-        }
-
-        guard displayLink == nil else {
-            return
-        }
-
-        let target =
-            EmulatorDisplayLinkTarget(owner: self)
-
-        let link =
-            CADisplayLink(
-                target: target,
-                selector:
-                    #selector(
-                        EmulatorDisplayLinkTarget.tick(_:)
-                    )
-            )
-
-        displayLinkTarget = target
-        displayLink = link
-
-        //
-        // Apply the selected FPS BEFORE adding the display
-        // link to the run loop.
-        //
-        applyDisplayFPS()
-
-        link.isPaused = false
-
-        link.add(
-            to: .main,
-            forMode: .common
-        )
-    }
-
-    private func stopDisplayLink() {
-
-        guard Thread.isMainThread else {
-
-            DispatchQueue.main.async { [weak self] in
-                self?.stopDisplayLink()
-            }
-
-            return
-        }
-
-        displayLink?.invalidate()
-
-        displayLink = nil
-        displayLinkTarget = nil
-    }
-
-    // MARK: - Layout
-
-    override func layoutSubviews() {
-
-        super.layoutSubviews()
-
-        CATransaction.begin()
-
-        CATransaction.setDisableActions(true)
-
-        framebufferLayer.frame =
-            bounds
-
-        CATransaction.commit()
-    }
-
-    // MARK: - Aspect fit
-
+    /// Number of UIKit points used by one logical J2ME pixel after fit-to-screen.
+    /// Values below 1 mean that a high-resolution JAR is being rendered more
+    /// densely inside the same physical viewport.
     var effectiveDisplayScale: CGFloat {
-
-        guard canvasWidth > 0 else {
-            return 0
-        }
-
-        return fittedImageRect().width /
-            CGFloat(canvasWidth)
+        guard canvasWidth > 0 else { return 0 }
+        return fittedImageRect().width / CGFloat(canvasWidth)
     }
 
+    /// The outer EmulatorView stays full-size. Only this image rectangle changes.
     private func fittedImageRect() -> CGRect {
+        let viewportWidth = bounds.width
+        let viewportHeight = bounds.height
 
-        let viewWidth = bounds.width
-        let viewHeight = bounds.height
+        guard viewportWidth > 0, viewportHeight > 0 else { return .zero }
 
-        guard viewWidth > 0,
-              viewHeight > 0 else {
+        let sourceWidth = CGFloat(
+            framebufferPixelWidth > 0 ? framebufferPixelWidth : max(1, canvasWidth)
+        )
+        let sourceHeight = CGFloat(
+            framebufferPixelHeight > 0 ? framebufferPixelHeight : max(1, canvasHeight)
+        )
 
-            return .zero
-        }
+        // Uniform scale: never crop, stretch, or enlarge the viewport itself.
+        let scale = min(
+            viewportWidth / sourceWidth,
+            viewportHeight / sourceHeight
+        )
 
-        let pixelWidth =
-            framebufferPixelWidth > 0
-            ? framebufferPixelWidth
-            : max(1, canvasWidth)
-
-        let pixelHeight =
-            framebufferPixelHeight > 0
-            ? framebufferPixelHeight
-            : max(1, canvasHeight)
-
-        let sourceWidth =
-            CGFloat(pixelWidth)
-
-        let sourceHeight =
-            CGFloat(pixelHeight)
-
-        let scale =
-            min(
-                viewWidth / sourceWidth,
-                viewHeight / sourceHeight
-            )
-
-        let displayedWidth =
-            sourceWidth * scale
-
-        let displayedHeight =
-            sourceHeight * scale
+        let displayedWidth = sourceWidth * scale
+        let displayedHeight = sourceHeight * scale
 
         return CGRect(
-            x:
-                (viewWidth - displayedWidth) * 0.5,
-
-            y:
-                (viewHeight - displayedHeight) * 0.5,
-
-            width:
-                displayedWidth,
-
-            height:
-                displayedHeight
+            x: (viewportWidth - displayedWidth) * 0.5,
+            y: (viewportHeight - displayedHeight) * 0.5,
+            width: displayedWidth,
+            height: displayedHeight
         )
     }
 
-    // MARK: - Framebuffer submission
-
-    func canAcceptFrame() -> Int32 {
-
-        frameLock.lock()
-
-        defer {
-            frameLock.unlock()
-        }
-
-        //
-        // Only one frame is allowed to wait.
-        //
-        // Newer frames replace the old waiting frame.
-        //
-        return pendingFrame == nil
-            ? 1
-            : 0
-    }
-
-    func displayImage(
-        _ cgImage: CGImage
+    override func traitCollectionDidChange(
+        _ previousTraitCollection: UITraitCollection?
     ) {
+        super.traitCollectionDidChange(previousTraitCollection)
 
-        frameLock.lock()
-
-        let replacedPendingFrame =
-            pendingFrame != nil
-
-        //
-        // Always keep the newest frame.
-        //
-        pendingFrame =
-            cgImage
-
-        frameLock.unlock()
-
-        metricsLock.lock()
-
-        metricsFramesReceived += 1
-
-        if replacedPendingFrame {
-            metricsFramesReplaced += 1
-        }
-
-        metricsLock.unlock()
-    }
-
-    // MARK: - Frame performance metrics
-
-    private func recordDisplayMetrics(
-        frameDisplayed: Bool,
-        layerMs: Double,
-        callbackMs: Double,
-        tickMs: Double
-    ) {
-
-        let now =
-            CACurrentMediaTime()
-
-        var logLine: String?
-
-        metricsLock.lock()
-
-        metricsDisplayTicks += 1
-
-        if frameDisplayed {
-
-            metricsFramesDisplayed += 1
-
-            metricsLayerTotalMs +=
-                layerMs
-
-            metricsLayerMaxMs =
-                max(
-                    metricsLayerMaxMs,
-                    layerMs
-                )
-
-            metricsCallbackTotalMs +=
-                callbackMs
-
-            metricsCallbackMaxMs =
-                max(
-                    metricsCallbackMaxMs,
-                    callbackMs
-                )
-
-            metricsTickTotalMs +=
-                tickMs
-
-            metricsTickMaxMs =
-                max(
-                    metricsTickMaxMs,
-                    tickMs
-                )
-        }
-
-        let elapsed =
-            now - metricsWindowStart
-
-        if elapsed >= 5.0 {
-
-            let ticksPerSecond =
-                Double(metricsDisplayTicks)
-                / elapsed
-
-            let receivedPerSecond =
-                Double(metricsFramesReceived)
-                / elapsed
-
-            let displayedPerSecond =
-                Double(metricsFramesDisplayed)
-                / elapsed
-
-            let replacedPerSecond =
-                Double(metricsFramesReplaced)
-                / elapsed
-
-            let frameCount =
-                max(
-                    1,
-                    metricsFramesDisplayed
-                )
-
-            logLine = String(
-                format:
-                    "[UI Frame Perf] displayLink/s=%.1f received/s=%.1f displayed/s=%.1f replaced/s=%.1f avgLayerMs=%.3f maxLayerMs=%.3f avgCallbackMs=%.3f maxCallbackMs=%.3f avgTickMs=%.3f maxTickMs=%.3f fps=%d",
-                ticksPerSecond,
-                receivedPerSecond,
-                displayedPerSecond,
-                replacedPerSecond,
-                metricsLayerTotalMs /
-                    Double(frameCount),
-                metricsLayerMaxMs,
-                metricsCallbackTotalMs /
-                    Double(frameCount),
-                metricsCallbackMaxMs,
-                metricsTickTotalMs /
-                    Double(frameCount),
-                metricsTickMaxMs,
-                displayFPS
-            )
-
-            metricsWindowStart =
-                now
-
-            metricsDisplayTicks = 0
-            metricsFramesReceived = 0
-            metricsFramesDisplayed = 0
-            metricsFramesReplaced = 0
-
-            metricsLayerTotalMs = 0
-            metricsLayerMaxMs = 0
-
-            metricsCallbackTotalMs = 0
-            metricsCallbackMaxMs = 0
-
-            metricsTickTotalMs = 0
-            metricsTickMaxMs = 0
-        }
-
-        metricsLock.unlock()
-
-        if let logLine {
-            print(logLine)
-        }
-    }
-
-    // MARK: - Display frame
-
-    fileprivate func displayPendingFrame() {
-
-        dispatchPrecondition(
-            condition: .onQueue(.main)
-        )
-
-        let tickStart =
-            CACurrentMediaTime()
-
-        // CADisplayLink preferredFrameRateRange is not a hard limiter.
-        // Enforce the requested presentation interval here. This only drops
-        // display updates. It never pauses or throttles MiniJVM/Java.
-        if displayFrameInterval > 0,
-           lastPresentedFrameTime > 0,
-           (tickStart - lastPresentedFrameTime) < displayFrameInterval {
-
-            recordDisplayMetrics(
-                frameDisplayed: false,
-                layerMs: 0,
-                callbackMs: 0,
-                tickMs: 0
-            )
-
+        guard previousTraitCollection?.userInterfaceStyle
+                != traitCollection.userInterfaceStyle else {
             return
         }
 
-        frameLock.lock()
-
-        let cgImage =
-            pendingFrame
-
-        pendingFrame = nil
-
-        frameLock.unlock()
-
-        guard let cgImage else {
-
-            recordDisplayMetrics(
-                frameDisplayed: false,
-                layerMs: 0,
-                callbackMs: 0,
-                tickMs:
-                    (
-                        CACurrentMediaTime()
-                        - tickStart
-                    ) * 1000.0
-            )
-
-            return
+        // Keep only the outer viewport background synchronized with
+        // Light/Dark mode. The JAR framebuffer is never recolored.
+        backgroundColor = UIColor { trait in
+            trait.userInterfaceStyle == .dark
+                ? .black
+                : .systemBackground
         }
-
-        framebufferPixelWidth =
-            cgImage.width
-
-        framebufferPixelHeight =
-            cgImage.height
-
-        let layerStart =
-            CACurrentMediaTime()
-
-        CATransaction.begin()
-
-        CATransaction.setDisableActions(true)
-
-        framebufferLayer.contents =
-            cgImage
-
-        lastPresentedFrameTime = tickStart
-
-        CATransaction.commit()
-
-        let layerMs =
-            (
-                CACurrentMediaTime()
-                - layerStart
-            ) * 1000.0
-
-        let callbackStart =
-            CACurrentMediaTime()
-
-        onFrame?(cgImage)
-
-        if !hasDisplayedFirstFrame {
-
-            hasDisplayedFirstFrame = true
-
-            let callback =
-                onFirstFrame
-
-            onFirstFrame = nil
-
-            callback?()
-        }
-
-        let callbackMs =
-            (
-                CACurrentMediaTime()
-                - callbackStart
-            ) * 1000.0
-
-        let tickMs =
-            (
-                CACurrentMediaTime()
-                - tickStart
-            ) * 1000.0
-
-        recordDisplayMetrics(
-            frameDisplayed: true,
-            layerMs: layerMs,
-            callbackMs: callbackMs,
-            tickMs: tickMs
-        )
     }
 
-    // MARK: - Touch conversion
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        framebufferView.frame = fittedImageRect()
+    }
 
-    private func virtualPoint(
-        for point: CGPoint,
-        clampToImage: Bool
-    ) -> (Int, Int)? {
+    // MARK: - Framebuffer
 
-        let rect =
-            fittedImageRect()
+    func displayImage(_ cgImage: CGImage) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+
+            self.framebufferPixelWidth = cgImage.width
+            self.framebufferPixelHeight = cgImage.height
+            self.framebufferView.image = UIImage(
+                cgImage: cgImage,
+                scale: 1,
+                orientation: .up
+            )
+
+            self.setNeedsLayout()
+            self.layoutIfNeeded()
+            self.onFrame?(cgImage)
+
+            if !self.hasDisplayedFirstFrame {
+                self.hasDisplayedFirstFrame = true
+                let callback = self.onFirstFrame
+                self.onFirstFrame = nil
+                callback?()
+            }
+        }
+    }
+
+    // MARK: - Touch coordinate conversion
+
+    private func virtualPoint(for point: CGPoint, clampToImage: Bool) -> (Int, Int)? {
+        let rect = fittedImageRect()
 
         guard rect.width > 0,
               rect.height > 0,
               canvasWidth > 0,
               canvasHeight > 0 else {
-
             return nil
         }
 
-        if !clampToImage &&
-            !rect.contains(point) {
-
+        if !clampToImage && !rect.contains(point) {
+            // Do not send taps from the black bars surrounding the fitted image.
             return nil
         }
 
-        let x =
-            min(
-                max(point.x, rect.minX),
-                rect.maxX.nextDown
-            )
+        let maxX = rect.maxX.nextDown
+        let maxY = rect.maxY.nextDown
+        let x = min(max(point.x, rect.minX), maxX)
+        let y = min(max(point.y, rect.minY), maxY)
 
-        let y =
-            min(
-                max(point.y, rect.minY),
-                rect.maxY.nextDown
-            )
+        let normalizedX = (x - rect.minX) / rect.width
+        let normalizedY = (y - rect.minY) / rect.height
 
-        let normalizedX =
-            (x - rect.minX)
-            / rect.width
-
-        let normalizedY =
-            (y - rect.minY)
-            / rect.height
-
-        let virtualX =
-            Int(
-                normalizedX
-                * CGFloat(canvasWidth)
-            )
-
-        let virtualY =
-            Int(
-                normalizedY
-                * CGFloat(canvasHeight)
-            )
+        let virtualX = Int(normalizedX * CGFloat(canvasWidth))
+        let virtualY = Int(normalizedY * CGFloat(canvasHeight))
 
         return (
-            min(
-                max(virtualX, 0),
-                canvasWidth - 1
-            ),
-
-            min(
-                max(virtualY, 0),
-                canvasHeight - 1
-            )
+            min(max(virtualX, 0), canvasWidth - 1),
+            min(max(virtualY, 0), canvasHeight - 1)
         )
     }
 
     // MARK: - Touch events
 
-    override func touchesBegan(
-        _ touches: Set<UITouch>,
-        with event: UIEvent?
-    ) {
-
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
         for touch in touches {
-
-            guard let (x, y) =
-                virtualPoint(
-                    for:
-                        touch.location(
-                            in: self
-                        ),
-                    clampToImage: false
-                ) else {
-                continue
-            }
+            guard let (x, y) = virtualPoint(
+                for: touch.location(in: self),
+                clampToImage: false
+            ) else { continue }
 
             j2me_input_post_touch(
-                Int32(
-                    J2ME_INPUT_POINTER_PRESSED
-                ),
+                Int32(J2ME_INPUT_POINTER_PRESSED),
                 Int32(x),
                 Int32(y)
             )
         }
     }
 
-    override func touchesMoved(
-        _ touches: Set<UITouch>,
-        with event: UIEvent?
-    ) {
-
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
         for touch in touches {
-
-            guard let (x, y) =
-                virtualPoint(
-                    for:
-                        touch.location(
-                            in: self
-                        ),
-                    clampToImage: true
-                ) else {
-                continue
-            }
+            guard let (x, y) = virtualPoint(
+                for: touch.location(in: self),
+                clampToImage: true
+            ) else { continue }
 
             j2me_input_post_touch(
-                Int32(
-                    J2ME_INPUT_POINTER_DRAGGED
-                ),
+                Int32(J2ME_INPUT_POINTER_DRAGGED),
                 Int32(x),
                 Int32(y)
             )
         }
     }
 
-    override func touchesEnded(
-        _ touches: Set<UITouch>,
-        with event: UIEvent?
-    ) {
-
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
         for touch in touches {
-
-            guard let (x, y) =
-                virtualPoint(
-                    for:
-                        touch.location(
-                            in: self
-                        ),
-                    clampToImage: true
-                ) else {
-                continue
-            }
+            guard let (x, y) = virtualPoint(
+                for: touch.location(in: self),
+                clampToImage: true
+            ) else { continue }
 
             j2me_input_post_touch(
-                Int32(
-                    J2ME_INPUT_POINTER_RELEASED
-                ),
+                Int32(J2ME_INPUT_POINTER_RELEASED),
                 Int32(x),
                 Int32(y)
             )
         }
     }
 
-    override func touchesCancelled(
-        _ touches: Set<UITouch>,
-        with event: UIEvent?
-    ) {
-
-        touchesEnded(
-            touches,
-            with: event
-        )
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+        touchesEnded(touches, with: event)
     }
 }
 
-// MARK: - Global framebuffer callbacks
+// MARK: - Global framebuffer callback
 
-private weak var globalEmulatorView:
-    EmulatorView?
+private weak var globalEmulatorView: EmulatorView?
 
-func setGlobalEmulatorView(
-    _ view: EmulatorView?
-) {
+func setGlobalEmulatorView(_ view: EmulatorView?) {
     globalEmulatorView = view
 }
 
-let flushReadyCallback:
-    @convention(c) () -> Int32 = {
+let flushCallback: @convention(c) (
+    UnsafeMutableRawPointer?,
+    Int32,
+    Int32
+) -> Void = { cgImagePointer, width, height in
+    guard let cgImagePointer else { return }
 
-    guard let view =
-        globalEmulatorView else {
-        return 0
-    }
+    let cgImage = Unmanaged<CGImage>
+        .fromOpaque(cgImagePointer)
+        .takeRetainedValue()
 
-    return view.canAcceptFrame()
-}
-
-let flushCallback:
-    @convention(c) (
-        UnsafeMutableRawPointer?,
-        Int32,
-        Int32
-    ) -> Void = {
-
-    cgImagePointer,
-    _,
-    _ in
-
-    guard let cgImagePointer else {
-        return
-    }
-
-    let cgImage =
-        Unmanaged<CGImage>
-            .fromOpaque(
-                cgImagePointer
-            )
-            .takeRetainedValue()
-
-    globalEmulatorView?
-        .displayImage(cgImage)
+    globalEmulatorView?.displayImage(cgImage)
 }
