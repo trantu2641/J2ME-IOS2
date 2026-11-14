@@ -139,6 +139,12 @@ class AppsListViewController: UIViewController,
         ])
     }
 
+    private var j2meToolbarTintColor: UIColor {
+        UIColor { trait in
+            trait.userInterfaceStyle == .dark ? .white : .black
+        }
+    }
+
     private func setupToolbar() {
 
         let addButton = UIBarButtonItem(
@@ -148,6 +154,10 @@ class AppsListViewController: UIViewController,
             }
         )
 
+        // Explicit dynamic tint so the toolbar icons follow the iPhone's
+        // Light/Dark appearance instead of inheriting a fixed navigation tint.
+        addButton.tintColor = j2meToolbarTintColor
+
         addButton.accessibilityLabel = "Import JAR"
 
         duplicateInstallBarButtonItem = UIBarButtonItem(
@@ -156,6 +166,9 @@ class AppsListViewController: UIViewController,
             target: self,
             action: #selector(duplicateInstalledJARTapped)
         )
+
+        // Keep the copy/duplicate icon synchronized with Light/Dark mode.
+        duplicateInstallBarButtonItem.tintColor = j2meToolbarTintColor
 
         duplicateInstallBarButtonItem.accessibilityLabel =
             "Install another copy of a JAR"
@@ -298,6 +311,7 @@ class AppsListViewController: UIViewController,
                 : .systemBackground
         }
 
+        duplicateInstallBarButtonItem?.tintColor = j2meToolbarTintColor
         springboardCollectionView?.reloadData()
         setNeedsStatusBarAppearanceUpdate()
     }
