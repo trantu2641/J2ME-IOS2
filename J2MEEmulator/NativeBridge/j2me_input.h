@@ -32,6 +32,12 @@ void j2me_input_post_key(int type, int keyCode);
 /// Set virtual canvas size for coordinate conversion.
 void j2me_input_set_canvas_size(int width, int height);
 
+/// Route iOS input to the selected MiniJVM session.
+void j2me_input_set_active_jvm(MiniJVM *jvm);
+
+/// Remove a destroyed MiniJVM input queue.
+void j2me_input_remove_jvm(MiniJVM *jvm);
+
 /// Reset input state (clear ring buffer). Call between game sessions.
 void j2me_input_reset(void);
 

@@ -31,6 +31,22 @@ int jvm_bridge_init(const char *res_root, const char *save_root, const char *mid
 /// @return 0 on success, non-zero on failure
 int jvm_bridge_run_midlet(const char *midlet_jar_path);
 
+
+/// Multi-session JAR runtime API. Each session owns an independent MiniJVM.
+/// The active session is the only session whose framebuffer is presented to UIKit.
+int jvm_bridge_session_create(const char *res_root, const char *save_root, const char *midlet_jar,
+                              int screen_width, int screen_height, int render_3d_scale,
+                              int fps_limit);
+int jvm_bridge_session_start(int session_id);
+void jvm_bridge_session_set_active(int session_id);
+int jvm_bridge_session_is_running(int session_id);
+void jvm_bridge_session_request_stop(int session_id);
+void jvm_bridge_session_destroy(int session_id);
+void jvm_bridge_session_destroy_all(void);
+
+/// Session-aware stop query used by native MIDP input.
+int jvm_bridge_is_stop_requested_for_vm(MiniJVM *jvm);
+
 /// Destroy the JVM instance and free resources.
 void jvm_bridge_destroy(void);
 

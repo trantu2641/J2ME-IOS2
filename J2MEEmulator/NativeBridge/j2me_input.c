@@ -10,6 +10,8 @@
 #include "jvm.h"
 #include "jvm_util.h"
 #include <stdio.h>
+#include <string.h>
+#include <pthread.h>
 #include <stdatomic.h>
 
 // ============================================================
@@ -18,6 +20,7 @@
 
 #define INPUT_QUEUE_SIZE 256
 #define INPUT_QUEUE_MASK (INPUT_QUEUE_SIZE - 1)
+#define INPUT_MAX_SESSIONS 16
 
 typedef struct {
     int type;
@@ -25,59 +28,113 @@ typedef struct {
     int keyCode;
 } InputEvent;
 
-static InputEvent g_queue[INPUT_QUEUE_SIZE];
-static atomic_int g_write_pos = 0;
-static atomic_int g_read_pos = 0;
+typedef struct {
+    MiniJVM *jvm;
+    InputEvent queue[INPUT_QUEUE_SIZE];
+    atomic_int write_pos;
+    atomic_int read_pos;
+    int used;
+} InputSessionQueue;
 
-static int g_canvas_width = 240;
-static int g_canvas_height = 320;
+static InputSessionQueue g_input_sessions[INPUT_MAX_SESSIONS];
+static pthread_mutex_t g_input_lock = PTHREAD_MUTEX_INITIALIZER;
+static MiniJVM *g_active_input_jvm = NULL;
 
-void j2me_input_set_canvas_size(int width, int height) {
-    g_canvas_width = width;
-    g_canvas_height = height;
+static InputSessionQueue *find_input_queue_locked(MiniJVM *jvm) {
+    if (!jvm) return NULL;
+    for (int i = 0; i < INPUT_MAX_SESSIONS; i++) {
+        if (g_input_sessions[i].used && g_input_sessions[i].jvm == jvm) {
+            return &g_input_sessions[i];
+        }
+    }
+    return NULL;
 }
 
-static void enqueue_event(int type, int x, int y, int keyCode) {
-    int wp = atomic_load_explicit(&g_write_pos, memory_order_relaxed);
+static InputSessionQueue *ensure_input_queue(MiniJVM *jvm) {
+    pthread_mutex_lock(&g_input_lock);
+    InputSessionQueue *q = find_input_queue_locked(jvm);
+    if (!q) {
+        for (int i = 0; i < INPUT_MAX_SESSIONS; i++) {
+            if (!g_input_sessions[i].used) {
+                q = &g_input_sessions[i];
+                memset(q, 0, sizeof(*q));
+                q->jvm = jvm;
+                q->used = 1;
+                atomic_init(&q->write_pos, 0);
+                atomic_init(&q->read_pos, 0);
+                break;
+            }
+        }
+    }
+    pthread_mutex_unlock(&g_input_lock);
+    return q;
+}
+
+void j2me_input_set_active_jvm(MiniJVM *jvm) {
+    g_active_input_jvm = jvm;
+    if (jvm) ensure_input_queue(jvm);
+}
+
+void j2me_input_remove_jvm(MiniJVM *jvm) {
+    pthread_mutex_lock(&g_input_lock);
+    InputSessionQueue *q = find_input_queue_locked(jvm);
+    if (q) memset(q, 0, sizeof(*q));
+    if (g_active_input_jvm == jvm) g_active_input_jvm = NULL;
+    pthread_mutex_unlock(&g_input_lock);
+}
+
+static void enqueue_event_for(MiniJVM *jvm, int type, int x, int y, int keyCode) {
+    InputSessionQueue *q = ensure_input_queue(jvm);
+    if (!q) return;
+
+    int wp = atomic_load_explicit(&q->write_pos, memory_order_relaxed);
     int next_wp = (wp + 1) & INPUT_QUEUE_MASK;
-    int rp = atomic_load_explicit(&g_read_pos, memory_order_acquire);
+    int rp = atomic_load_explicit(&q->read_pos, memory_order_acquire);
+    if (next_wp == rp) return;
 
-    if (next_wp == rp) {
-        // Queue full — drop event
-        return;
-    }
-
-    g_queue[wp].type = type;
-    g_queue[wp].x = x;
-    g_queue[wp].y = y;
-    g_queue[wp].keyCode = keyCode;
-
-    atomic_store_explicit(&g_write_pos, next_wp, memory_order_release);
+    q->queue[wp].type = type;
+    q->queue[wp].x = x;
+    q->queue[wp].y = y;
+    q->queue[wp].keyCode = keyCode;
+    atomic_store_explicit(&q->write_pos, next_wp, memory_order_release);
 }
 
-static int dequeue_event(InputEvent *out) {
-    int rp = atomic_load_explicit(&g_read_pos, memory_order_relaxed);
-    int wp = atomic_load_explicit(&g_write_pos, memory_order_acquire);
+static int dequeue_event_for(MiniJVM *jvm, InputEvent *out) {
+    InputSessionQueue *q = ensure_input_queue(jvm);
+    if (!q) return 0;
 
-    if (rp == wp) {
-        return 0; // Empty
-    }
+    int rp = atomic_load_explicit(&q->read_pos, memory_order_relaxed);
+    int wp = atomic_load_explicit(&q->write_pos, memory_order_acquire);
+    if (rp == wp) return 0;
 
-    *out = g_queue[rp];
-    atomic_store_explicit(&g_read_pos, (rp + 1) & INPUT_QUEUE_MASK, memory_order_release);
+    *out = q->queue[rp];
+    atomic_store_explicit(&q->read_pos, (rp + 1) & INPUT_QUEUE_MASK, memory_order_release);
     return 1;
 }
 
-// ============================================================
-// Public API (called from Swift/main thread)
-// ============================================================
+void j2me_input_set_canvas_size(int width, int height) {
+    (void)width;
+    (void)height;
+}
 
 void j2me_input_post_touch(int type, int x, int y) {
-    enqueue_event(type, x, y, 0);
+    enqueue_event_for(g_active_input_jvm, type, x, y, 0);
 }
 
 void j2me_input_post_key(int type, int keyCode) {
-    enqueue_event(type, 0, 0, keyCode);
+    enqueue_event_for(g_active_input_jvm, type, 0, 0, keyCode);
+}
+
+void j2me_input_reset(void) {
+    pthread_mutex_lock(&g_input_lock);
+    for (int i = 0; i < INPUT_MAX_SESSIONS; i++) {
+        if (g_input_sessions[i].used) {
+            atomic_store_explicit(&g_input_sessions[i].write_pos, 0, memory_order_relaxed);
+            atomic_store_explicit(&g_input_sessions[i].read_pos, 0, memory_order_relaxed);
+        }
+    }
+    pthread_mutex_unlock(&g_input_lock);
+    printf("[J2ME Input] All session queues reset\n");
 }
 
 // ============================================================
@@ -89,7 +146,7 @@ static s32 n_pollInputEvent(Runtime *runtime, JClass *clazz) {
     JniEnv *env = runtime->jnienv;
     InputEvent evt;
 
-    if (!dequeue_event(&evt)) {
+    if (!dequeue_event_for(runtime->jvm, &evt)) {
         env->push_ref(runtime->stack, NULL);
         return RUNTIME_STATUS_NORMAL;
     }
@@ -120,7 +177,7 @@ static s32 n_pollInputEvent(Runtime *runtime, JClass *clazz) {
 // ============================================================
 
 static s32 n_isStopRequested(Runtime *runtime, JClass *clazz) {
-    push_int(runtime->stack, jvm_bridge_is_stop_requested() ? 1 : 0);
+    push_int(runtime->stack, jvm_bridge_is_stop_requested_for_vm(runtime->jvm) ? 1 : 0);
     return RUNTIME_STATUS_NORMAL;
 }
 

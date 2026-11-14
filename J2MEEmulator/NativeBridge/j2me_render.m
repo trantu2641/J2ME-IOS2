@@ -52,6 +52,7 @@ typedef struct RenderImage {
 } RenderImage;
 
 static j2me_flush_callback g_flush_callback = NULL;
+static MiniJVM *g_active_render_jvm = NULL;
 static j2me_flush_ready_callback g_flush_ready_callback = NULL;
 static CGColorSpaceRef g_colorSpace = NULL;
 
@@ -390,6 +391,10 @@ static CGColorSpaceRef getColorSpace(void) {
 // ============================================================
 // Frame rate limiter
 // ============================================================
+
+void j2me_render_set_active_jvm(MiniJVM *jvm) {
+    g_active_render_jvm = jvm;
+}
 
 void j2me_render_set_flush_callback(
     j2me_flush_callback callback
@@ -846,6 +851,12 @@ static s32 n_flushToScreen(
 ) {
 
     process_dead_shells();
+
+    // Only the currently selected JAR is presented to UIKit.
+    // Other JARs continue executing their own VM threads and render contexts.
+    if (g_active_render_jvm && runtime->jvm != g_active_render_jvm) {
+        return RUNTIME_STATUS_NORMAL;
+    }
 
     // First skip frames blocked by the FPS limiter.
     if (!g_flush_callback || !j2me_render_frame_due()) {
@@ -2787,6 +2798,7 @@ void j2me_render_cleanup(void) {
     // Clear callbacks before a new session registers its callbacks.
     g_flush_callback = NULL;
     g_flush_ready_callback = NULL;
+    g_active_render_jvm = NULL;
 
     // Stop haptic engine.
     if (@available(iOS 13.0, *)) {

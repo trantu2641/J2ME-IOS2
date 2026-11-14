@@ -20,6 +20,7 @@
 #include <pthread.h>
 #include <time.h>
 #include <dlfcn.h>
+#include <limits.h>
 
 #include <mach/mach.h>
 #include <mach/vm_map.h>
@@ -31,6 +32,131 @@
 
 static MiniJVM *g_jvm = NULL;
 static atomic_int g_jvm_stop_requested = 0;
+
+
+// ============================================================
+// Multi-session runtime manager
+// ============================================================
+
+#define J2ME_MAX_SESSIONS 16
+
+typedef struct J2MESession {
+    int id;
+    int used;
+    MiniJVM *jvm;
+    pthread_t runner;
+    int runner_valid;
+    atomic_int stop_requested;
+    atomic_int running;
+    char res_root[PATH_MAX];
+    char save_root[PATH_MAX];
+    char jar_path[PATH_MAX];
+} J2MESession;
+
+static J2MESession g_sessions[J2ME_MAX_SESSIONS];
+static pthread_mutex_t g_sessions_lock = PTHREAD_MUTEX_INITIALIZER;
+static MiniJVM *g_active_session_jvm = NULL;
+
+static J2MESession *session_find_locked(int id) {
+    if (id < 1 || id > J2ME_MAX_SESSIONS) return NULL;
+    J2MESession *s = &g_sessions[id - 1];
+    return s->used ? s : NULL;
+}
+
+static J2MESession *session_find_by_vm_locked(MiniJVM *jvm) {
+    if (!jvm) return NULL;
+    for (int i = 0; i < J2ME_MAX_SESSIONS; i++) {
+        if (g_sessions[i].used && g_sessions[i].jvm == jvm) {
+            return &g_sessions[i];
+        }
+    }
+    return NULL;
+}
+
+static void session_configure_jvm(
+    MiniJVM *jvm,
+    const char *save_root,
+    int screen_width,
+    int screen_height,
+    int render_3d_scale,
+    int fps_limit
+) {
+    jvm->jdwp_enable = 0;
+    jvm->jdwp_suspend_on_start = 0;
+    jvm->max_heap_size = 128 * 1024 * 1024;
+    jvm->garbage_collect_period_ms = 2000;
+    jvm->heap_overload_percent = 70;
+
+    j2me_render_reg_natives(jvm);
+    j2me_input_reg_natives(jvm);
+    j2me_ui_reg_natives(jvm);
+    j2me_audio_reg_natives(jvm);
+    j2me_micro3d_gl_reg_natives(jvm);
+    j2me_m3g_reg_natives(jvm);
+
+    sys_properties_set_c(jvm, "os.name", "iOS");
+    sys_properties_set_c(jvm, "app.save.root", save_root);
+    sys_properties_set_c(jvm, "microedition.platform", "Apple/iPhone");
+    sys_properties_set_c(jvm, "microedition.encoding", "UTF-8");
+    sys_properties_set_c(jvm, "microedition.locale", "en");
+    sys_properties_set_c(jvm, "microedition.profiles", "MIDP-2.0");
+    sys_properties_set_c(jvm, "microedition.configuration", "CLDC-1.1");
+
+    char sw[16], sh[16], ss[8];
+    snprintf(sw, sizeof(sw), "%d", screen_width);
+    snprintf(sh, sizeof(sh), "%d", screen_height);
+    snprintf(ss, sizeof(ss), "%d", render_3d_scale > 0 ? render_3d_scale : 1);
+
+    sys_properties_set_c(jvm, "j2me.screen.width", sw);
+    sys_properties_set_c(jvm, "j2me.screen.height", sh);
+    sys_properties_set_c(jvm, "micro3d.v3.fbo.scale", ss);
+
+    if (fps_limit > 0) {
+        char fl[8];
+        snprintf(fl, sizeof(fl), "%d", fps_limit);
+        sys_properties_set_c(jvm, "j2me.fps.limit", fl);
+    }
+}
+
+static void *session_runner_main(void *arg) {
+    J2MESession *s = (J2MESession *)arg;
+    if (!s) return NULL;
+
+    pthread_setname_np("J2ME-MIDlet");
+    atomic_store(&s->running, 1);
+
+    printf("[JVM Session %d] Starting MIDlet: %s\n", s->id, s->jar_path);
+
+    char *manifest = load_midlet_manifest(s->jar_path);
+    if (!manifest) {
+        printf("[JVM Session %d] ERROR: Manifest extraction failed\n", s->id);
+        atomic_store(&s->running, 0);
+        return NULL;
+    }
+
+    ArrayList *java_para = arraylist_create(0);
+    if (!java_para) {
+        free(manifest);
+        atomic_store(&s->running, 0);
+        return NULL;
+    }
+
+    arraylist_push_back(java_para, (void *)s->jar_path);
+    arraylist_push_back(java_para, (void *)manifest);
+
+    s32 ret = call_main(
+        s->jvm,
+        (c8 *)"javax/microedition/shell/MIDletRunner",
+        java_para
+    );
+
+    arraylist_destroy(java_para);
+    free(manifest);
+
+    printf("[JVM Session %d] MIDlet finished with code %d\n", s->id, ret);
+    atomic_store(&s->running, 0);
+    return NULL;
+}
 
 static int g_saved_stdout = -1;
 static int g_saved_stderr = -1;
@@ -1415,6 +1541,196 @@ int jvm_bridge_run_midlet(const char *midlet_jar_path) {
     return ret;
 }
 
+
+
+// ============================================================
+// Multi-session API
+// ============================================================
+
+int jvm_bridge_session_create(
+    const char *res_root,
+    const char *save_root,
+    const char *midlet_jar,
+    int screen_width,
+    int screen_height,
+    int render_3d_scale,
+    int fps_limit
+) {
+    if (!res_root || !save_root || !midlet_jar) return -1000;
+
+    pthread_mutex_lock(&g_sessions_lock);
+
+    J2MESession *s = NULL;
+    for (int i = 0; i < J2ME_MAX_SESSIONS; i++) {
+        if (!g_sessions[i].used) {
+            s = &g_sessions[i];
+            memset(s, 0, sizeof(*s));
+            s->id = i + 1;
+            s->used = 1;
+            atomic_init(&s->stop_requested, 0);
+            atomic_init(&s->running, 0);
+            break;
+        }
+    }
+
+    pthread_mutex_unlock(&g_sessions_lock);
+
+    if (!s) return -1001;
+
+    snprintf(s->res_root, sizeof(s->res_root), "%s", res_root);
+    snprintf(s->save_root, sizeof(s->save_root), "%s", save_root);
+    snprintf(s->jar_path, sizeof(s->jar_path), "%s", midlet_jar);
+
+    char bootclasspath[PATH_MAX * 2];
+    char classpath[PATH_MAX * 3];
+    snprintf(bootclasspath, sizeof(bootclasspath), "%s/minijvm_rt.jar", res_root);
+    snprintf(classpath, sizeof(classpath), "%s/j2me_api.jar:%s", res_root, midlet_jar);
+
+    s->jvm = jvm_create();
+    if (!s->jvm) {
+        pthread_mutex_lock(&g_sessions_lock);
+        s->used = 0;
+        pthread_mutex_unlock(&g_sessions_lock);
+        return -1002;
+    }
+
+    s32 ret = jvm_init(s->jvm, (c8 *)bootclasspath, (c8 *)classpath);
+    if (ret) {
+        printf("[JVM Session %d] jvm_init failed: %d\n", s->id, ret);
+        jvm_destroy(s->jvm);
+        s->jvm = NULL;
+        pthread_mutex_lock(&g_sessions_lock);
+        s->used = 0;
+        pthread_mutex_unlock(&g_sessions_lock);
+        return -1003;
+    }
+
+    session_configure_jvm(
+        s->jvm,
+        save_root,
+        screen_width,
+        screen_height,
+        render_3d_scale,
+        fps_limit
+    );
+
+    printf("[JVM Session %d] JVM initialized: %dx%d\n",
+           s->id, screen_width, screen_height);
+
+    return s->id;
+}
+
+int jvm_bridge_session_start(int session_id) {
+    pthread_mutex_lock(&g_sessions_lock);
+    J2MESession *s = session_find_locked(session_id);
+    if (!s || !s->jvm) {
+        pthread_mutex_unlock(&g_sessions_lock);
+        return -1100;
+    }
+    if (s->runner_valid || atomic_load(&s->running)) {
+        pthread_mutex_unlock(&g_sessions_lock);
+        return 0;
+    }
+    atomic_store(&s->stop_requested, 0);
+    int rc = pthread_create(&s->runner, NULL, session_runner_main, s);
+    if (rc == 0) s->runner_valid = 1;
+    pthread_mutex_unlock(&g_sessions_lock);
+    return rc == 0 ? 0 : -1101;
+}
+
+void jvm_bridge_session_set_active(int session_id) {
+    pthread_mutex_lock(&g_sessions_lock);
+    J2MESession *s = session_find_locked(session_id);
+    g_active_session_jvm = s ? s->jvm : NULL;
+    pthread_mutex_unlock(&g_sessions_lock);
+
+    j2me_render_set_active_jvm(g_active_session_jvm);
+    j2me_input_set_active_jvm(g_active_session_jvm);
+}
+
+int jvm_bridge_session_is_running(int session_id) {
+    pthread_mutex_lock(&g_sessions_lock);
+    J2MESession *s = session_find_locked(session_id);
+    int result = s ? atomic_load(&s->running) : 0;
+    pthread_mutex_unlock(&g_sessions_lock);
+    return result;
+}
+
+void jvm_bridge_session_request_stop(int session_id) {
+    pthread_mutex_lock(&g_sessions_lock);
+    J2MESession *s = session_find_locked(session_id);
+    if (s) {
+        atomic_store(&s->stop_requested, 1);
+        if (s->jvm && s->jvm->collector) {
+            s->jvm->collector->exit_flag = 1;
+        }
+    }
+    pthread_mutex_unlock(&g_sessions_lock);
+}
+
+void jvm_bridge_session_destroy(int session_id) {
+    pthread_mutex_lock(&g_sessions_lock);
+    J2MESession *s = session_find_locked(session_id);
+    if (!s) {
+        pthread_mutex_unlock(&g_sessions_lock);
+        return;
+    }
+
+    if (s->jvm == g_active_session_jvm) {
+        g_active_session_jvm = NULL;
+        j2me_render_set_active_jvm(NULL);
+        j2me_input_set_active_jvm(NULL);
+    }
+
+    pthread_mutex_unlock(&g_sessions_lock);
+
+    jvm_bridge_session_request_stop(session_id);
+
+    pthread_mutex_lock(&g_sessions_lock);
+    s = session_find_locked(session_id);
+    if (!s) {
+        pthread_mutex_unlock(&g_sessions_lock);
+        return;
+    }
+    MiniJVM *jvm = s->jvm;
+    pthread_t runner = s->runner;
+    int runner_valid = s->runner_valid;
+    pthread_mutex_unlock(&g_sessions_lock);
+
+    if (runner_valid && !pthread_equal(pthread_self(), runner)) {
+        pthread_join(runner, NULL);
+    }
+
+    if (jvm) {
+        jvm_destroy(jvm);
+    }
+
+    j2me_input_remove_jvm(jvm);
+
+    pthread_mutex_lock(&g_sessions_lock);
+    s = session_find_locked(session_id);
+    if (s) {
+        memset(s, 0, sizeof(*s));
+    }
+    pthread_mutex_unlock(&g_sessions_lock);
+}
+
+void jvm_bridge_session_destroy_all(void) {
+    for (int i = 1; i <= J2ME_MAX_SESSIONS; i++) {
+        jvm_bridge_session_destroy(i);
+    }
+
+    j2me_render_stop();
+    j2me_render_cleanup();
+}
+
+int jvm_bridge_is_stop_requested_for_vm(MiniJVM *jvm) {
+    pthread_mutex_lock(&g_sessions_lock);
+    J2MESession *s = session_find_by_vm_locked(jvm);
+    int result = s ? atomic_load(&s->stop_requested) : 0;
+    pthread_mutex_unlock(&g_sessions_lock);
+    return result;
+}
 
 // ============================================================
 // Destroy

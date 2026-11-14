@@ -26,6 +26,9 @@ void j2me_render_set_flush_callback(j2me_flush_callback callback);
 /// Set the callback used to avoid creating frames that cannot be displayed.
 void j2me_render_set_flush_ready_callback(j2me_flush_ready_callback callback);
 
+/// Set the MiniJVM whose framebuffer may be presented to UIKit.
+void j2me_render_set_active_jvm(MiniJVM *jvm);
+
 /// Set maximum framebuffer export rate.
 /// Values <= 0 mean unlimited. Positive values are capped at 45 FPS.
 void j2me_render_set_fps_limit(int fps);
