@@ -131,9 +131,6 @@ final class GameViewController:
     private let systemKeyboardButton =
         UIButton(type: .system)
 
-    private let exitButton =
-        UIButton(type: .system)
-
     private let moreButton =
         UIButton(type: .system)
 
@@ -429,12 +426,6 @@ final class GameViewController:
         )
 
         configureHeaderButton(
-            exitButton,
-            symbol: "xmark",
-            accessibility: "Exit emulator"
-        )
-
-        configureHeaderButton(
             moreButton,
             symbol: "ellipsis",
             accessibility: "More options"
@@ -461,12 +452,6 @@ final class GameViewController:
         systemKeyboardButton.addTarget(
             self,
             action: #selector(toggleSystemKeyboard),
-            for: .touchUpInside
-        )
-
-        exitButton.addTarget(
-            self,
-            action: #selector(backTapped),
             for: .touchUpInside
         )
 
@@ -509,9 +494,8 @@ final class GameViewController:
         headerStack.addArrangedSubview(addJarButton)
         headerStack.addArrangedSubview(removeJarButton)
         headerStack.addArrangedSubview(toggleKeypadButton)
-        headerStack.addArrangedSubview(moreButton)
         headerStack.addArrangedSubview(systemKeyboardButton)
-        headerStack.addArrangedSubview(exitButton)
+        headerStack.addArrangedSubview(moreButton)
 
         view.addSubview(headerStack)
     }
@@ -737,59 +721,105 @@ final class GameViewController:
     private func showJarPicker() {
         if jarPickerOverlay != nil { return }
 
-        let overlay = UIView()
-        overlay.backgroundColor = UIColor(white: 0.04, alpha: 0.98)
+        // JAR picker uses the same centered modal style as the three-dot menu.
+        let overlay = UIControl()
+        overlay.backgroundColor = UIColor.black.withAlphaComponent(0.28)
         overlay.translatesAutoresizingMaskIntoConstraints = false
+        overlay.addTarget(
+            self,
+            action: #selector(closeJarPicker),
+            for: .touchUpInside
+        )
+
+        let panel = UIView()
+        panel.backgroundColor = UIColor.black.withAlphaComponent(0.86)
+        panel.layer.cornerRadius = 20
+        panel.layer.masksToBounds = true
+        panel.translatesAutoresizingMaskIntoConstraints = false
 
         let title = UILabel()
         title.text = "DANH SÁCH JAR"
         title.textColor = .white
-        title.font = .systemFont(ofSize: 20, weight: .bold)
+        title.font = .systemFont(ofSize: 21, weight: .semibold)
         title.textAlignment = .center
         title.translatesAutoresizingMaskIntoConstraints = false
 
         let table = UITableView(frame: .zero, style: .plain)
         table.backgroundColor = .clear
-        table.separatorColor = UIColor(white: 0.25, alpha: 1)
+        table.separatorColor = UIColor(white: 0.35, alpha: 0.55)
+        table.separatorInset = UIEdgeInsets(top: 0, left: 18, bottom: 0, right: 18)
+        table.showsVerticalScrollIndicator = true
+        table.alwaysBounceVertical = true
         table.translatesAutoresizingMaskIntoConstraints = false
         table.register(J2MEJarPickerCell.self, forCellReuseIdentifier: "jar")
         table.dataSource = self
         table.delegate = self
 
         let exit = UIButton(type: .system)
-        exit.setTitle("THOÁT", for: .normal)
-        exit.setTitleColor(.white, for: .normal)
-        exit.titleLabel?.font = .systemFont(ofSize: 17, weight: .semibold)
-        exit.backgroundColor = UIColor(white: 0.16, alpha: 1)
-        exit.layer.cornerRadius = 10
-        exit.addTarget(self, action: #selector(closeJarPicker), for: .touchUpInside)
+        exit.setTitle("HỦY", for: .normal)
+        exit.setTitleColor(.systemBlue, for: .normal)
+        exit.titleLabel?.font = .systemFont(ofSize: 22, weight: .regular)
+        exit.contentHorizontalAlignment = .center
+        exit.backgroundColor = .clear
+        exit.addTarget(
+            self,
+            action: #selector(closeJarPicker),
+            for: .touchUpInside
+        )
         exit.translatesAutoresizingMaskIntoConstraints = false
 
-        overlay.addSubview(title)
-        overlay.addSubview(table)
-        overlay.addSubview(exit)
+        panel.addSubview(title)
+        panel.addSubview(table)
+        panel.addSubview(exit)
         view.addSubview(overlay)
+        view.addSubview(panel)
+
+        let panelWidth = min(view.bounds.width - 48, 520)
+        let panelHeight = min(max(300, view.bounds.height * 0.62), 620)
 
         NSLayoutConstraint.activate([
-            title.topAnchor.constraint(equalTo: overlay.safeAreaLayoutGuide.topAnchor, constant: 14),
-            title.leadingAnchor.constraint(equalTo: overlay.leadingAnchor, constant: 20),
-            title.trailingAnchor.constraint(equalTo: overlay.trailingAnchor, constant: -20),
-            title.heightAnchor.constraint(equalToConstant: 32),
+            overlay.topAnchor.constraint(equalTo: view.topAnchor),
+            overlay.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            overlay.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            overlay.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+
+            panel.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            panel.centerYAnchor.constraint(equalTo: view.centerYAnchor),
+            panel.widthAnchor.constraint(equalToConstant: panelWidth),
+            panel.heightAnchor.constraint(equalToConstant: panelHeight),
+
+            title.topAnchor.constraint(equalTo: panel.topAnchor, constant: 18),
+            title.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 18),
+            title.trailingAnchor.constraint(equalTo: panel.trailingAnchor, constant: -18),
+            title.heightAnchor.constraint(equalToConstant: 34),
 
             table.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 12),
-            table.leadingAnchor.constraint(equalTo: overlay.leadingAnchor, constant: 12),
-            table.trailingAnchor.constraint(equalTo: overlay.trailingAnchor, constant: -12),
-            table.bottomAnchor.constraint(equalTo: exit.topAnchor, constant: -12),
+            table.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 10),
+            table.trailingAnchor.constraint(equalTo: panel.trailingAnchor, constant: -10),
+            table.bottomAnchor.constraint(equalTo: exit.topAnchor, constant: -4),
 
-            exit.leadingAnchor.constraint(equalTo: overlay.leadingAnchor, constant: 20),
-            exit.trailingAnchor.constraint(equalTo: overlay.trailingAnchor, constant: -20),
-            exit.bottomAnchor.constraint(equalTo: overlay.safeAreaLayoutGuide.bottomAnchor, constant: -12),
-            exit.heightAnchor.constraint(equalToConstant: 48)
+            exit.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 10),
+            exit.trailingAnchor.constraint(equalTo: panel.trailingAnchor, constant: -10),
+            exit.bottomAnchor.constraint(equalTo: panel.bottomAnchor, constant: -8),
+            exit.heightAnchor.constraint(equalToConstant: 58)
         ])
 
         jarPickerOverlay = overlay
         jarPickerTableView = table
         table.reloadData()
+
+        overlay.alpha = 0
+        panel.alpha = 0
+        panel.transform = CGAffineTransform(scaleX: 0.94, y: 0.94)
+
+        UIView.animate(
+            withDuration: 0.16,
+            animations: {
+                overlay.alpha = 1
+                panel.alpha = 1
+                panel.transform = .identity
+            }
+        )
     }
 
     @objc private func closeJarPicker() {
@@ -2032,9 +2062,6 @@ final class GameViewController:
 
         keypadBottomConstraint.constant =
             -7
-
-        exitButton.isEnabled =
-            false
 
         jvm_bridge_session_destroy_all()
 
