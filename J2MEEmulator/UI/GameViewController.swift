@@ -124,6 +124,7 @@ final class GameViewController:
     private var jarPickerTableView: UITableView?
     private var jarPickerMessageLabel: UILabel?
     private var jarPickerMessageWork: DispatchWorkItem?
+    private var jarPickerItems: [(name: String, path: String, icon: UIImage)] = []
 
     private let titleLabel =
         UILabel()
@@ -880,7 +881,7 @@ final class GameViewController:
         let title = UILabel()
         title.text = "DANH SÁCH JAR"
         title.textColor = uiPrimaryTextColor
-        title.font = .systemFont(ofSize: 21, weight: .semibold)
+        title.font = .systemFont(ofSize: 18, weight: .semibold)
         title.textAlignment = .center
         title.translatesAutoresizingMaskIntoConstraints = false
 
@@ -898,7 +899,7 @@ final class GameViewController:
         let exit = UIButton(type: .system)
         exit.setTitle("HỦY", for: .normal)
         exit.setTitleColor(.systemBlue, for: .normal)
-        exit.titleLabel?.font = .systemFont(ofSize: 22, weight: .regular)
+        exit.titleLabel?.font = .systemFont(ofSize: 17, weight: .regular)
         exit.contentHorizontalAlignment = .center
         exit.backgroundColor = .clear
         exit.addTarget(
@@ -947,6 +948,10 @@ final class GameViewController:
         jarPickerOverlay = overlay
         jarPickerPanel = panel
         jarPickerTableView = table
+
+        // Scan the JAR directory only once when the picker opens.
+        // UITableView callbacks must not rescan the filesystem while scrolling.
+        jarPickerItems = scanInstalledJARs()
         table.reloadData()
 
         overlay.alpha = 0
@@ -978,6 +983,7 @@ final class GameViewController:
             table.removeFromSuperview()
         }
         jarPickerTableView = nil
+        jarPickerItems.removeAll()
 
         if let panel = jarPickerPanel {
             panel.layer.removeAllAnimations()
@@ -1851,9 +1857,11 @@ final class GameViewController:
         keypadCollapsedConstraint.isActive =
             !shouldShow
 
+        // The keyboard icon follows the J2ME UI appearance instead of
+        // forcing white in Light mode.
         toggleKeypadButton.tintColor =
             shouldShow
-            ? .white
+            ? uiPrimaryTextColor
             : .systemGreen
 
         let changes = {
@@ -2452,19 +2460,19 @@ private final class J2MEJarPickerCell: UITableViewCell {
         iconView.contentMode = .scaleAspectFit
         iconView.translatesAutoresizingMaskIntoConstraints = false
         nameLabel.textColor = .label
-        nameLabel.font = .systemFont(ofSize: 16, weight: .medium)
+        nameLabel.font = .systemFont(ofSize: 14, weight: .medium)
         nameLabel.translatesAutoresizingMaskIntoConstraints = false
         contentView.addSubview(iconView)
         contentView.addSubview(nameLabel)
         NSLayoutConstraint.activate([
             iconView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 8),
             iconView.centerYAnchor.constraint(equalTo: contentView.centerYAnchor),
-            iconView.widthAnchor.constraint(equalToConstant: 44),
-            iconView.heightAnchor.constraint(equalToConstant: 44),
+            iconView.widthAnchor.constraint(equalToConstant: 36),
+            iconView.heightAnchor.constraint(equalToConstant: 36),
             nameLabel.leadingAnchor.constraint(equalTo: iconView.trailingAnchor, constant: 12),
             nameLabel.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -12),
             nameLabel.centerYAnchor.constraint(equalTo: contentView.centerYAnchor),
-            contentView.heightAnchor.constraint(greaterThanOrEqualToConstant: 58)
+            contentView.heightAnchor.constraint(greaterThanOrEqualToConstant: 48)
         ])
     }
 
@@ -2473,25 +2481,27 @@ private final class J2MEJarPickerCell: UITableViewCell {
 
 extension GameViewController: UITableViewDataSource, UITableViewDelegate {
     func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
-        scanInstalledJARs().count
+        jarPickerItems.count
     }
 
     func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
-        let items = scanInstalledJARs()
+        guard indexPath.row >= 0, indexPath.row < jarPickerItems.count else {
+            return UITableViewCell()
+        }
+
         let cell = tableView.dequeueReusableCell(withIdentifier: "jar", for: indexPath) as! J2MEJarPickerCell
-        let item = items[indexPath.row]
+        let item = jarPickerItems[indexPath.row]
         cell.nameLabel.text = item.name
         cell.iconView.image = item.icon
         return cell
     }
 
     func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
-        let items = scanInstalledJARs()
-        guard indexPath.row >= 0, indexPath.row < items.count else {
+        guard indexPath.row >= 0, indexPath.row < jarPickerItems.count else {
             return
         }
 
-        let item = items[indexPath.row]
+        let item = jarPickerItems[indexPath.row]
 
         let normalizedPath =
             URL(fileURLWithPath: item.path)
