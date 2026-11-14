@@ -13,6 +13,7 @@ int j2me_ui_get_form_item_count(void);
 int j2me_ui_get_form_item_type(int index);
 const char *j2me_ui_get_form_item_label(int index);
 const char *j2me_ui_get_form_item_text(int index);
+int j2me_ui_get_form_item_param2(int index);
 int j2me_ui_get_form_item_param1(int index);
 int j2me_ui_get_command_count(void);
 const char *j2me_ui_get_command_label(int index);
