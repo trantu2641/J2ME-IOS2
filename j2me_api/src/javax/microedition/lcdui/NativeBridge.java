@@ -60,6 +60,7 @@ public class NativeBridge {
     public static native void formBegin(String title, int type);
     public static native void formAddStringItem(String label, String text, int appearance);
     public static native void formAddTextField(String label, String text, int maxSize, int constraints);
+    public static native void formAddChoiceItem(String label, String text, boolean selected, int choiceType);
     public static native void formAddCommand(String label, int type, int priority, int id);
     public static native void formShow();
     public static native void showCanvas();
