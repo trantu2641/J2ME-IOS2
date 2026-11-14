@@ -120,8 +120,9 @@ final class GameViewController:
     private var runningSessions: [J2MERunningSession] = []
     private var activeSessionIndex = 0
     private var jarPickerOverlay: UIView?
-    private var jarPickerPanel: UIView?
     private var jarPickerTableView: UITableView?
+    private var jarPickerMessageLabel: UILabel?
+    private var jarPickerMessageWork: DispatchWorkItem?
 
     private let titleLabel =
         UILabel()
@@ -564,7 +565,7 @@ final class GameViewController:
             button.addTarget(self, action: #selector(tabTapped(_:)), for: .touchUpInside)
             button.translatesAutoresizingMaskIntoConstraints = false
             NSLayoutConstraint.activate([
-                button.widthAnchor.constraint(equalToConstant: 38),
+                button.widthAnchor.constraint(equalToConstant: 31),
                 button.heightAnchor.constraint(equalToConstant: 34)
             ])
             tabStack.addArrangedSubview(button)
@@ -806,7 +807,6 @@ final class GameViewController:
         ])
 
         jarPickerOverlay = overlay
-        jarPickerPanel = panel
         jarPickerTableView = table
         table.reloadData()
 
@@ -824,12 +824,64 @@ final class GameViewController:
         )
     }
 
+    private func showJarPickerMessage(_ message: String) {
+        jarPickerMessageWork?.cancel()
+
+        if jarPickerMessageLabel == nil {
+            let label = UILabel()
+            label.textColor = .white
+            label.backgroundColor = UIColor(white: 0.12, alpha: 0.96)
+            label.font = .systemFont(ofSize: 15, weight: .medium)
+            label.textAlignment = .center
+            label.numberOfLines = 1
+            label.layer.cornerRadius = 10
+            label.layer.masksToBounds = true
+            label.translatesAutoresizingMaskIntoConstraints = false
+            view.addSubview(label)
+
+            NSLayoutConstraint.activate([
+                label.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+                label.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -24),
+                label.leadingAnchor.constraint(greaterThanOrEqualTo: view.leadingAnchor, constant: 30),
+                label.trailingAnchor.constraint(lessThanOrEqualTo: view.trailingAnchor, constant: -30),
+                label.heightAnchor.constraint(equalToConstant: 42)
+            ])
+
+            jarPickerMessageLabel = label
+        }
+
+        guard let label = jarPickerMessageLabel else { return }
+        label.text = message
+        label.alpha = 0
+
+        UIView.animate(withDuration: 0.15) {
+            label.alpha = 1
+        }
+
+        let work = DispatchWorkItem { [weak self, weak label] in
+            UIView.animate(withDuration: 0.15, animations: {
+                label?.alpha = 0
+            }, completion: { _ in
+                label?.removeFromSuperview()
+                if self?.jarPickerMessageLabel === label {
+                    self?.jarPickerMessageLabel = nil
+                }
+            })
+        }
+
+        jarPickerMessageWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0, execute: work)
+    }
+
     @objc private func closeJarPicker() {
+        jarPickerMessageWork?.cancel()
+        jarPickerMessageWork = nil
+        jarPickerMessageLabel?.removeFromSuperview()
+        jarPickerMessageLabel = nil
+
         jarPickerTableView?.delegate = nil
         jarPickerTableView?.dataSource = nil
         jarPickerTableView = nil
-        jarPickerPanel?.removeFromSuperview()
-        jarPickerPanel = nil
         jarPickerOverlay?.removeFromSuperview()
         jarPickerOverlay = nil
     }
@@ -2316,6 +2368,16 @@ extension GameViewController: UITableViewDataSource, UITableViewDelegate {
 
     func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         let item = scanInstalledJARs()[indexPath.row]
+
+        let normalizedPath = URL(fileURLWithPath: item.path).standardizedFileURL.path
+        if runningSessions.contains(where: {
+            URL(fileURLWithPath: $0.path).standardizedFileURL.path == normalizedPath
+        }) {
+            showJarPickerMessage("JAR này đang được mở")
+            tableView.deselectRow(at: indexPath, animated: true)
+            return
+        }
+
         closeJarPicker()
 
         let resolution = UserDefaults.standard.object(forKey: "resW_\(gameID(forPath: item.path))") as? Int ?? 240
