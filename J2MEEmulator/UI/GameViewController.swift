@@ -258,8 +258,8 @@ final class GameViewController:
 
         super.viewDidLoad()
 
-        // Dynamic only for the emulator's surrounding UI. The JAR framebuffer
-        // itself is rendered separately and is never recolored.
+        // Dynamic only for the emulator's surrounding UI.
+        // The JAR framebuffer itself is rendered separately and is never recolored.
         view.backgroundColor = UIColor { trait in
             trait.userInterfaceStyle == .dark
                 ? .black
@@ -459,14 +459,13 @@ final class GameViewController:
     }
 
     private func applyJ2MEInterfaceStyle() {
-        // Only update surrounding UI/viewport backgrounds. The JAR framebuffer
-        // image itself is never recolored.
+        // Only update the surrounding UI/viewport backgrounds.
+        // The JAR framebuffer image itself is never recolored.
         view.backgroundColor = UIColor { trait in
             trait.userInterfaceStyle == .dark
                 ? .black
                 : .systemBackground
         }
-
         addJarButton.backgroundColor = j2meControlColor
         removeJarButton.backgroundColor = j2meControlColor
         toggleKeypadButton.backgroundColor = j2meControlColor
@@ -1271,9 +1270,8 @@ final class GameViewController:
         emulatorView.translatesAutoresizingMaskIntoConstraints =
             false
 
-        // EmulatorView owns the actual JAR viewport background. Keep this
-        // dynamic as well so any tiny area outside that viewport follows
-        // Light/Dark mode without touching the JAR framebuffer.
+        // Keep the surrounding viewport dynamic as well.
+        // The JAR framebuffer image itself is never recolored.
         emulatorView.backgroundColor = UIColor { trait in
             trait.userInterfaceStyle == .dark
                 ? .black
