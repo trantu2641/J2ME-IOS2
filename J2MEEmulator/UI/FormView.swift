@@ -1,4 +1,3 @@
-
 //
 //  FormView.swift
 //  J2MEEmulator
@@ -16,9 +15,10 @@ class FormView: UIView, UIGestureRecognizerDelegate {
     private var commandButtons: [UIButton] = []
     private let commandBar = UIStackView()
 
-    // Native-form item tracking. The index is the serialized J2ME form-item
-    // index used by j2me_ui.m, so edited UIKit values can be committed back
-    // to the live Java Form/ChoiceGroup/TextField before the command event.
+    // Native-form item tracking.
+    // The index is the serialized J2ME form-item index used by j2me_ui.m,
+    // so edited UIKit values can be committed back to the live Java
+    // Form/ChoiceGroup/TextField before the command event.
     private struct ChoiceControl {
         let nativeIndex: Int
         let groupID: Int
@@ -95,8 +95,12 @@ class FormView: UIView, UIGestureRecognizerDelegate {
                 equalTo: titleLabel.bottomAnchor,
                 constant: 8
             ),
-            scrollView.leadingAnchor.constraint(equalTo: leadingAnchor),
-            scrollView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            scrollView.leadingAnchor.constraint(
+                equalTo: leadingAnchor
+            ),
+            scrollView.trailingAnchor.constraint(
+                equalTo: trailingAnchor
+            ),
             scrollView.bottomAnchor.constraint(
                 equalTo: commandBar.topAnchor,
                 constant: -8
@@ -223,27 +227,46 @@ class FormView: UIView, UIGestureRecognizerDelegate {
             )
 
             switch itemType {
+
             case 0:
-                addStringItem(label: label, text: text)
+                // STRING
+                addStringItem(
+                    label: label,
+                    text: text
+                )
+
+                previousWasChoice = false
 
             case 1:
+                // TEXTFIELD
                 addTextField(
                     label: label,
                     text: text,
                     nativeIndex: i,
-                    constraints: j2me_ui_get_form_item_param2(Int32(i))
+                    constraints: j2me_ui_get_form_item_param2(
+                        Int32(i)
+                    )
                 )
+
                 previousWasChoice = false
 
             case 2:
-                // J2ME choiceType: EXCLUSIVE=1, MULTIPLE=2.
-                // EXCLUSIVE -> radio button; MULTIPLE -> checkbox.
-                let choiceType = j2me_ui_get_form_item_param1(Int32(i))
-                let selected = j2me_ui_get_form_item_param2(Int32(i)) != 0
+                // CHOICEGROUP
+                //
+                // J2ME choiceType:
+                // EXCLUSIVE = 1
+                // MULTIPLE  = 2
+
+                let choiceType =
+                    j2me_ui_get_form_item_param1(Int32(i))
+
+                let selected =
+                    j2me_ui_get_form_item_param2(Int32(i)) != 0
 
                 if !previousWasChoice ||
                     label != lastChoiceLabel ||
                     choiceType != lastChoiceType {
+
                     nextChoiceGroupID += 1
                 }
 
@@ -261,7 +284,11 @@ class FormView: UIView, UIGestureRecognizerDelegate {
                 previousWasChoice = true
 
             default:
-                addStringItem(label: label, text: text)
+                addStringItem(
+                    label: label,
+                    text: text
+                )
+
                 previousWasChoice = false
             }
         }
@@ -274,17 +301,33 @@ class FormView: UIView, UIGestureRecognizerDelegate {
                 cString: j2me_ui_get_command_label(Int32(i))
             )
 
-            let cmdId = j2me_ui_get_command_id(Int32(i))
-            let cmdType = j2me_ui_get_command_type(Int32(i))
+            let cmdId =
+                j2me_ui_get_command_id(Int32(i))
+
+            let cmdType =
+                j2me_ui_get_command_type(Int32(i))
 
             let btn = UIButton(type: .system)
-            btn.accessibilityIdentifier = "j2me-command-type-\(cmdType)"
 
-            btn.setTitle(cmdLabel, for: .normal)
-            btn.titleLabel?.font = .boldSystemFont(ofSize: 16)
+            btn.accessibilityIdentifier =
+                "j2me-command-type-\(cmdType)"
+
+            btn.setTitle(
+                cmdLabel,
+                for: .normal
+            )
+
+            btn.titleLabel?.font =
+                .boldSystemFont(ofSize: 16)
+
             btn.tag = Int(cmdId)
+
             btn.backgroundColor = .systemBlue
-            btn.setTitleColor(.white, for: .normal)
+            btn.setTitleColor(
+                .white,
+                for: .normal
+            )
+
             btn.layer.cornerRadius = 8
 
             btn.addTarget(
@@ -310,17 +353,22 @@ class FormView: UIView, UIGestureRecognizerDelegate {
 
         if !label.isEmpty {
             let labelView = UILabel()
+
             labelView.text = label
-            labelView.font = .boldSystemFont(ofSize: 14)
-            labelView.textColor = .secondaryLabel
+            labelView.font =
+                .boldSystemFont(ofSize: 14)
+            labelView.textColor =
+                .secondaryLabel
 
             container.addArrangedSubview(labelView)
         }
 
         if !text.isEmpty {
             let textView = UILabel()
+
             textView.text = text
-            textView.font = .systemFont(ofSize: 16)
+            textView.font =
+                .systemFont(ofSize: 16)
             textView.numberOfLines = 0
 
             container.addArrangedSubview(textView)
@@ -340,43 +388,108 @@ class FormView: UIView, UIGestureRecognizerDelegate {
         selected: Bool
     ) {
         let row = UIStackView()
+
         row.axis = .horizontal
         row.alignment = .center
         row.spacing = 10
-        row.layoutMargins = UIEdgeInsets(top: 4, left: 0, bottom: 4, right: 0)
+
+        row.layoutMargins = UIEdgeInsets(
+            top: 4,
+            left: 0,
+            bottom: 4,
+            right: 0
+        )
+
         row.isLayoutMarginsRelativeArrangement = true
 
         let button = UIButton(type: .system)
+
         button.accessibilityLabel = text
-        button.accessibilityValue = selected ? "Đã chọn" : "Chưa chọn"
-        button.titleLabel?.font = .systemFont(ofSize: 16, weight: .regular)
-        button.setTitle(text, for: .normal)
-        button.setTitleColor(.label, for: .normal)
-        button.contentHorizontalAlignment = .leading
+        button.accessibilityValue =
+            selected ? "Đã chọn" : "Chưa chọn"
+
+        button.titleLabel?.font =
+            .systemFont(
+                ofSize: 16,
+                weight: .regular
+            )
+
+        button.setTitle(
+            text,
+            for: .normal
+        )
+
+        button.setTitleColor(
+            .label,
+            for: .normal
+        )
+
+        button.contentHorizontalAlignment =
+            .leading
+
         button.titleLabel?.numberOfLines = 0
+
         button.tintColor = .systemBlue
-        button.semanticContentAttribute = .forceLeftToRight
-        button.imageEdgeInsets = UIEdgeInsets(top: 0, left: 0, bottom: 0, right: 8)
+
+        button.semanticContentAttribute =
+            .forceLeftToRight
+
+        button.imageEdgeInsets = UIEdgeInsets(
+            top: 0,
+            left: 0,
+            bottom: 0,
+            right: 8
+        )
+
         button.tag = selected ? 1 : 0
 
-        let isExclusive = (choiceType == 1)
+        let isExclusive =
+            choiceType == 1
+
         let symbol = selected
-            ? (isExclusive ? "largecircle.fill.circle" : "checkmark.square.fill")
-            : (isExclusive ? "circle" : "square")
-        button.setImage(UIImage(systemName: symbol), for: .normal)
+            ? (
+                isExclusive
+                ? "largecircle.fill.circle"
+                : "checkmark.square.fill"
+            )
+            : (
+                isExclusive
+                ? "circle"
+                : "square"
+            )
+
+        button.setImage(
+            UIImage(systemName: symbol),
+            for: .normal
+        )
 
         button.addAction(
             UIAction { [weak self, weak button] _ in
-                guard let self, let button else { return }
+                guard
+                    let self,
+                    let button
+                else {
+                    return
+                }
 
                 if isExclusive {
-                    // Only one option in this ChoiceGroup can remain selected.
-                    for control in self.choiceControls where
-                        control.groupID == groupID &&
-                        control.button !== button {
-                        self.setChoiceButton(control.button, selected: false)
+                    // Only one option in this ChoiceGroup
+                    // can remain selected.
+                    for control in self.choiceControls
+                        where control.groupID == groupID &&
+                              control.button !== button {
+
+                        self.setChoiceButton(
+                            control.button,
+                            selected: false
+                        )
                     }
-                    self.setChoiceButton(button, selected: true)
+
+                    self.setChoiceButton(
+                        button,
+                        selected: true
+                    )
+
                 } else {
                     self.setChoiceButton(
                         button,
@@ -398,30 +511,70 @@ class FormView: UIView, UIGestureRecognizerDelegate {
 
         if !label.isEmpty {
             let labelView = UILabel()
+
             labelView.text = label
-            labelView.font = .systemFont(ofSize: 14, weight: .medium)
-            labelView.textColor = .secondaryLabel
+            labelView.font =
+                .systemFont(
+                    ofSize: 14,
+                    weight: .medium
+                )
+
+            labelView.textColor =
+                .secondaryLabel
+
             labelView.numberOfLines = 0
-            labelView.setContentHuggingPriority(.defaultLow, for: .horizontal)
-            labelView.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+            labelView.setContentHuggingPriority(
+                .defaultLow,
+                for: .horizontal
+            )
+
+            labelView.setContentCompressionResistancePriority(
+                .defaultLow,
+                for: .horizontal
+            )
+
             row.addArrangedSubview(labelView)
         }
 
         row.addArrangedSubview(button)
+
         stackView.addArrangedSubview(row)
     }
 
-    private func setChoiceButton(_ button: UIButton, selected: Bool) {
+    private func setChoiceButton(
+        _ button: UIButton,
+        selected: Bool
+    ) {
         button.tag = selected ? 1 : 0
-        button.accessibilityValue = selected ? "Đã chọn" : "Chưa chọn"
 
-        let control = choiceControls.first { $0.button === button }
-        let isExclusive = control?.choiceType == 1
+        button.accessibilityValue =
+            selected ? "Đã chọn" : "Chưa chọn"
+
+        let control =
+            choiceControls.first {
+                $0.button === button
+            }
+
+        let isExclusive =
+            control?.choiceType == 1
+
         let symbol = selected
-            ? (isExclusive ? "largecircle.fill.circle" : "checkmark.square.fill")
-            : (isExclusive ? "circle" : "square")
+            ? (
+                isExclusive
+                ? "largecircle.fill.circle"
+                : "checkmark.square.fill"
+            )
+            : (
+                isExclusive
+                ? "circle"
+                : "square"
+            )
 
-        button.setImage(UIImage(systemName: symbol), for: .normal)
+        button.setImage(
+            UIImage(systemName: symbol),
+            for: .normal
+        )
     }
 
     // MARK: - Text field
@@ -433,44 +586,67 @@ class FormView: UIView, UIGestureRecognizerDelegate {
         constraints: Int32
     ) {
         let container = UIStackView()
+
         container.axis = .vertical
         container.spacing = 4
 
         if !label.isEmpty {
             let labelView = UILabel()
+
             labelView.text = label
-            labelView.font = .boldSystemFont(ofSize: 14)
-            labelView.textColor = .secondaryLabel
+            labelView.font =
+                .boldSystemFont(ofSize: 14)
+
+            labelView.textColor =
+                .secondaryLabel
+
             container.addArrangedSubview(labelView)
         }
 
         let tf = UITextField()
+
         tf.text = text
         tf.borderStyle = .roundedRect
         tf.font = .systemFont(ofSize: 16)
         tf.clearButtonMode = .whileEditing
 
-        let baseConstraint = Int(constraints) & 0xFFFF
-        let isPassword = (Int(constraints) & 0x10000) != 0
+        // J2ME TextField constraint values are packed here.
+        let baseConstraint =
+            Int(constraints) & 0xFFFF
+
+        let isPassword =
+            (Int(constraints) & 0x10000) != 0
 
         switch baseConstraint {
-        case 2: // TextField.NUMERIC
-            // iOS does not expose a literal J2ME T9 keyboard. Use the
-            // numeric phone-style keypad for numeric fields.
+
+        case 2:
+            // TextField.NUMERIC
+            // iOS does not expose a literal J2ME T9 keyboard.
+            // Use the numeric keypad.
             tf.keyboardType = .numberPad
-        case 3: // PHONENUMBER
+
+        case 3:
+            // PHONENUMBER
             tf.keyboardType = .phonePad
-        case 5: // DECIMAL
+
+        case 5:
+            // DECIMAL
             tf.keyboardType = .decimalPad
-        case 1: // EMAILADDR
+
+        case 1:
+            // EMAILADDR
             tf.keyboardType = .emailAddress
-        case 4: // URL
+
+        case 4:
+            // URL
             tf.keyboardType = .URL
+
         default:
             tf.keyboardType = .default
         }
 
-        tf.isSecureTextEntry = isPassword
+        tf.isSecureTextEntry =
+            isPassword
 
         tf.addTarget(
             self,
@@ -491,13 +667,40 @@ class FormView: UIView, UIGestureRecognizerDelegate {
 
     // MARK: - Commands
 
-    @objc private func commandTapped(_ sender: UIButton) {
-        // Commit the edited form state before the command reaches Java.
-        // Cancel/Back/Exit/Stop intentionally discard native edits.
-        let commandType = sender.accessibilityIdentifier?
-            .replacingOccurrences(of: "j2me-command-type-", with: "")
-            .flatMap { Int32($0) }
-            ?? 1
+    @objc private func commandTapped(
+        _ sender: UIButton
+    ) {
+        // Commit the edited form state before the command
+        // reaches Java.
+        //
+        // Cancel/Back/Exit/Stop intentionally discard
+        // native edits.
+
+        let commandType: Int32
+
+        if let identifier =
+            sender.accessibilityIdentifier {
+
+            let prefix =
+                "j2me-command-type-"
+
+            if identifier.hasPrefix(prefix) {
+                let value =
+                    String(
+                        identifier.dropFirst(
+                            prefix.count
+                        )
+                    )
+
+                commandType =
+                    Int32(value) ?? 1
+            } else {
+                commandType = 1
+            }
+
+        } else {
+            commandType = 1
+        }
 
         endEditing(true)
 
@@ -505,10 +708,12 @@ class FormView: UIView, UIGestureRecognizerDelegate {
             commandType != 3 && // CANCEL
             commandType != 6 && // STOP
             commandType != 7 {  // EXIT
+
             commitFormEdits()
         }
 
-        let cmdId = Int32(sender.tag)
+        let cmdId =
+            Int32(sender.tag)
 
         j2me_input_post_key(
             Int32(J2ME_UI_COMMAND_ACTION),
@@ -517,9 +722,12 @@ class FormView: UIView, UIGestureRecognizerDelegate {
     }
 
     private func commitFormEdits() {
+
         // TextField values
         for control in textControls {
-            let value = control.field.text ?? ""
+            let value =
+                control.field.text ?? ""
+
             j2me_ui_set_form_item_text(
                 Int32(control.nativeIndex),
                 value
@@ -528,14 +736,17 @@ class FormView: UIView, UIGestureRecognizerDelegate {
 
         // ChoiceGroup values
         for control in choiceControls {
-            let selected = control.button.tag == 1
+            let selected =
+                control.button.tag == 1
+
             j2me_ui_set_form_item_selected(
                 Int32(control.nativeIndex),
                 selected ? 1 : 0
             )
         }
 
-        // Type 13 is consumed by Display before the following command event.
+        // Type 13 is consumed by Display before
+        // the following command event.
         j2me_input_post_key(
             Int32(J2ME_UI_FORM_COMMIT),
             0
@@ -545,11 +756,12 @@ class FormView: UIView, UIGestureRecognizerDelegate {
     @objc private func textFieldChanged(
         _ sender: UITextField
     ) {
-        // The actual Java TextField update happens atomically on command
-        // commit, preserving the value seen by the MIDlet command handler.
+        // The actual Java TextField update happens atomically
+        // on command commit, preserving the value seen by the
+        // MIDlet command handler.
     }
-
 }
+
 
 // ============================================================
 // List view
@@ -561,6 +773,7 @@ class J2MEListView: UIView,
 
     private let titleLabel = UILabel()
     private let tableView = UITableView()
+
     private var items: [String] = []
     private var commandButtons: [UIButton] = []
     private let commandBar = UIStackView()
@@ -576,22 +789,43 @@ class J2MEListView: UIView,
     }
 
     private func setup() {
-        backgroundColor = .systemBackground
+        backgroundColor =
+            .systemBackground
 
-        titleLabel.font = .boldSystemFont(ofSize: 18)
-        titleLabel.textAlignment = .center
-        titleLabel.translatesAutoresizingMaskIntoConstraints = false
+        titleLabel.font =
+            .boldSystemFont(ofSize: 18)
+
+        titleLabel.textAlignment =
+            .center
+
+        titleLabel.translatesAutoresizingMaskIntoConstraints =
+            false
+
         addSubview(titleLabel)
 
-        tableView.dataSource = self
-        tableView.delegate = self
-        tableView.translatesAutoresizingMaskIntoConstraints = false
+        tableView.dataSource =
+            self
+
+        tableView.delegate =
+            self
+
+        tableView.translatesAutoresizingMaskIntoConstraints =
+            false
+
         addSubview(tableView)
 
-        commandBar.axis = .horizontal
-        commandBar.spacing = 12
-        commandBar.distribution = .fillEqually
-        commandBar.translatesAutoresizingMaskIntoConstraints = false
+        commandBar.axis =
+            .horizontal
+
+        commandBar.spacing =
+            12
+
+        commandBar.distribution =
+            .fillEqually
+
+        commandBar.translatesAutoresizingMaskIntoConstraints =
+            false
+
         addSubview(commandBar)
 
         NSLayoutConstraint.activate([
@@ -599,10 +833,12 @@ class J2MEListView: UIView,
                 equalTo: safeAreaLayoutGuide.topAnchor,
                 constant: 8
             ),
+
             titleLabel.leadingAnchor.constraint(
                 equalTo: leadingAnchor,
                 constant: 16
             ),
+
             titleLabel.trailingAnchor.constraint(
                 equalTo: trailingAnchor,
                 constant: -16
@@ -612,8 +848,15 @@ class J2MEListView: UIView,
                 equalTo: titleLabel.bottomAnchor,
                 constant: 8
             ),
-            tableView.leadingAnchor.constraint(equalTo: leadingAnchor),
-            tableView.trailingAnchor.constraint(equalTo: trailingAnchor),
+
+            tableView.leadingAnchor.constraint(
+                equalTo: leadingAnchor
+            ),
+
+            tableView.trailingAnchor.constraint(
+                equalTo: trailingAnchor
+            ),
+
             tableView.bottomAnchor.constraint(
                 equalTo: commandBar.topAnchor,
                 constant: -8
@@ -623,14 +866,17 @@ class J2MEListView: UIView,
                 equalTo: leadingAnchor,
                 constant: 16
             ),
+
             commandBar.trailingAnchor.constraint(
                 equalTo: trailingAnchor,
                 constant: -16
             ),
+
             commandBar.bottomAnchor.constraint(
                 equalTo: safeAreaLayoutGuide.bottomAnchor,
                 constant: -8
             ),
+
             commandBar.heightAnchor.constraint(
                 equalToConstant: 44
             )
@@ -638,17 +884,24 @@ class J2MEListView: UIView,
     }
 
     func buildFromNativeData() {
-        titleLabel.text = String(
-            cString: j2me_ui_get_form_title()
-        )
+        titleLabel.text =
+            String(
+                cString: j2me_ui_get_form_title()
+            )
 
         items.removeAll()
 
-        let count = j2me_ui_get_list_item_count()
+        let count =
+            j2me_ui_get_list_item_count()
 
         for i in 0..<count {
             items.append(
-                String(cString: j2me_ui_get_list_item(Int32(i)))
+                String(
+                    cString:
+                        j2me_ui_get_list_item(
+                            Int32(i)
+                        )
+                )
             )
         }
 
@@ -662,22 +915,44 @@ class J2MEListView: UIView,
 
         commandButtons.removeAll()
 
-        let cmdCount = j2me_ui_get_command_count()
+        let cmdCount =
+            j2me_ui_get_command_count()
 
         for i in 0..<cmdCount {
-            let cmdLabel = String(
-                cString: j2me_ui_get_command_label(Int32(i))
+            let cmdLabel =
+                String(
+                    cString:
+                        j2me_ui_get_command_label(
+                            Int32(i)
+                        )
+                )
+
+            let cmdId =
+                j2me_ui_get_command_id(
+                    Int32(i)
+                )
+
+            let btn =
+                UIButton(type: .system)
+
+            btn.setTitle(
+                cmdLabel,
+                for: .normal
             )
 
-            let cmdId = j2me_ui_get_command_id(Int32(i))
+            btn.tag =
+                Int(cmdId)
 
-            let btn = UIButton(type: .system)
+            btn.backgroundColor =
+                .systemBlue
 
-            btn.setTitle(cmdLabel, for: .normal)
-            btn.tag = Int(cmdId)
-            btn.backgroundColor = .systemBlue
-            btn.setTitleColor(.white, for: .normal)
-            btn.layer.cornerRadius = 8
+            btn.setTitleColor(
+                .white,
+                for: .normal
+            )
+
+            btn.layer.cornerRadius =
+                8
 
             btn.addTarget(
                 self,
@@ -686,6 +961,7 @@ class J2MEListView: UIView,
             )
 
             commandBar.addArrangedSubview(btn)
+            commandButtons.append(btn)
         }
     }
 
@@ -701,16 +977,23 @@ class J2MEListView: UIView,
         cellForRowAt indexPath: IndexPath
     ) -> UITableViewCell {
 
-        let cell = tableView.dequeueReusableCell(
-            withIdentifier: "cell"
-        ) ?? UITableViewCell(
-            style: .default,
-            reuseIdentifier: "cell"
-        )
+        let cell =
+            tableView.dequeueReusableCell(
+                withIdentifier: "cell"
+            )
+            ?? UITableViewCell(
+                style: .default,
+                reuseIdentifier: "cell"
+            )
 
-        var content = cell.defaultContentConfiguration()
-        content.text = items[indexPath.row]
-        cell.contentConfiguration = content
+        var content =
+            cell.defaultContentConfiguration()
+
+        content.text =
+            items[indexPath.row]
+
+        cell.contentConfiguration =
+            content
 
         return cell
     }
@@ -725,7 +1008,9 @@ class J2MEListView: UIView,
         )
     }
 
-    @objc private func commandTapped(_ sender: UIButton) {
+    @objc private func commandTapped(
+        _ sender: UIButton
+    ) {
         j2me_input_post_key(
             Int32(J2ME_UI_COMMAND_ACTION),
             Int32(sender.tag)
