@@ -564,7 +564,7 @@ final class GameViewController:
             button.addTarget(self, action: #selector(tabTapped(_:)), for: .touchUpInside)
             button.translatesAutoresizingMaskIntoConstraints = false
             NSLayoutConstraint.activate([
-                button.widthAnchor.constraint(equalToConstant: 31),
+                button.widthAnchor.constraint(equalToConstant: 38),
                 button.heightAnchor.constraint(equalToConstant: 34)
             ])
             tabStack.addArrangedSubview(button)
