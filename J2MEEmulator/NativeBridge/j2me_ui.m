@@ -67,6 +67,7 @@ int j2me_ui_get_form_item_type(int index) { return index < g_form_item_count ? g
 const char *j2me_ui_get_form_item_label(int index) { return index < g_form_item_count ? g_form_items[index].label : ""; }
 const char *j2me_ui_get_form_item_text(int index) { return index < g_form_item_count ? g_form_items[index].text : ""; }
 int j2me_ui_get_form_item_param1(int index) { return index < g_form_item_count ? g_form_items[index].intParam1 : 0; }
+int j2me_ui_get_form_item_param2(int index) { return index < g_form_item_count ? g_form_items[index].intParam2 : 0; }
 
 int j2me_ui_get_command_count(void) { return g_form_command_count; }
 const char *j2me_ui_get_command_label(int index) { return index < g_form_command_count ? g_form_commands[index].label : ""; }
@@ -160,6 +161,39 @@ static s32 n_formAddTextField(Runtime *runtime, JClass *clazz) {
         strncpy(item->text, utf8_cstr(u), sizeof(item->text) - 1);
         utf8_destroy(u);
     }
+    return RUNTIME_STATUS_NORMAL;
+}
+
+static s32 n_formAddChoiceItem(Runtime *runtime, JClass *clazz) {
+    JniEnv *env = runtime->jnienv;
+    Instance *jlabel = env->localvar_getRefer(runtime->localvar, 0);
+    Instance *jtext = env->localvar_getRefer(runtime->localvar, 1);
+    s32 selected = env->localvar_getInt(runtime->localvar, 2);
+    s32 choiceType = env->localvar_getInt(runtime->localvar, 3);
+
+    if (g_form_item_count >= MAX_FORM_ITEMS) return RUNTIME_STATUS_NORMAL;
+
+    FormItem *item = &g_form_items[g_form_item_count++];
+    item->type = 2; // choice
+    item->intParam1 = choiceType;
+    item->intParam2 = selected ? 1 : 0;
+    item->label[0] = '\0';
+    item->text[0] = '\0';
+
+    if (jlabel) {
+        Utf8String *u = utf8_create();
+        env->jstring_2_utf8(jlabel, u, runtime);
+        strncpy(item->label, utf8_cstr(u), sizeof(item->label) - 1);
+        utf8_destroy(u);
+    }
+
+    if (jtext) {
+        Utf8String *u = utf8_create();
+        env->jstring_2_utf8(jtext, u, runtime);
+        strncpy(item->text, utf8_cstr(u), sizeof(item->text) - 1);
+        utf8_destroy(u);
+    }
+
     return RUNTIME_STATUS_NORMAL;
 }
 
