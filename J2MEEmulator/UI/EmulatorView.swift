@@ -25,36 +25,6 @@ private final class EmulatorDisplayLinkTarget: NSObject {
 
 final class EmulatorView: UIView {
 
-    override init(frame: CGRect) {
-        super.init(frame: frame)
-
-        // This is only the area surrounding the JAR framebuffer.
-        // The framebuffer image itself is never recolored.
-        backgroundColor = UIColor { trait in
-            trait.userInterfaceStyle == .dark
-                ? .black
-                : .systemBackground
-        }
-    }
-
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
-    }
-
-    override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
-        super.traitCollectionDidChange(previousTraitCollection)
-
-        guard previousTraitCollection?.userInterfaceStyle != traitCollection.userInterfaceStyle else {
-            return
-        }
-
-        backgroundColor = UIColor { trait in
-            trait.userInterfaceStyle == .dark
-                ? .black
-                : .systemBackground
-        }
-    }
-
     // MARK: - Virtual resolution
 
     var canvasWidth: Int = 240 {
@@ -239,6 +209,29 @@ final class EmulatorView: UIView {
         setup()
     }
 
+    override func traitCollectionDidChange(
+        _ previousTraitCollection: UITraitCollection?
+    ) {
+        super.traitCollectionDidChange(previousTraitCollection)
+
+        guard previousTraitCollection?.userInterfaceStyle
+                != traitCollection.userInterfaceStyle else {
+            return
+        }
+
+        backgroundColor = UIColor { trait in
+            trait.userInterfaceStyle == .dark
+                ? .black
+                : .systemBackground
+        }
+
+        framebufferLayer.backgroundColor = UIColor { trait in
+            trait.userInterfaceStyle == .dark
+                ? UIColor.black.cgColor
+                : UIColor.systemBackground.cgColor
+        }.cgColor
+    }
+
     deinit {
 
         displayLink?.invalidate()
@@ -257,16 +250,25 @@ final class EmulatorView: UIView {
             }
         }
 
-        backgroundColor = .black
+        // Only the area surrounding the JAR framebuffer follows Light/Dark.
+        // The framebuffer contents themselves are never recolored.
+        backgroundColor = UIColor { trait in
+            trait.userInterfaceStyle == .dark
+                ? .black
+                : .systemBackground
+        }
 
-        isOpaque = true
+        isOpaque = false
         clipsToBounds = true
 
         isMultipleTouchEnabled = true
         isUserInteractionEnabled = true
 
-        framebufferLayer.backgroundColor =
-            UIColor.black.cgColor
+        framebufferLayer.backgroundColor = UIColor { trait in
+            trait.userInterfaceStyle == .dark
+                ? UIColor.black.cgColor
+                : UIColor.systemBackground.cgColor
+        }
 
         framebufferLayer.contentsGravity =
             .resizeAspect
