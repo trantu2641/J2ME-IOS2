@@ -16,6 +16,24 @@ class FormView: UIView, UIGestureRecognizerDelegate {
     private var commandButtons: [UIButton] = []
     private let commandBar = UIStackView()
 
+    // Native-form item tracking. The index is the serialized J2ME form-item
+    // index used by j2me_ui.m, so edited UIKit values can be committed back
+    // to the live Java Form/ChoiceGroup/TextField before the command event.
+    private struct ChoiceControl {
+        let nativeIndex: Int
+        let groupID: Int
+        let choiceType: Int32
+        let button: UIButton
+    }
+
+    private struct TextControl {
+        let nativeIndex: Int
+        let field: UITextField
+    }
+
+    private var choiceControls: [ChoiceControl] = []
+    private var textControls: [TextControl] = []
+
     override init(frame: CGRect) {
         super.init(frame: frame)
         setup()
@@ -177,6 +195,8 @@ class FormView: UIView, UIGestureRecognizerDelegate {
         }
 
         commandButtons.removeAll()
+        choiceControls.removeAll()
+        textControls.removeAll()
 
         // Title
         titleLabel.text = String(
@@ -185,6 +205,11 @@ class FormView: UIView, UIGestureRecognizerDelegate {
 
         // Items
         let count = j2me_ui_get_form_item_count()
+
+        var nextChoiceGroupID = 0
+        var lastChoiceLabel = ""
+        var lastChoiceType: Int32 = -1
+        var previousWasChoice = false
 
         for i in 0..<count {
             let itemType = j2me_ui_get_form_item_type(Int32(i))
@@ -202,23 +227,42 @@ class FormView: UIView, UIGestureRecognizerDelegate {
                 addStringItem(label: label, text: text)
 
             case 1:
-                addTextField(label: label, text: text)
+                addTextField(
+                    label: label,
+                    text: text,
+                    nativeIndex: i,
+                    constraints: j2me_ui_get_form_item_param2(Int32(i))
+                )
+                previousWasChoice = false
 
             case 2:
-                // ChoiceGroup items are rendered as native check controls.
-                // intParam1 = J2ME choice type (EXCLUSIVE/MULTIPLE),
-                // intParam2 = initial selected state.
+                // J2ME choiceType: EXCLUSIVE=1, MULTIPLE=2.
+                // EXCLUSIVE -> radio button; MULTIPLE -> checkbox.
                 let choiceType = j2me_ui_get_form_item_param1(Int32(i))
                 let selected = j2me_ui_get_form_item_param2(Int32(i)) != 0
+
+                if !previousWasChoice ||
+                    label != lastChoiceLabel ||
+                    choiceType != lastChoiceType {
+                    nextChoiceGroupID += 1
+                }
+
                 addChoiceItem(
                     label: label,
                     text: text,
+                    nativeIndex: i,
+                    groupID: nextChoiceGroupID,
                     choiceType: choiceType,
                     selected: selected
                 )
 
+                lastChoiceLabel = label
+                lastChoiceType = choiceType
+                previousWasChoice = true
+
             default:
                 addStringItem(label: label, text: text)
+                previousWasChoice = false
             }
         }
 
@@ -231,8 +275,10 @@ class FormView: UIView, UIGestureRecognizerDelegate {
             )
 
             let cmdId = j2me_ui_get_command_id(Int32(i))
+            let cmdType = j2me_ui_get_command_type(Int32(i))
 
             let btn = UIButton(type: .system)
+            btn.accessibilityIdentifier = "j2me-command-type-\(cmdType)"
 
             btn.setTitle(cmdLabel, for: .normal)
             btn.titleLabel?.font = .boldSystemFont(ofSize: 16)
@@ -288,6 +334,8 @@ class FormView: UIView, UIGestureRecognizerDelegate {
     private func addChoiceItem(
         label: String,
         text: String,
+        nativeIndex: Int,
+        groupID: Int,
         choiceType: Int32,
         selected: Bool
     ) {
@@ -297,6 +345,56 @@ class FormView: UIView, UIGestureRecognizerDelegate {
         row.spacing = 10
         row.layoutMargins = UIEdgeInsets(top: 4, left: 0, bottom: 4, right: 0)
         row.isLayoutMarginsRelativeArrangement = true
+
+        let button = UIButton(type: .system)
+        button.accessibilityLabel = text
+        button.accessibilityValue = selected ? "Đã chọn" : "Chưa chọn"
+        button.titleLabel?.font = .systemFont(ofSize: 16, weight: .regular)
+        button.setTitle(text, for: .normal)
+        button.setTitleColor(.label, for: .normal)
+        button.contentHorizontalAlignment = .leading
+        button.titleLabel?.numberOfLines = 0
+        button.tintColor = .systemBlue
+        button.semanticContentAttribute = .forceLeftToRight
+        button.imageEdgeInsets = UIEdgeInsets(top: 0, left: 0, bottom: 0, right: 8)
+        button.tag = selected ? 1 : 0
+
+        let isExclusive = (choiceType == 1)
+        let symbol = selected
+            ? (isExclusive ? "largecircle.fill.circle" : "checkmark.square.fill")
+            : (isExclusive ? "circle" : "square")
+        button.setImage(UIImage(systemName: symbol), for: .normal)
+
+        button.addAction(
+            UIAction { [weak self, weak button] _ in
+                guard let self, let button else { return }
+
+                if isExclusive {
+                    // Only one option in this ChoiceGroup can remain selected.
+                    for control in self.choiceControls where
+                        control.groupID == groupID &&
+                        control.button !== button {
+                        self.setChoiceButton(control.button, selected: false)
+                    }
+                    self.setChoiceButton(button, selected: true)
+                } else {
+                    self.setChoiceButton(
+                        button,
+                        selected: button.tag != 1
+                    )
+                }
+            },
+            for: .touchUpInside
+        )
+
+        choiceControls.append(
+            ChoiceControl(
+                nativeIndex: nativeIndex,
+                groupID: groupID,
+                choiceType: choiceType,
+                button: button
+            )
+        )
 
         if !label.isEmpty {
             let labelView = UILabel()
@@ -309,55 +407,30 @@ class FormView: UIView, UIGestureRecognizerDelegate {
             row.addArrangedSubview(labelView)
         }
 
-        let button = UIButton(type: .system)
-        button.accessibilityLabel = text
-        button.accessibilityValue = selected ? "Đã chọn" : "Chưa chọn"
-        button.titleLabel?.font = .systemFont(ofSize: 16, weight: .regular)
-        button.setTitle(text, for: .normal)
-        button.setTitleColor(.label, for: .normal)
-        button.contentHorizontalAlignment = .leading
-        button.titleLabel?.numberOfLines = 0
-
-        let isExclusive = (choiceType == 1) // Choice.EXCLUSIVE
-        button.setImage(
-            UIImage(systemName: selected
-                ? (isExclusive ? "largecircle.fill.circle" : "checkmark.square.fill")
-                : (isExclusive ? "circle" : "square")
-            ),
-            for: .normal
-        )
-        button.tintColor = .systemBlue
-        button.semanticContentAttribute = .forceLeftToRight
-        button.imageEdgeInsets = UIEdgeInsets(top: 0, left: 0, bottom: 0, right: 8)
-        button.tag = selected ? 1 : 0
-
-        button.addAction(
-            UIAction { [weak button] _ in
-                guard let button else { return }
-
-                let checked = button.tag == 1
-                let newChecked = !checked
-                button.tag = newChecked ? 1 : 0
-                button.accessibilityValue = newChecked ? "Đã chọn" : "Chưa chọn"
-
-                let symbol = newChecked
-                    ? (isExclusive ? "largecircle.fill.circle" : "checkmark.square.fill")
-                    : (isExclusive ? "circle" : "square")
-
-                button.setImage(UIImage(systemName: symbol), for: .normal)
-            },
-            for: .touchUpInside
-        )
-
         row.addArrangedSubview(button)
         stackView.addArrangedSubview(row)
+    }
+
+    private func setChoiceButton(_ button: UIButton, selected: Bool) {
+        button.tag = selected ? 1 : 0
+        button.accessibilityValue = selected ? "Đã chọn" : "Chưa chọn"
+
+        let control = choiceControls.first { $0.button === button }
+        let isExclusive = control?.choiceType == 1
+        let symbol = selected
+            ? (isExclusive ? "largecircle.fill.circle" : "checkmark.square.fill")
+            : (isExclusive ? "circle" : "square")
+
+        button.setImage(UIImage(systemName: symbol), for: .normal)
     }
 
     // MARK: - Text field
 
     private func addTextField(
         label: String,
-        text: String
+        text: String,
+        nativeIndex: Int,
+        constraints: Int32
     ) {
         let container = UIStackView()
         container.axis = .vertical
@@ -368,7 +441,6 @@ class FormView: UIView, UIGestureRecognizerDelegate {
             labelView.text = label
             labelView.font = .boldSystemFont(ofSize: 14)
             labelView.textColor = .secondaryLabel
-
             container.addArrangedSubview(labelView)
         }
 
@@ -376,6 +448,29 @@ class FormView: UIView, UIGestureRecognizerDelegate {
         tf.text = text
         tf.borderStyle = .roundedRect
         tf.font = .systemFont(ofSize: 16)
+        tf.clearButtonMode = .whileEditing
+
+        let baseConstraint = Int(constraints) & 0xFFFF
+        let isPassword = (Int(constraints) & 0x10000) != 0
+
+        switch baseConstraint {
+        case 2: // TextField.NUMERIC
+            // iOS does not expose a literal J2ME T9 keyboard. Use the
+            // numeric phone-style keypad for numeric fields.
+            tf.keyboardType = .numberPad
+        case 3: // PHONENUMBER
+            tf.keyboardType = .phonePad
+        case 5: // DECIMAL
+            tf.keyboardType = .decimalPad
+        case 1: // EMAILADDR
+            tf.keyboardType = .emailAddress
+        case 4: // URL
+            tf.keyboardType = .URL
+        default:
+            tf.keyboardType = .default
+        }
+
+        tf.isSecureTextEntry = isPassword
 
         tf.addTarget(
             self,
@@ -385,13 +480,33 @@ class FormView: UIView, UIGestureRecognizerDelegate {
 
         container.addArrangedSubview(tf)
         stackView.addArrangedSubview(container)
+
+        textControls.append(
+            TextControl(
+                nativeIndex: nativeIndex,
+                field: tf
+            )
+        )
     }
 
     // MARK: - Commands
 
     @objc private func commandTapped(_ sender: UIButton) {
-        // Hide keyboard before executing the command.
+        // Commit the edited form state before the command reaches Java.
+        // Cancel/Back/Exit/Stop intentionally discard native edits.
+        let commandType = sender.accessibilityIdentifier?
+            .replacingOccurrences(of: "j2me-command-type-", with: "")
+            .flatMap { Int32($0) }
+            ?? 1
+
         endEditing(true)
+
+        if commandType != 2 && // BACK
+            commandType != 3 && // CANCEL
+            commandType != 6 && // STOP
+            commandType != 7 {  // EXIT
+            commitFormEdits()
+        }
 
         let cmdId = Int32(sender.tag)
 
@@ -401,13 +516,39 @@ class FormView: UIView, UIGestureRecognizerDelegate {
         )
     }
 
+    private func commitFormEdits() {
+        // TextField values
+        for control in textControls {
+            let value = control.field.text ?? ""
+            j2me_ui_set_form_item_text(
+                Int32(control.nativeIndex),
+                value
+            )
+        }
+
+        // ChoiceGroup values
+        for control in choiceControls {
+            let selected = control.button.tag == 1
+            j2me_ui_set_form_item_selected(
+                Int32(control.nativeIndex),
+                selected ? 1 : 0
+            )
+        }
+
+        // Type 13 is consumed by Display before the following command event.
+        j2me_input_post_key(
+            Int32(J2ME_UI_FORM_COMMIT),
+            0
+        )
+    }
+
     @objc private func textFieldChanged(
         _ sender: UITextField
     ) {
-        // Existing text field synchronization placeholder.
-        // TODO: associate with specific Item index for multi-TextField forms.
-        // TextField value changed — TODO: sync back to Java Item.
+        // The actual Java TextField update happens atomically on command
+        // commit, preserving the value seen by the MIDlet command handler.
     }
+
 }
 
 // ============================================================
