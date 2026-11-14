@@ -125,10 +125,6 @@ final class GameViewController:
     private var jarPickerMessageLabel: UILabel?
     private var jarPickerMessageWork: DispatchWorkItem?
 
-    // Native JAR picker state. Keeping the scan off the main thread avoids
-    // a visible hitch when the + button is opened.
-    private var nativeJarPickerIsLoading = false
-
     private let titleLabel =
         UILabel()
 
@@ -222,6 +218,9 @@ final class GameViewController:
 
         super.init(nibName: nil, bundle: nil)
 
+        // Follow the iPhone system Light/Dark appearance. Do not force a style.
+        overrideUserInterfaceStyle = .unspecified
+
         modalPresentationStyle =
             .fullScreen
     }
@@ -262,10 +261,6 @@ final class GameViewController:
 
         super.viewDidLoad()
 
-        // Follow the iPhone's current Light/Dark appearance instead of
-        // forcing a fixed emulator UI style. Native UIKit controls below
-        // automatically follow this setting.
-        overrideUserInterfaceStyle = .unspecified
         view.backgroundColor = .systemBackground
 
         if UserDefaults.standard.bool(forKey: "J2MEKeepScreenOn") {
@@ -398,6 +393,11 @@ final class GameViewController:
     ) {
 
         super.viewDidAppear(animated)
+
+        // If the host window/controller previously forced an appearance,
+        // release this controller back to the system appearance.
+        overrideUserInterfaceStyle = .unspecified
+        view.window?.overrideUserInterfaceStyle = .unspecified
 
         guard !gameStarted else {
             return
@@ -865,120 +865,138 @@ final class GameViewController:
     }
 
     private func showJarPicker() {
-        guard !nativeJarPickerIsLoading else { return }
-        nativeJarPickerIsLoading = true
+        if jarPickerOverlay != nil { return }
 
-        // Scan JAR files away from the main thread. The previous custom
-        // UITableView picker did synchronous filesystem/icon work during
-        // presentation, which could make the + button feel sluggish.
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self else { return }
-            let items = self.scanInstalledJARs()
-
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                self.nativeJarPickerIsLoading = false
-                self.presentNativeJarPicker(items)
-            }
-        }
-    }
-
-    private func presentNativeJarPicker(
-        _ items: [(name: String, path: String, icon: UIImage)]
-    ) {
-        guard presentedViewController == nil ||
-              presentedViewController?.isBeingDismissed == true else {
-            return
-        }
-
-        let sheet = UIAlertController(
-            title: "DANH SÁCH JAR",
-            message: nil,
-            preferredStyle: .actionSheet
+        // JAR picker uses the same centered modal style as the three-dot menu.
+        let overlay = UIControl()
+        overlay.backgroundColor = UIColor.black.withAlphaComponent(
+            traitCollection.userInterfaceStyle == .dark ? 0.28 : 0.18
+        )
+        overlay.translatesAutoresizingMaskIntoConstraints = false
+        overlay.addTarget(
+            self,
+            action: #selector(closeJarPicker),
+            for: .touchUpInside
         )
 
-        if items.isEmpty {
-            sheet.addAction(
-                UIAlertAction(title: "Không có JAR", style: .default)
-            )
-        } else {
-            for item in items {
-                let action = UIAlertAction(title: item.name, style: .default) { [weak self] _ in
-                    self?.openJarFromNativePicker(item)
-                }
-                sheet.addAction(action)
+        let panel = UIView()
+        panel.backgroundColor = uiPanelBackgroundColor
+        panel.layer.cornerRadius = 20
+        panel.layer.masksToBounds = true
+        panel.translatesAutoresizingMaskIntoConstraints = false
+
+        let title = UILabel()
+        title.text = "DANH SÁCH JAR"
+        title.textColor = uiPrimaryTextColor
+        title.font = .systemFont(ofSize: 18, weight: .semibold)
+        title.textAlignment = .center
+        title.translatesAutoresizingMaskIntoConstraints = false
+
+        let table = UITableView(frame: .zero, style: .plain)
+        table.backgroundColor = .clear
+        table.separatorColor = uiSeparatorColor
+        table.separatorInset = UIEdgeInsets(top: 0, left: 18, bottom: 0, right: 18)
+        table.showsVerticalScrollIndicator = true
+        table.alwaysBounceVertical = true
+        table.translatesAutoresizingMaskIntoConstraints = false
+        table.register(J2MEJarPickerCell.self, forCellReuseIdentifier: "jar")
+        table.dataSource = self
+        table.delegate = self
+
+        let exit = UIButton(type: .system)
+        exit.setTitle("HỦY", for: .normal)
+        exit.setTitleColor(.systemBlue, for: .normal)
+        exit.titleLabel?.font = .systemFont(ofSize: 18, weight: .regular)
+        exit.contentHorizontalAlignment = .center
+        exit.backgroundColor = .clear
+        exit.addTarget(
+            self,
+            action: #selector(closeJarPicker),
+            for: .touchUpInside
+        )
+        exit.translatesAutoresizingMaskIntoConstraints = false
+
+        panel.addSubview(title)
+        panel.addSubview(table)
+        panel.addSubview(exit)
+        view.addSubview(overlay)
+        view.addSubview(panel)
+
+        let panelWidth = min(view.bounds.width - 48, 520)
+        let panelHeight = min(max(300, view.bounds.height * 0.62), 620)
+
+        NSLayoutConstraint.activate([
+            overlay.topAnchor.constraint(equalTo: view.topAnchor),
+            overlay.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            overlay.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            overlay.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+
+            panel.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            panel.centerYAnchor.constraint(equalTo: view.centerYAnchor),
+            panel.widthAnchor.constraint(equalToConstant: panelWidth),
+            panel.heightAnchor.constraint(equalToConstant: panelHeight),
+
+            title.topAnchor.constraint(equalTo: panel.topAnchor, constant: 18),
+            title.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 18),
+            title.trailingAnchor.constraint(equalTo: panel.trailingAnchor, constant: -18),
+            title.heightAnchor.constraint(equalToConstant: 34),
+
+            table.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 12),
+            table.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 10),
+            table.trailingAnchor.constraint(equalTo: panel.trailingAnchor, constant: -10),
+            table.bottomAnchor.constraint(equalTo: exit.topAnchor, constant: -4),
+
+            exit.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 10),
+            exit.trailingAnchor.constraint(equalTo: panel.trailingAnchor, constant: -10),
+            exit.bottomAnchor.constraint(equalTo: panel.bottomAnchor, constant: -8),
+            exit.heightAnchor.constraint(equalToConstant: 58)
+        ])
+
+        jarPickerOverlay = overlay
+        jarPickerPanel = panel
+        jarPickerTableView = table
+        table.reloadData()
+
+        overlay.alpha = 0
+        panel.alpha = 0
+        panel.transform = CGAffineTransform(scaleX: 0.94, y: 0.94)
+
+        UIView.animate(
+            withDuration: 0.16,
+            animations: {
+                overlay.alpha = 1
+                panel.alpha = 1
+                panel.transform = .identity
             }
-        }
-
-        sheet.addAction(UIAlertAction(title: "HỦY", style: .cancel))
-        present(sheet, animated: true)
-    }
-
-    private func openJarFromNativePicker(
-        _ item: (name: String, path: String, icon: UIImage)
-    ) {
-        let normalizedPath = URL(fileURLWithPath: item.path)
-            .standardizedFileURL
-            .path
-
-        // Native action sheets dismiss themselves when an action is selected.
-        // For a duplicate, show the native warning and reopen the native list
-        // after it is dismissed, preserving the previous no-duplicate behavior.
-        if runningSessions.contains(where: {
-            URL(fileURLWithPath: $0.path)
-                .standardizedFileURL
-                .path == normalizedPath
-        }) {
-            let alert = UIAlertController(
-                title: nil,
-                message: "JAR này đang được mở",
-                preferredStyle: .alert
-            )
-            alert.addAction(UIAlertAction(title: "OK", style: .default) { [weak self] _ in
-                self?.showJarPicker()
-            })
-            present(alert, animated: true)
-            return
-        }
-
-        let id = gameID(forPath: item.path)
-        let defaults = UserDefaults.standard
-
-        let resolution =
-            defaults.object(forKey: "resW_\(id)") as? Int ?? 240
-        let resolutionH =
-            defaults.object(forKey: "resH_\(id)") as? Int ?? 320
-        let fps =
-            defaults.object(forKey: "fpsLimit_\(id)") as? Int ?? 0
-        let scale =
-            defaults.bool(forKey: "ss3d_\(id)") ? 3 : 1
-
-        addRunningJar(
-            path: item.path,
-            name: item.name,
-            icon: item.icon,
-            canvasWidth: max(1, resolution),
-            canvasHeight: max(1, resolutionH),
-            render3dScale: scale,
-            fpsLimit: fps
         )
     }
 
     @objc private func closeJarPicker() {
-        // Kept for compatibility with any existing callers. The native
-        // UIAlertController manages its own dismissal.
+        // Cancel any temporary duplicate-JAR message.
         jarPickerMessageWork?.cancel()
         jarPickerMessageWork = nil
         jarPickerMessageLabel?.removeFromSuperview()
         jarPickerMessageLabel = nil
 
-        jarPickerTableView?.delegate = nil
-        jarPickerTableView?.dataSource = nil
-        jarPickerTableView?.removeFromSuperview()
+        // Detach the table before removing the panel so there is no stale
+        // delegate/data-source interaction after the picker is dismissed.
+        if let table = jarPickerTableView {
+            table.delegate = nil
+            table.dataSource = nil
+            table.removeFromSuperview()
+        }
         jarPickerTableView = nil
-        jarPickerPanel?.removeFromSuperview()
+
+        if let panel = jarPickerPanel {
+            panel.layer.removeAllAnimations()
+            panel.removeFromSuperview()
+        }
         jarPickerPanel = nil
-        jarPickerOverlay?.removeFromSuperview()
+
+        if let overlay = jarPickerOverlay {
+            overlay.layer.removeAllAnimations()
+            overlay.removeFromSuperview()
+        }
         jarPickerOverlay = nil
     }
 
@@ -1020,52 +1038,93 @@ final class GameViewController:
     // MARK: - More options menu
 
     @objc private func showMoreMenu() {
-        let sheet = UIAlertController(
-            title: nil,
-            message: nil,
-            preferredStyle: .actionSheet
-        )
+        if moreMenuOverlay != nil {
+            closeMoreMenu()
+            return
+        }
 
-        sheet.addAction(
-            UIAlertAction(
-                title: UIApplication.shared.isIdleTimerDisabled
-                    ? "✓ Treo tắt màn"
-                    : "Treo tắt màn",
-                style: .default
-            ) { [weak self] _ in
-                self?.toggleKeepScreenOnFromMenu()
-            }
+        let overlay = UIControl()
+        overlay.backgroundColor = UIColor.black.withAlphaComponent(
+            traitCollection.userInterfaceStyle == .dark ? 0.28 : 0.18
         )
+        overlay.translatesAutoresizingMaskIntoConstraints = false
+        overlay.addTarget(self, action: #selector(closeMoreMenu), for: .touchUpInside)
 
-        sheet.addAction(
-            UIAlertAction(
-                title: "Cỡ màn hình",
-                style: .default
-            ) { [weak self] _ in
-                self?.showScreenSizeMenu()
-            }
-        )
+        let panel = UIView()
+        panel.backgroundColor = uiPanelBackgroundColor
+        panel.layer.cornerRadius = 20
+        panel.layer.masksToBounds = true
+        panel.translatesAutoresizingMaskIntoConstraints = false
 
-        sheet.addAction(
-            UIAlertAction(
-                title: "Proxy",
-                style: .default
-            ) { [weak self] _ in
-                self?.showProxyMenu()
-            }
-        )
+        let stack = UIStackView()
+        stack.axis = .vertical
+        stack.spacing = 0
+        stack.translatesAutoresizingMaskIntoConstraints = false
 
-        sheet.addAction(
-            UIAlertAction(
-                title: "Thoát",
-                style: .destructive
-            ) { [weak self] _ in
-                self?.exitFromMoreMenu()
-            }
-        )
+        stack.addArrangedSubview(makeMoreMenuButton(
+            title: UIApplication.shared.isIdleTimerDisabled ? "✓ Treo tắt màn" : "Treo tắt màn",
+            color: .systemBlue,
+            action: #selector(toggleKeepScreenOnFromMenu)
+        ))
 
-        sheet.addAction(UIAlertAction(title: "Hủy", style: .cancel))
-        present(sheet, animated: true)
+        stack.addArrangedSubview(makeMoreMenuButton(
+            title: "Cỡ màn hình",
+            color: .systemBlue,
+            action: #selector(showScreenSizeMenu)
+        ))
+
+        stack.addArrangedSubview(makeMoreMenuButton(
+            title: "Proxy",
+            color: .systemBlue,
+            action: #selector(showProxyMenu)
+        ))
+
+        stack.addArrangedSubview(makeMoreMenuButton(
+            title: "Thoát",
+            color: .systemRed,
+            action: #selector(exitFromMoreMenu)
+        ))
+
+        stack.addArrangedSubview(makeMoreMenuButton(
+            title: "Hủy",
+            color: .systemBlue,
+            action: #selector(closeMoreMenu)
+        ))
+
+        view.addSubview(overlay)
+        view.addSubview(panel)
+        panel.addSubview(stack)
+
+        NSLayoutConstraint.activate([
+            overlay.topAnchor.constraint(equalTo: view.topAnchor),
+            overlay.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            overlay.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            overlay.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+
+            panel.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            panel.centerYAnchor.constraint(equalTo: view.centerYAnchor),
+            panel.leadingAnchor.constraint(greaterThanOrEqualTo: view.leadingAnchor, constant: 24),
+            panel.trailingAnchor.constraint(lessThanOrEqualTo: view.trailingAnchor, constant: -24),
+            panel.widthAnchor.constraint(equalToConstant: min(520, max(280, UIScreen.main.bounds.width - 48))),
+
+            stack.topAnchor.constraint(equalTo: panel.topAnchor),
+            stack.leadingAnchor.constraint(equalTo: panel.leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: panel.trailingAnchor),
+            stack.bottomAnchor.constraint(equalTo: panel.bottomAnchor)
+        ])
+
+        moreMenuOverlay = overlay
+        moreMenuPanel = panel
+
+        overlay.alpha = 0
+        panel.alpha = 0
+        panel.transform = CGAffineTransform(scaleX: 0.94, y: 0.94)
+
+        UIView.animate(withDuration: 0.16) {
+            overlay.alpha = 1
+            panel.alpha = 1
+            panel.transform = .identity
+        }
     }
 
     private func makeMoreMenuButton(
@@ -1076,9 +1135,9 @@ final class GameViewController:
         let button = UIButton(type: .system)
         button.setTitle(title, for: .normal)
         button.setTitleColor(color, for: .normal)
-        button.titleLabel?.font = .systemFont(ofSize: 22, weight: .regular)
+        button.titleLabel?.font = .systemFont(ofSize: 19, weight: .regular)
         button.contentHorizontalAlignment = .center
-        button.heightAnchor.constraint(equalToConstant: 72).isActive = true
+        button.heightAnchor.constraint(equalToConstant: 60).isActive = true
         button.addTarget(self, action: action, for: .touchUpInside)
         return button
     }
@@ -2392,10 +2451,16 @@ private final class J2MEJarPickerCell: UITableViewCell {
         super.init(style: style, reuseIdentifier: reuseIdentifier)
         backgroundColor = .clear
         contentView.backgroundColor = .clear
+        selectedBackgroundView = UIView()
+        selectedBackgroundView?.backgroundColor = UIColor { trait in
+            trait.userInterfaceStyle == .dark
+                ? UIColor.white.withAlphaComponent(0.10)
+                : UIColor.black.withAlphaComponent(0.06)
+        }
         iconView.contentMode = .scaleAspectFit
         iconView.translatesAutoresizingMaskIntoConstraints = false
         nameLabel.textColor = .label
-        nameLabel.font = .systemFont(ofSize: 16, weight: .medium)
+        nameLabel.font = .systemFont(ofSize: 15, weight: .medium)
         nameLabel.translatesAutoresizingMaskIntoConstraints = false
         contentView.addSubview(iconView)
         contentView.addSubview(nameLabel)
