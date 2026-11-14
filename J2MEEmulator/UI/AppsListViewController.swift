@@ -96,7 +96,9 @@ class AppsListViewController: UIViewController,
     // MARK: - View controller
 
     override var preferredStatusBarStyle: UIStatusBarStyle {
-        .lightContent
+        traitCollection.userInterfaceStyle == .dark
+            ? .lightContent
+            : .darkContent
     }
 
     override var supportedInterfaceOrientations: UIInterfaceOrientationMask {
@@ -106,7 +108,11 @@ class AppsListViewController: UIViewController,
     override func viewDidLoad() {
         super.viewDidLoad()
 
-        view.backgroundColor = .black
+        view.backgroundColor = UIColor { trait in
+            trait.userInterfaceStyle == .dark
+                ? .black
+                : .systemBackground
+        }
 
         setupBackground()
         setupToolbar()
@@ -277,6 +283,23 @@ class AppsListViewController: UIViewController,
 
     @objc private func appDidBecomeActive() {
         scanApps()
+    }
+
+    override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
+        super.traitCollectionDidChange(previousTraitCollection)
+
+        guard previousTraitCollection?.userInterfaceStyle != traitCollection.userInterfaceStyle else {
+            return
+        }
+
+        view.backgroundColor = UIColor { trait in
+            trait.userInterfaceStyle == .dark
+                ? .black
+                : .systemBackground
+        }
+
+        springboardCollectionView?.reloadData()
+        setNeedsStatusBarAppearanceUpdate()
     }
 
     override func viewDidLayoutSubviews() {
@@ -1242,7 +1265,11 @@ class AppsListViewController: UIViewController,
                 let letter = String(name.prefix(1)).uppercased()
 
                 let attributes: [NSAttributedString.Key: Any] = [
-                    .foregroundColor: UIColor.white.withAlphaComponent(0.9),
+                    .foregroundColor: UIColor { trait in
+                        trait.userInterfaceStyle == .dark
+                            ? UIColor.white.withAlphaComponent(0.9)
+                            : UIColor.black.withAlphaComponent(0.82)
+                    },
                     .font: UIFont.systemFont(
                         ofSize: iconSize * 0.42,
                         weight: .semibold
@@ -1266,7 +1293,11 @@ class AppsListViewController: UIViewController,
                 cornerRadius: SpringboardCell.iconCornerRadius - 0.5
             )
 
-            UIColor(white: 1.0, alpha: 0.12).setStroke()
+            UIColor { trait in
+                trait.userInterfaceStyle == .dark
+                    ? UIColor.white.withAlphaComponent(0.12)
+                    : UIColor.black.withAlphaComponent(0.12)
+            }.setStroke()
 
             borderPath.lineWidth = 1
             borderPath.stroke()
