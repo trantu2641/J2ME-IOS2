@@ -57,19 +57,31 @@ static J2MESession g_sessions[J2ME_MAX_SESSIONS];
 static pthread_mutex_t g_sessions_lock = PTHREAD_MUTEX_INITIALIZER;
 static MiniJVM *g_active_session_jvm = NULL;
 
+/*
+ * Forward declaration.
+ *
+ * session_runner_main() dùng load_midlet_manifest() trước khi
+ * hàm này được định nghĩa ở phía dưới file.
+ */
+static char *load_midlet_manifest(const char *jar_path);
+
 static J2MESession *session_find_locked(int id) {
     if (id < 1 || id > J2ME_MAX_SESSIONS) return NULL;
+
     J2MESession *s = &g_sessions[id - 1];
+
     return s->used ? s : NULL;
 }
 
 static J2MESession *session_find_by_vm_locked(MiniJVM *jvm) {
     if (!jvm) return NULL;
+
     for (int i = 0; i < J2ME_MAX_SESSIONS; i++) {
         if (g_sessions[i].used && g_sessions[i].jvm == jvm) {
             return &g_sessions[i];
         }
     }
+
     return NULL;
 }
 
@@ -103,60 +115,156 @@ static void session_configure_jvm(
     sys_properties_set_c(jvm, "microedition.configuration", "CLDC-1.1");
 
     char sw[16], sh[16], ss[8];
-    snprintf(sw, sizeof(sw), "%d", screen_width);
-    snprintf(sh, sizeof(sh), "%d", screen_height);
-    snprintf(ss, sizeof(ss), "%d", render_3d_scale > 0 ? render_3d_scale : 1);
 
-    sys_properties_set_c(jvm, "j2me.screen.width", sw);
-    sys_properties_set_c(jvm, "j2me.screen.height", sh);
-    sys_properties_set_c(jvm, "micro3d.v3.fbo.scale", ss);
+    snprintf(
+        sw,
+        sizeof(sw),
+        "%d",
+        screen_width
+    );
+
+    snprintf(
+        sh,
+        sizeof(sh),
+        "%d",
+        screen_height
+    );
+
+    snprintf(
+        ss,
+        sizeof(ss),
+        "%d",
+        render_3d_scale > 0 ? render_3d_scale : 1
+    );
+
+    sys_properties_set_c(
+        jvm,
+        "j2me.screen.width",
+        sw
+    );
+
+    sys_properties_set_c(
+        jvm,
+        "j2me.screen.height",
+        sh
+    );
+
+    sys_properties_set_c(
+        jvm,
+        "micro3d.v3.fbo.scale",
+        ss
+    );
 
     if (fps_limit > 0) {
+
         char fl[8];
-        snprintf(fl, sizeof(fl), "%d", fps_limit);
-        sys_properties_set_c(jvm, "j2me.fps.limit", fl);
+
+        snprintf(
+            fl,
+            sizeof(fl),
+            "%d",
+            fps_limit
+        );
+
+        sys_properties_set_c(
+            jvm,
+            "j2me.fps.limit",
+            fl
+        );
     }
 }
 
 static void *session_runner_main(void *arg) {
+
     J2MESession *s = (J2MESession *)arg;
-    if (!s) return NULL;
+
+    if (!s) {
+        return NULL;
+    }
 
     pthread_setname_np("J2ME-MIDlet");
-    atomic_store(&s->running, 1);
 
-    printf("[JVM Session %d] Starting MIDlet: %s\n", s->id, s->jar_path);
+    atomic_store(
+        &s->running,
+        1
+    );
 
-    char *manifest = load_midlet_manifest(s->jar_path);
+    printf(
+        "[JVM Session %d] Starting MIDlet: %s\n",
+        s->id,
+        s->jar_path
+    );
+
+    char *manifest =
+        load_midlet_manifest(s->jar_path);
+
     if (!manifest) {
-        printf("[JVM Session %d] ERROR: Manifest extraction failed\n", s->id);
-        atomic_store(&s->running, 0);
+
+        printf(
+            "[JVM Session %d] ERROR: Manifest extraction failed\n",
+            s->id
+        );
+
+        atomic_store(
+            &s->running,
+            0
+        );
+
         return NULL;
     }
 
-    ArrayList *java_para = arraylist_create(0);
+    ArrayList *java_para =
+        arraylist_create(0);
+
     if (!java_para) {
+
         free(manifest);
-        atomic_store(&s->running, 0);
+
+        atomic_store(
+            &s->running,
+            0
+        );
+
         return NULL;
     }
 
-    arraylist_push_back(java_para, (void *)s->jar_path);
-    arraylist_push_back(java_para, (void *)manifest);
+    arraylist_push_back(
+        java_para,
+        (void *)s->jar_path
+    );
 
-    s32 ret = call_main(
-        s->jvm,
-        (c8 *)"javax/microedition/shell/MIDletRunner",
+    arraylist_push_back(
+        java_para,
+        (void *)manifest
+    );
+
+    s32 ret =
+        call_main(
+            s->jvm,
+            (c8 *)"javax/microedition/shell/MIDletRunner",
+            java_para
+        );
+
+    arraylist_destroy(
         java_para
     );
 
-    arraylist_destroy(java_para);
     free(manifest);
 
-    printf("[JVM Session %d] MIDlet finished with code %d\n", s->id, ret);
-    atomic_store(&s->running, 0);
+    printf(
+        "[JVM Session %d] MIDlet finished with code %d\n",
+        s->id,
+        ret
+    );
+
+    atomic_store(
+        &s->running,
+        0
+    );
+
     return NULL;
 }
+
 
 static int g_saved_stdout = -1;
 static int g_saved_stderr = -1;
@@ -164,27 +272,35 @@ static int g_log_redirected = 0;
 
 int g_render_3d_scale = 1;
 
+
 // Main iOS UI thread, registered from EmulatorView while on main.
 static pthread_t g_ios_main_pthread;
 static int g_ios_main_pthread_valid = 0;
+
 
 // Main MIDlet worker thread.
 static pthread_t g_midlet_runner_pthread;
 static int g_midlet_runner_pthread_valid = 0;
 
+
 // Called by Swift from UIView setup on the iOS main thread.
 void jvm_bridge_register_main_thread(void) {
 
     if (!pthread_main_np()) {
+
         fprintf(
             stderr,
             "[CPU Profiler] Main-thread registration called off main thread\n"
         );
+
         return;
     }
 
-    g_ios_main_pthread = pthread_self();
-    g_ios_main_pthread_valid = 1;
+    g_ios_main_pthread =
+        pthread_self();
+
+    g_ios_main_pthread_valid =
+        1;
 }
 
 
@@ -247,11 +363,17 @@ static int g_cpu_profiler_started = 0;
 // Helper
 // ============================================================
 
-static int cpu_profiler_pthread_is_zero(pthread_t value) {
+static int cpu_profiler_pthread_is_zero(
+    pthread_t value
+) {
 
     pthread_t zero_value;
 
-    memset(&zero_value, 0, sizeof(zero_value));
+    memset(
+        &zero_value,
+        0,
+        sizeof(zero_value)
+    );
 
     return memcmp(
         &value,
@@ -267,11 +389,16 @@ static void cpu_profiler_append(
     const char *addition
 ) {
 
-    if (!destination || !addition || capacity == 0) {
+    if (
+        !destination ||
+        !addition ||
+        capacity == 0
+    ) {
         return;
     }
 
-    size_t used = strlen(destination);
+    size_t used =
+        strlen(destination);
 
     if (used >= capacity - 1) {
         return;
@@ -286,7 +413,9 @@ static void cpu_profiler_append(
 }
 
 
-static const char *cpu_profiler_vm_role(int type) {
+static const char *cpu_profiler_vm_role(
+    int type
+) {
 
     switch (type) {
 
@@ -314,17 +443,26 @@ static void cpu_profiler_copy_java_stack(
     CPUThreadSample *sample
 ) {
 
-    if (!thread_info || !sample) {
+    if (
+        !thread_info ||
+        !sample
+    ) {
         return;
     }
 
-    Runtime *leaf = thread_info->top_runtime;
+    Runtime *leaf =
+        thread_info->top_runtime;
 
     int guard = 0;
 
-    while (leaf && leaf->son && guard < 64) {
+    while (
+        leaf &&
+        leaf->son &&
+        guard < 64
+    ) {
 
         leaf = leaf->son;
+
         guard++;
     }
 
@@ -332,11 +470,13 @@ static void cpu_profiler_copy_java_stack(
 
     for (
         Runtime *frame = leaf;
-        frame && frames < CPU_PROFILE_JAVA_STACK_FRAMES;
+        frame &&
+        frames < CPU_PROFILE_JAVA_STACK_FRAMES;
         frame = frame->parent
     ) {
 
-        MethodInfo *method = frame->method;
+        MethodInfo *method =
+            frame->method;
 
         if (
             !method ||
@@ -348,29 +488,46 @@ static void cpu_profiler_copy_java_stack(
         }
 
         const char *class_name =
-            utf8_cstr(method->_this_class->name);
+            utf8_cstr(
+                method->_this_class->name
+            );
 
         const char *method_name =
-            utf8_cstr(method->name);
+            utf8_cstr(
+                method->name
+            );
 
-        if (!class_name || !method_name) {
+        if (
+            !class_name ||
+            !method_name
+        ) {
             continue;
         }
 
         long long bytecode_offset = -1;
 
-        if (method->converted_code && frame->pc) {
+        if (
+            method->converted_code &&
+            frame->pc
+        ) {
 
             uintptr_t code_address =
-                (uintptr_t)method->converted_code->code;
+                (uintptr_t)
+                    method->converted_code->code;
 
             uintptr_t pc_address =
-                (uintptr_t)frame->pc;
+                (uintptr_t)
+                    frame->pc;
 
-            if (pc_address >= code_address) {
+            if (
+                pc_address >= code_address
+            ) {
 
                 bytecode_offset =
-                    (long long)(pc_address - code_address);
+                    (long long)(
+                        pc_address -
+                        code_address
+                    );
             }
         }
 
@@ -415,11 +572,17 @@ static void cpu_profiler_attach_vm_context(
     CPUThreadSample *sample
 ) {
 
-    if (!g_jvm || !g_jvm->thread_list || !sample) {
+    if (
+        !g_jvm ||
+        !g_jvm->thread_list ||
+        !sample
+    ) {
         return;
     }
 
-    spin_lock(&g_jvm->thread_list->spinlock);
+    spin_lock(
+        &g_jvm->thread_list->spinlock
+    );
 
     for (
         int i = 0;
@@ -427,33 +590,42 @@ static void cpu_profiler_attach_vm_context(
         i++
     ) {
 
-        Runtime *runtime = (Runtime *)
-            arraylist_get_value_unsafe(
+        Runtime *runtime =
+            (Runtime *)arraylist_get_value_unsafe(
                 g_jvm->thread_list,
                 i
             );
 
-        if (!runtime || !runtime->thrd_info) {
+        if (
+            !runtime ||
+            !runtime->thrd_info
+        ) {
             continue;
         }
 
-        JavaThreadInfo *thread_info = runtime->thrd_info;
+        JavaThreadInfo *thread_info =
+            runtime->thrd_info;
 
         int matched = 0;
 
-        if (!cpu_profiler_pthread_is_zero(
-            thread_info->pthread
-        )) {
+        if (
+            !cpu_profiler_pthread_is_zero(
+                thread_info->pthread
+            )
+        ) {
 
-            matched = pthread_equal(
-                thread_info->pthread,
-                native_thread
-            );
+            matched =
+                pthread_equal(
+                    thread_info->pthread,
+                    native_thread
+                );
         }
 
-        // Main MIDlet Runtime:
-        // thread_boundle() does not currently initialize pthread.
-        // Bind it to the known GameViewController worker thread.
+        /*
+         * Main MIDlet Runtime:
+         * thread_boundle() does not currently initialize pthread.
+         * Bind it to the known GameViewController worker thread.
+         */
         if (
             !matched &&
             g_midlet_runner_pthread_valid &&
@@ -464,10 +636,13 @@ static void cpu_profiler_attach_vm_context(
             cpu_profiler_pthread_is_zero(
                 thread_info->pthread
             ) &&
-            thread_info->type == THREAD_TYPE_NORMAL
+            thread_info->type ==
+                THREAD_TYPE_NORMAL
         ) {
 
-            thread_info->pthread = native_thread;
+            thread_info->pthread =
+                native_thread;
+
             matched = 1;
         }
 
@@ -475,18 +650,23 @@ static void cpu_profiler_attach_vm_context(
             continue;
         }
 
-        sample->vm_matched = 1;
+        sample->vm_matched =
+            1;
 
         snprintf(
             sample->vm_role,
             sizeof(sample->vm_role),
             "%s",
-            cpu_profiler_vm_role(thread_info->type)
+            cpu_profiler_vm_role(
+                thread_info->type
+            )
         );
 
-        sample->vm_status = thread_info->thread_status;
+        sample->vm_status =
+            thread_info->thread_status;
 
-        sample->vm_blocking = thread_info->is_blocking;
+        sample->vm_blocking =
+            thread_info->is_blocking;
 
         cpu_profiler_copy_java_stack(
             thread_info,
@@ -496,7 +676,9 @@ static void cpu_profiler_attach_vm_context(
         break;
     }
 
-    spin_unlock(&g_jvm->thread_list->spinlock);
+    spin_unlock(
+        &g_jvm->thread_list->spinlock
+    );
 }
 
 
@@ -510,13 +692,17 @@ static void cpu_profiler_resolve_symbol(
     size_t capacity
 ) {
 
-    if (!destination || capacity == 0) {
+    if (
+        !destination ||
+        capacity == 0
+    ) {
         return;
     }
 
     uintptr_t lookup_address =
         (uintptr_t)(
-            address & 0x0000FFFFFFFFFFFFULL
+            address &
+            0x0000FFFFFFFFFFFFULL
         );
 
     Dl_info symbol_info;
@@ -537,12 +723,14 @@ static void cpu_profiler_resolve_symbol(
     ) {
 
         uintptr_t symbol_address =
-            (uintptr_t)symbol_info.dli_saddr;
+            (uintptr_t)
+                symbol_info.dli_saddr;
 
         unsigned long long offset =
             lookup_address >= symbol_address
             ? (unsigned long long)(
-                lookup_address - symbol_address
+                lookup_address -
+                symbol_address
             )
             : 0ULL;
 
@@ -552,7 +740,8 @@ static void cpu_profiler_resolve_symbol(
             "%s+0x%llx [0x%llx]",
             symbol_info.dli_sname,
             offset,
-            (unsigned long long)lookup_address
+            (unsigned long long)
+                lookup_address
         );
 
     } else {
@@ -561,7 +750,8 @@ static void cpu_profiler_resolve_symbol(
             destination,
             capacity,
             "0x%llx",
-            (unsigned long long)lookup_address
+            (unsigned long long)
+                lookup_address
         );
     }
 }
@@ -586,16 +776,19 @@ static int cpu_profiler_read_frame(
         return 0;
     }
 
-    // iOS uses vm_map.h APIs rather than mach_vm.h.
+    /*
+     * iOS uses vm_map.h APIs rather than mach_vm.h.
+     */
     vm_size_t bytes_read = 0;
 
-    kern_return_t result = vm_read_overwrite(
-        mach_task_self(),
-        (vm_address_t)frame_pointer,
-        (vm_size_t)sizeof(*record),
-        (vm_address_t)record,
-        &bytes_read
-    );
+    kern_return_t result =
+        vm_read_overwrite(
+            mach_task_self(),
+            (vm_address_t)frame_pointer,
+            (vm_size_t)sizeof(*record),
+            (vm_address_t)record,
+            &bytes_read
+        );
 
     return (
         result == KERN_SUCCESS &&
@@ -631,12 +824,13 @@ static void cpu_profiler_capture_native_stack(
     mach_msg_type_number_t state_count =
         ARM_THREAD_STATE64_COUNT;
 
-    kern_return_t result = thread_get_state(
-        sample->thread_port,
-        ARM_THREAD_STATE64,
-        (thread_state_t)&state,
-        &state_count
-    );
+    kern_return_t result =
+        thread_get_state(
+            sample->thread_port,
+            ARM_THREAD_STATE64,
+            (thread_state_t)&state,
+            &state_count
+        );
 
     if (result != KERN_SUCCESS) {
 
@@ -656,7 +850,8 @@ static void cpu_profiler_capture_native_stack(
         return;
     }
 
-    uint64_t pc = (uint64_t)state.__pc;
+    uint64_t pc =
+        (uint64_t)state.__pc;
 
     uint64_t frame_pointer =
         (uint64_t)state.__fp;
@@ -675,15 +870,18 @@ static void cpu_profiler_capture_native_stack(
 
         NativeFrameRecord record = {0};
 
-        if (!cpu_profiler_read_frame(
-            frame_pointer,
-            &record
-        )) {
+        if (
+            !cpu_profiler_read_frame(
+                frame_pointer,
+                &record
+            )
+        ) {
             break;
         }
 
         uint64_t return_address =
-            record.return_address & 0x0000FFFFFFFFFFFFULL;
+            record.return_address &
+            0x0000FFFFFFFFFFFFULL;
 
         if (return_address == 0) {
             break;
@@ -694,7 +892,9 @@ static void cpu_profiler_capture_native_stack(
             ? return_address - 4
             : return_address;
 
-        char symbol[CPU_PROFILE_SYMBOL];
+        char symbol[
+            CPU_PROFILE_SYMBOL
+        ];
 
         cpu_profiler_resolve_symbol(
             lookup_address,
@@ -724,15 +924,20 @@ static void cpu_profiler_capture_native_stack(
 
         if (
             next_frame <= frame_pointer ||
-            next_frame - frame_pointer > 1024 * 1024
+            next_frame - frame_pointer >
+                1024 * 1024
         ) {
             break;
         }
 
-        frame_pointer = next_frame;
+        frame_pointer =
+            next_frame;
     }
 
-    if (sample->native_stack[0] == '\0') {
+    if (
+        sample->native_stack[0] ==
+        '\0'
+    ) {
 
         snprintf(
             sample->native_stack,
@@ -763,16 +968,22 @@ static void cpu_profiler_capture_native_stack(
 // CPU Profiler Thread
 // ============================================================
 
-static void *cpu_profiler_main(void *argument) {
+static void *cpu_profiler_main(
+    void *argument
+) {
 
     (void)argument;
 
-    pthread_setname_np("JarBoxCPUProfiler");
+    pthread_setname_np(
+        "JarBoxCPUProfiler"
+    );
 
-    while (atomic_load_explicit(
-        &g_cpu_profiler_running,
-        memory_order_relaxed
-    )) {
+    while (
+        atomic_load_explicit(
+            &g_cpu_profiler_running,
+            memory_order_relaxed
+        )
+    ) {
 
         for (
             int i = 0;
@@ -780,10 +991,12 @@ static void *cpu_profiler_main(void *argument) {
             i++
         ) {
 
-            if (!atomic_load_explicit(
-                &g_cpu_profiler_running,
-                memory_order_relaxed
-            )) {
+            if (
+                !atomic_load_explicit(
+                    &g_cpu_profiler_running,
+                    memory_order_relaxed
+                )
+            ) {
                 break;
             }
 
@@ -792,25 +1005,33 @@ static void *cpu_profiler_main(void *argument) {
             delay.tv_sec = 1;
             delay.tv_nsec = 0;
 
-            nanosleep(&delay, NULL);
+            nanosleep(
+                &delay,
+                NULL
+            );
         }
 
-        if (!atomic_load_explicit(
-            &g_cpu_profiler_running,
-            memory_order_relaxed
-        )) {
+        if (
+            !atomic_load_explicit(
+                &g_cpu_profiler_running,
+                memory_order_relaxed
+            )
+        ) {
             break;
         }
 
-        thread_act_array_t thread_list = NULL;
+        thread_act_array_t thread_list =
+            NULL;
 
-        mach_msg_type_number_t thread_count = 0;
+        mach_msg_type_number_t thread_count =
+            0;
 
-        kern_return_t result = task_threads(
-            mach_task_self(),
-            &thread_list,
-            &thread_count
-        );
+        kern_return_t result =
+            task_threads(
+                mach_task_self(),
+                &thread_list,
+                &thread_count
+            );
 
         if (result != KERN_SUCCESS) {
 
@@ -822,11 +1043,15 @@ static void *cpu_profiler_main(void *argument) {
             continue;
         }
 
-        CPUThreadSample top[CPU_PROFILE_TOP_THREADS] = {0};
+        CPUThreadSample top[
+            CPU_PROFILE_TOP_THREADS
+        ] = {0};
 
-        double total_cpu = 0.0;
+        double total_cpu =
+            0.0;
 
-        int active_threads = 0;
+        int active_threads =
+            0;
 
         for (
             mach_msg_type_number_t i = 0;
@@ -839,14 +1064,17 @@ static void *cpu_profiler_main(void *argument) {
             mach_msg_type_number_t info_count =
                 THREAD_BASIC_INFO_COUNT;
 
-            kern_return_t info_result = thread_info(
-                thread_list[i],
-                THREAD_BASIC_INFO,
-                (thread_info_t)&info,
-                &info_count
-            );
+            kern_return_t info_result =
+                thread_info(
+                    thread_list[i],
+                    THREAD_BASIC_INFO,
+                    (thread_info_t)&info,
+                    &info_count
+                );
 
-            if (info_result != KERN_SUCCESS) {
+            if (
+                info_result != KERN_SUCCESS
+            ) {
                 continue;
             }
 
@@ -858,17 +1086,22 @@ static void *cpu_profiler_main(void *argument) {
                 continue;
             }
 
-            total_cpu += cpu_percent;
+            total_cpu +=
+                cpu_percent;
 
             active_threads++;
 
-            CPUThreadSample sample = {0};
+            CPUThreadSample sample =
+                {0};
 
-            sample.cpu_percent = cpu_percent;
+            sample.cpu_percent =
+                cpu_percent;
 
-            sample.thread_port = thread_list[i];
+            sample.thread_port =
+                thread_list[i];
 
-            sample.vm_status = -1;
+            sample.vm_status =
+                -1;
 
             snprintf(
                 sample.vm_role,
@@ -888,28 +1121,36 @@ static void *cpu_profiler_main(void *argument) {
                 ) {
 
                     for (
-                        int shift = CPU_PROFILE_TOP_THREADS - 1;
+                        int shift =
+                            CPU_PROFILE_TOP_THREADS - 1;
                         shift > position;
                         shift--
                     ) {
-                        top[shift] = top[shift - 1];
+
+                        top[shift] =
+                            top[shift - 1];
                     }
 
-                    top[position] = sample;
+                    top[position] =
+                        sample;
 
                     break;
                 }
             }
         }
 
-        // Inspect only the four busiest threads.
+        /*
+         * Inspect only the four busiest threads.
+         */
         for (
             int i = 0;
             i < CPU_PROFILE_PRINT_TOP;
             i++
         ) {
 
-            if (top[i].cpu_percent <= 0.1) {
+            if (
+                top[i].cpu_percent <= 0.1
+            ) {
                 break;
             }
 
@@ -918,7 +1159,9 @@ static void *cpu_profiler_main(void *argument) {
                     top[i].thread_port
                 );
 
-            if (native_thread != NULL) {
+            if (
+                native_thread != NULL
+            ) {
 
                 top[i].is_ios_main_thread =
                     g_ios_main_pthread_valid &&
@@ -943,7 +1186,10 @@ static void *cpu_profiler_main(void *argument) {
                     );
                 }
 
-                if (top[i].is_ios_main_thread) {
+                if (
+                    top[i].is_ios_main_thread
+                ) {
+
                     snprintf(
                         top[i].vm_role,
                         sizeof(top[i].vm_role),
@@ -965,7 +1211,9 @@ static void *cpu_profiler_main(void *argument) {
                 );
             }
 
-            cpu_profiler_capture_native_stack(&top[i]);
+            cpu_profiler_capture_native_stack(
+                &top[i]
+            );
         }
 
         printf(
@@ -981,13 +1229,16 @@ static void *cpu_profiler_main(void *argument) {
             i++
         ) {
 
-            if (top[i].cpu_percent <= 0.1) {
+            if (
+                top[i].cpu_percent <= 0.1
+            ) {
                 break;
             }
 
             printf(
                 "[CPU Thread] mach=%u cpu=%.1f%% name=%s vm=%s main=%d status=%d blocking=%d\n",
-                (unsigned int)top[i].thread_port,
+                (unsigned int)
+                    top[i].thread_port,
                 top[i].cpu_percent,
                 top[i].native_name,
                 top[i].vm_role,
@@ -998,21 +1249,26 @@ static void *cpu_profiler_main(void *argument) {
 
             printf(
                 "[CPU Native PC] mach=%u %s\n",
-                (unsigned int)top[i].thread_port,
+                (unsigned int)
+                    top[i].thread_port,
                 top[i].native_pc
             );
 
             printf(
                 "[CPU Native Stack] mach=%u %s\n",
-                (unsigned int)top[i].thread_port,
+                (unsigned int)
+                    top[i].thread_port,
                 top[i].native_stack
             );
 
-            if (top[i].vm_matched) {
+            if (
+                top[i].vm_matched
+            ) {
 
                 printf(
                     "[CPU Java Stack] mach=%u %s\n",
-                    (unsigned int)top[i].thread_port,
+                    (unsigned int)
+                        top[i].thread_port,
                     top[i].java_stack
                 );
 
@@ -1020,12 +1276,16 @@ static void *cpu_profiler_main(void *argument) {
 
                 printf(
                     "[CPU Java Stack] mach=%u no MiniJVM Runtime match\n",
-                    (unsigned int)top[i].thread_port
+                    (unsigned int)
+                        top[i].thread_port
                 );
             }
         }
 
-        // Release the Mach thread ports returned by task_threads().
+        /*
+         * Release the Mach thread ports
+         * returned by task_threads().
+         */
         for (
             mach_msg_type_number_t i = 0;
             i < thread_count;
@@ -1038,12 +1298,17 @@ static void *cpu_profiler_main(void *argument) {
             );
         }
 
-        if (thread_list != NULL) {
+        if (
+            thread_list != NULL
+        ) {
 
             vm_deallocate(
                 mach_task_self(),
                 (vm_address_t)thread_list,
-                (vm_size_t)(thread_count * sizeof(thread_t))
+                (vm_size_t)(
+                    thread_count *
+                    sizeof(thread_t)
+                )
             );
         }
     }
@@ -1058,7 +1323,9 @@ static void *cpu_profiler_main(void *argument) {
 
 static void cpu_profiler_start(void) {
 
-    if (g_cpu_profiler_started) {
+    if (
+        g_cpu_profiler_started
+    ) {
         return;
     }
 
@@ -1068,12 +1335,13 @@ static void cpu_profiler_start(void) {
         memory_order_relaxed
     );
 
-    int result = pthread_create(
-        &g_cpu_profiler_thread,
-        NULL,
-        cpu_profiler_main,
-        NULL
-    );
+    int result =
+        pthread_create(
+            &g_cpu_profiler_thread,
+            NULL,
+            cpu_profiler_main,
+            NULL
+        );
 
     if (result != 0) {
 
@@ -1091,7 +1359,8 @@ static void cpu_profiler_start(void) {
         return;
     }
 
-    g_cpu_profiler_started = 1;
+    g_cpu_profiler_started =
+        1;
 
     printf(
         "[CPU Profiler] Started. Sampling top %d threads every %d seconds.\n",
@@ -1103,7 +1372,9 @@ static void cpu_profiler_start(void) {
 
 static void cpu_profiler_stop(void) {
 
-    if (!g_cpu_profiler_started) {
+    if (
+        !g_cpu_profiler_started
+    ) {
         return;
     }
 
@@ -1118,9 +1389,12 @@ static void cpu_profiler_stop(void) {
         NULL
     );
 
-    g_cpu_profiler_started = 0;
+    g_cpu_profiler_started =
+        0;
 
-    printf("[CPU Profiler] Stopped.\n");
+    printf(
+        "[CPU Profiler] Stopped.\n"
+    );
 }
 
 
@@ -1128,9 +1402,14 @@ static void cpu_profiler_stop(void) {
 // Runtime log
 // ============================================================
 
-static void start_runtime_log(const char *save_root) {
+static void start_runtime_log(
+    const char *save_root
+) {
 
-    if (!save_root || !save_root[0]) {
+    if (
+        !save_root ||
+        !save_root[0]
+    ) {
         return;
     }
 
@@ -1143,11 +1422,14 @@ static void start_runtime_log(const char *save_root) {
         save_root
     );
 
-    int fd = open(
-        path,
-        O_WRONLY | O_CREAT | O_TRUNC,
-        0600
-    );
+    int fd =
+        open(
+            path,
+            O_WRONLY |
+            O_CREAT |
+            O_TRUNC,
+            0600
+        );
 
     if (fd < 0) {
 
@@ -1163,29 +1445,56 @@ static void start_runtime_log(const char *save_root) {
     fflush(stdout);
     fflush(stderr);
 
-    if (g_saved_stdout < 0) {
-        g_saved_stdout = dup(STDOUT_FILENO);
-    }
+    if (
+        g_saved_stdout < 0
+    ) {
 
-    if (g_saved_stderr < 0) {
-        g_saved_stderr = dup(STDERR_FILENO);
+        g_saved_stdout =
+            dup(STDOUT_FILENO);
     }
 
     if (
-        dup2(fd, STDOUT_FILENO) < 0 ||
-        dup2(fd, STDERR_FILENO) < 0
+        g_saved_stderr < 0
+    ) {
+
+        g_saved_stderr =
+            dup(STDERR_FILENO);
+    }
+
+    if (
+        dup2(
+            fd,
+            STDOUT_FILENO
+        ) < 0 ||
+        dup2(
+            fd,
+            STDERR_FILENO
+        ) < 0
     ) {
 
         close(fd);
+
         return;
     }
 
     close(fd);
 
-    setvbuf(stdout, NULL, _IOLBF, 0);
-    setvbuf(stderr, NULL, _IONBF, 0);
+    setvbuf(
+        stdout,
+        NULL,
+        _IOLBF,
+        0
+    );
 
-    g_log_redirected = 1;
+    setvbuf(
+        stderr,
+        NULL,
+        _IONBF,
+        0
+    );
+
+    g_log_redirected =
+        1;
 
     printf(
         "[JVM Bridge] Diagnostic log: %s\n",
@@ -1196,33 +1505,65 @@ static void start_runtime_log(const char *save_root) {
 
 static void stop_runtime_log(void) {
 
-    if (!g_log_redirected) {
+    if (
+        !g_log_redirected
+    ) {
         return;
     }
 
     fflush(stdout);
     fflush(stderr);
 
-    if (g_saved_stdout >= 0) {
+    if (
+        g_saved_stdout >= 0
+    ) {
 
-        dup2(g_saved_stdout, STDOUT_FILENO);
-        close(g_saved_stdout);
+        dup2(
+            g_saved_stdout,
+            STDOUT_FILENO
+        );
 
-        g_saved_stdout = -1;
+        close(
+            g_saved_stdout
+        );
+
+        g_saved_stdout =
+            -1;
     }
 
-    if (g_saved_stderr >= 0) {
+    if (
+        g_saved_stderr >= 0
+    ) {
 
-        dup2(g_saved_stderr, STDERR_FILENO);
-        close(g_saved_stderr);
+        dup2(
+            g_saved_stderr,
+            STDERR_FILENO
+        );
 
-        g_saved_stderr = -1;
+        close(
+            g_saved_stderr
+        );
+
+        g_saved_stderr =
+            -1;
     }
 
-    setvbuf(stdout, NULL, _IOLBF, 0);
-    setvbuf(stderr, NULL, _IONBF, 0);
+    setvbuf(
+        stdout,
+        NULL,
+        _IOLBF,
+        0
+    );
 
-    g_log_redirected = 0;
+    setvbuf(
+        stderr,
+        NULL,
+        _IONBF,
+        0
+    );
+
+    g_log_redirected =
+        0;
 }
 
 
@@ -1230,17 +1571,27 @@ static void stop_runtime_log(void) {
 // Manifest
 // ============================================================
 
-static char *load_midlet_manifest(const char *jar_path) {
+static char *load_midlet_manifest(
+    const char *jar_path
+) {
 
-    if (!jar_path || !jar_path[0]) {
-        printf("[JVM Bridge] ERROR: Empty JAR path\n");
+    if (
+        !jar_path ||
+        !jar_path[0]
+    ) {
+
+        printf(
+            "[JVM Bridge] ERROR: Empty JAR path\n"
+        );
+
         return NULL;
     }
 
-    s64 manifest_size = zip_get_file_unzip_size(
-        jar_path,
-        "META-INF/MANIFEST.MF"
-    );
+    s64 manifest_size =
+        zip_get_file_unzip_size(
+            jar_path,
+            "META-INF/MANIFEST.MF"
+        );
 
     if (
         manifest_size <= 0 ||
@@ -1255,12 +1606,17 @@ static char *load_midlet_manifest(const char *jar_path) {
         return NULL;
     }
 
-    char *manifest = (char *)malloc(
-        (size_t)manifest_size + 1
-    );
+    char *manifest =
+        (char *)malloc(
+            (size_t)manifest_size + 1
+        );
 
     if (!manifest) {
-        printf("[JVM Bridge] ERROR: Cannot allocate manifest buffer\n");
+
+        printf(
+            "[JVM Bridge] ERROR: Cannot allocate manifest buffer\n"
+        );
+
         return NULL;
     }
 
@@ -1270,22 +1626,32 @@ static char *load_midlet_manifest(const char *jar_path) {
         (size_t)manifest_size + 1
     );
 
-    s32 result = zip_loadfile_to_mem(
-        jar_path,
-        "META-INF/MANIFEST.MF",
-        manifest,
-        manifest_size
-    );
+    s32 result =
+        zip_loadfile_to_mem(
+            jar_path,
+            "META-INF/MANIFEST.MF",
+            manifest,
+            manifest_size
+        );
 
-    if (result != 0) {
+    if (
+        result != 0
+    ) {
 
-        printf("[JVM Bridge] ERROR: Cannot extract MIDlet manifest\n");
+        printf(
+            "[JVM Bridge] ERROR: Cannot extract MIDlet manifest\n"
+        );
 
-        free(manifest);
+        free(
+            manifest
+        );
+
         return NULL;
     }
 
-    manifest[manifest_size] = '\0';
+    manifest[
+        manifest_size
+    ] = '\0';
 
     printf(
         "[JVM Bridge] Manifest loaded successfully (%lld bytes)\n",
@@ -1311,21 +1677,38 @@ int jvm_bridge_init(
 ) {
 
     if (g_jvm) {
-        printf("[JVM Bridge] JVM already initialized\n");
+
+        printf(
+            "[JVM Bridge] JVM already initialized\n"
+        );
+
         return -1;
     }
 
-    // GameViewController invokes init and MIDlet execution on the same
-    // background worker. Keep its pthread ID for main-Runtime correlation.
-    g_midlet_runner_pthread = pthread_self();
-    g_midlet_runner_pthread_valid = 1;
-    pthread_setname_np("J2ME-MIDlet");
+    /*
+     * GameViewController invokes init and MIDlet execution
+     * on the same background worker.
+     * Keep its pthread ID for main-Runtime correlation.
+     */
+    g_midlet_runner_pthread =
+        pthread_self();
 
-    start_runtime_log(save_root);
+    g_midlet_runner_pthread_valid =
+        1;
+
+    pthread_setname_np(
+        "J2ME-MIDlet"
+    );
+
+    start_runtime_log(
+        save_root
+    );
 
     printf(
         "[JVM Bridge] iOS main thread registered: %s\n",
-        g_ios_main_pthread_valid ? "yes" : "no"
+        g_ios_main_pthread_valid
+            ? "yes"
+            : "no"
     );
 
     char bootclasspath[1024];
@@ -1357,24 +1740,37 @@ int jvm_bridge_init(
         classpath
     );
 
-    g_jvm = jvm_create();
+    g_jvm =
+        jvm_create();
 
     if (!g_jvm) {
 
-        printf("[JVM Bridge] ERROR: jvm_create() failed\n");
+        printf(
+            "[JVM Bridge] ERROR: jvm_create() failed\n"
+        );
 
         stop_runtime_log();
+
         return -2;
     }
 
-    g_jvm->jdwp_enable = 0;
-    g_jvm->jdwp_suspend_on_start = 0;
-    g_jvm->max_heap_size = 128 * 1024 * 1024;
+    g_jvm->jdwp_enable =
+        0;
 
-    // Keep the existing 2000ms GC interval.
-    g_jvm->garbage_collect_period_ms = 2000;
+    g_jvm->jdwp_suspend_on_start =
+        0;
 
-    g_jvm->heap_overload_percent = 70;
+    g_jvm->max_heap_size =
+        128 * 1024 * 1024;
+
+    /*
+     * Keep the existing 2000ms GC interval.
+     */
+    g_jvm->garbage_collect_period_ms =
+        2000;
+
+    g_jvm->heap_overload_percent =
+        70;
 
     printf(
         "[JVM Bridge] GC interval: %d ms, heap threshold: %d%%\n",
@@ -1382,11 +1778,12 @@ int jvm_bridge_init(
         g_jvm->heap_overload_percent
     );
 
-    s32 ret = jvm_init(
-        g_jvm,
-        (c8 *)bootclasspath,
-        (c8 *)classpath
-    );
+    s32 ret =
+        jvm_init(
+            g_jvm,
+            (c8 *)bootclasspath,
+            (c8 *)classpath
+        );
 
     if (ret) {
 
@@ -1395,40 +1792,117 @@ int jvm_bridge_init(
             ret
         );
 
-        jvm_destroy(g_jvm);
-        g_jvm = NULL;
+        jvm_destroy(
+            g_jvm
+        );
+
+        g_jvm =
+            NULL;
 
         stop_runtime_log();
 
         return -3;
     }
 
-    j2me_render_reg_natives(g_jvm);
-    j2me_input_reg_natives(g_jvm);
-    j2me_ui_reg_natives(g_jvm);
-    j2me_audio_reg_natives(g_jvm);
-    j2me_micro3d_gl_reg_natives(g_jvm);
-    j2me_m3g_reg_natives(g_jvm);
+    j2me_render_reg_natives(
+        g_jvm
+    );
 
-    sys_properties_set_c(g_jvm, "os.name", "iOS");
-    sys_properties_set_c(g_jvm, "app.save.root", save_root);
-    sys_properties_set_c(g_jvm, "microedition.platform", "Apple/iPhone");
-    sys_properties_set_c(g_jvm, "microedition.encoding", "UTF-8");
-    sys_properties_set_c(g_jvm, "microedition.locale", "en");
-    sys_properties_set_c(g_jvm, "microedition.profiles", "MIDP-2.0");
-    sys_properties_set_c(g_jvm, "microedition.configuration", "CLDC-1.1");
+    j2me_input_reg_natives(
+        g_jvm
+    );
+
+    j2me_ui_reg_natives(
+        g_jvm
+    );
+
+    j2me_audio_reg_natives(
+        g_jvm
+    );
+
+    j2me_micro3d_gl_reg_natives(
+        g_jvm
+    );
+
+    j2me_m3g_reg_natives(
+        g_jvm
+    );
+
+    sys_properties_set_c(
+        g_jvm,
+        "os.name",
+        "iOS"
+    );
+
+    sys_properties_set_c(
+        g_jvm,
+        "app.save.root",
+        save_root
+    );
+
+    sys_properties_set_c(
+        g_jvm,
+        "microedition.platform",
+        "Apple/iPhone"
+    );
+
+    sys_properties_set_c(
+        g_jvm,
+        "microedition.encoding",
+        "UTF-8"
+    );
+
+    sys_properties_set_c(
+        g_jvm,
+        "microedition.locale",
+        "en"
+    );
+
+    sys_properties_set_c(
+        g_jvm,
+        "microedition.profiles",
+        "MIDP-2.0"
+    );
+
+    sys_properties_set_c(
+        g_jvm,
+        "microedition.configuration",
+        "CLDC-1.1"
+    );
 
     char sw[16];
     char sh[16];
 
-    snprintf(sw, sizeof(sw), "%d", screen_width);
-    snprintf(sh, sizeof(sh), "%d", screen_height);
+    snprintf(
+        sw,
+        sizeof(sw),
+        "%d",
+        screen_width
+    );
 
-    sys_properties_set_c(g_jvm, "j2me.screen.width", sw);
-    sys_properties_set_c(g_jvm, "j2me.screen.height", sh);
+    snprintf(
+        sh,
+        sizeof(sh),
+        "%d",
+        screen_height
+    );
+
+    sys_properties_set_c(
+        g_jvm,
+        "j2me.screen.width",
+        sw
+    );
+
+    sys_properties_set_c(
+        g_jvm,
+        "j2me.screen.height",
+        sh
+    );
 
     g_render_3d_scale =
-        render_3d_scale > 0 ? render_3d_scale : 1;
+        render_3d_scale > 0
+            ? render_3d_scale
+            : 1;
 
     char ss[8];
 
@@ -1445,7 +1919,9 @@ int jvm_bridge_init(
         ss
     );
 
-    if (fps_limit > 0) {
+    if (
+        fps_limit > 0
+    ) {
 
         char fl[8];
 
@@ -1471,7 +1947,9 @@ int jvm_bridge_init(
         fps_limit
     );
 
-    printf("[JVM Bridge] JVM initialized successfully\n");
+    printf(
+        "[JVM Bridge] JVM initialized successfully\n"
+    );
 
     cpu_profiler_start();
 
@@ -1483,10 +1961,16 @@ int jvm_bridge_init(
 // Run MIDlet
 // ============================================================
 
-int jvm_bridge_run_midlet(const char *midlet_jar_path) {
+int jvm_bridge_run_midlet(
+    const char *midlet_jar_path
+) {
 
     if (!g_jvm) {
-        printf("[JVM Bridge] ERROR: JVM not initialized\n");
+
+        printf(
+            "[JVM Bridge] ERROR: JVM not initialized\n"
+        );
+
         return -1;
     }
 
@@ -1495,19 +1979,29 @@ int jvm_bridge_run_midlet(const char *midlet_jar_path) {
         midlet_jar_path
     );
 
-    char *manifest = load_midlet_manifest(midlet_jar_path);
+    char *manifest =
+        load_midlet_manifest(
+            midlet_jar_path
+        );
 
     if (!manifest) {
 
-        printf("[JVM Bridge] ERROR: Manifest extraction failed");
+        printf(
+            "[JVM Bridge] ERROR: Manifest extraction failed"
+        );
 
         return -4;
     }
 
-    ArrayList *java_para = arraylist_create(0);
+    ArrayList *java_para =
+        arraylist_create(0);
 
     if (!java_para) {
-        free(manifest);
+
+        free(
+            manifest
+        );
+
         return -5;
     }
 
@@ -1521,17 +2015,24 @@ int jvm_bridge_run_midlet(const char *midlet_jar_path) {
         (void *)manifest
     );
 
-    printf("[JVM Bridge] Starting MIDletRunner\n");
+    printf(
+        "[JVM Bridge] Starting MIDletRunner\n"
+    );
 
-    s32 ret = call_main(
-        g_jvm,
-        (c8 *)"javax/microedition/shell/MIDletRunner",
+    s32 ret =
+        call_main(
+            g_jvm,
+            (c8 *)"javax/microedition/shell/MIDletRunner",
+            java_para
+        );
+
+    arraylist_destroy(
         java_para
     );
 
-    arraylist_destroy(java_para);
-
-    free(manifest);
+    free(
+        manifest
+    );
 
     printf(
         "[JVM Bridge] MIDlet finished with code %d\n",
@@ -1540,7 +2041,6 @@ int jvm_bridge_run_midlet(const char *midlet_jar_path) {
 
     return ret;
 }
-
 
 
 // ============================================================
@@ -1556,52 +2056,165 @@ int jvm_bridge_session_create(
     int render_3d_scale,
     int fps_limit
 ) {
-    if (!res_root || !save_root || !midlet_jar) return -1000;
 
-    pthread_mutex_lock(&g_sessions_lock);
+    if (
+        !res_root ||
+        !save_root ||
+        !midlet_jar
+    ) {
+        return -1000;
+    }
 
-    J2MESession *s = NULL;
-    for (int i = 0; i < J2ME_MAX_SESSIONS; i++) {
-        if (!g_sessions[i].used) {
-            s = &g_sessions[i];
-            memset(s, 0, sizeof(*s));
-            s->id = i + 1;
-            s->used = 1;
-            atomic_init(&s->stop_requested, 0);
-            atomic_init(&s->running, 0);
+    pthread_mutex_lock(
+        &g_sessions_lock
+    );
+
+    J2MESession *s =
+        NULL;
+
+    for (
+        int i = 0;
+        i < J2ME_MAX_SESSIONS;
+        i++
+    ) {
+
+        if (
+            !g_sessions[i].used
+        ) {
+
+            s =
+                &g_sessions[i];
+
+            memset(
+                s,
+                0,
+                sizeof(*s)
+            );
+
+            s->id =
+                i + 1;
+
+            s->used =
+                1;
+
+            atomic_init(
+                &s->stop_requested,
+                0
+            );
+
+            atomic_init(
+                &s->running,
+                0
+            );
+
             break;
         }
     }
 
-    pthread_mutex_unlock(&g_sessions_lock);
+    pthread_mutex_unlock(
+        &g_sessions_lock
+    );
 
-    if (!s) return -1001;
+    if (!s) {
+        return -1001;
+    }
 
-    snprintf(s->res_root, sizeof(s->res_root), "%s", res_root);
-    snprintf(s->save_root, sizeof(s->save_root), "%s", save_root);
-    snprintf(s->jar_path, sizeof(s->jar_path), "%s", midlet_jar);
+    snprintf(
+        s->res_root,
+        sizeof(s->res_root),
+        "%s",
+        res_root
+    );
 
-    char bootclasspath[PATH_MAX * 2];
-    char classpath[PATH_MAX * 3];
-    snprintf(bootclasspath, sizeof(bootclasspath), "%s/minijvm_rt.jar", res_root);
-    snprintf(classpath, sizeof(classpath), "%s/j2me_api.jar:%s", res_root, midlet_jar);
+    snprintf(
+        s->save_root,
+        sizeof(s->save_root),
+        "%s",
+        save_root
+    );
 
-    s->jvm = jvm_create();
+    snprintf(
+        s->jar_path,
+        sizeof(s->jar_path),
+        "%s",
+        midlet_jar
+    );
+
+    char bootclasspath[
+        PATH_MAX * 2
+    ];
+
+    char classpath[
+        PATH_MAX * 3
+    ];
+
+    snprintf(
+        bootclasspath,
+        sizeof(bootclasspath),
+        "%s/minijvm_rt.jar",
+        res_root
+    );
+
+    snprintf(
+        classpath,
+        sizeof(classpath),
+        "%s/j2me_api.jar:%s",
+        res_root,
+        midlet_jar
+    );
+
+    s->jvm =
+        jvm_create();
+
     if (!s->jvm) {
-        pthread_mutex_lock(&g_sessions_lock);
-        s->used = 0;
-        pthread_mutex_unlock(&g_sessions_lock);
+
+        pthread_mutex_lock(
+            &g_sessions_lock
+        );
+
+        s->used =
+            0;
+
+        pthread_mutex_unlock(
+            &g_sessions_lock
+        );
+
         return -1002;
     }
 
-    s32 ret = jvm_init(s->jvm, (c8 *)bootclasspath, (c8 *)classpath);
+    s32 ret =
+        jvm_init(
+            s->jvm,
+            (c8 *)bootclasspath,
+            (c8 *)classpath
+        );
+
     if (ret) {
-        printf("[JVM Session %d] jvm_init failed: %d\n", s->id, ret);
-        jvm_destroy(s->jvm);
-        s->jvm = NULL;
-        pthread_mutex_lock(&g_sessions_lock);
-        s->used = 0;
-        pthread_mutex_unlock(&g_sessions_lock);
+
+        printf(
+            "[JVM Session %d] jvm_init failed: %d\n",
+            s->id,
+            ret
+        );
+
+        jvm_destroy(
+            s->jvm
+        );
+
+        s->jvm =
+            NULL;
+
+        pthread_mutex_lock(
+            &g_sessions_lock
+        );
+
+        s->used =
+            0;
+
+        pthread_mutex_unlock(
+            &g_sessions_lock
+        );
+
         return -1003;
     }
 
@@ -1614,150 +2227,394 @@ int jvm_bridge_session_create(
         fps_limit
     );
 
-    printf("[JVM Session %d] JVM initialized: %dx%d\n",
-           s->id, screen_width, screen_height);
+    printf(
+        "[JVM Session %d] JVM initialized: %dx%d\n",
+        s->id,
+        screen_width,
+        screen_height
+    );
 
     return s->id;
 }
 
-int jvm_bridge_session_start(int session_id) {
-    pthread_mutex_lock(&g_sessions_lock);
-    J2MESession *s = session_find_locked(session_id);
-    if (!s || !s->jvm) {
-        pthread_mutex_unlock(&g_sessions_lock);
+
+int jvm_bridge_session_start(
+    int session_id
+) {
+
+    pthread_mutex_lock(
+        &g_sessions_lock
+    );
+
+    J2MESession *s =
+        session_find_locked(
+            session_id
+        );
+
+    if (
+        !s ||
+        !s->jvm
+    ) {
+
+        pthread_mutex_unlock(
+            &g_sessions_lock
+        );
+
         return -1100;
     }
-    if (s->runner_valid || atomic_load(&s->running)) {
-        pthread_mutex_unlock(&g_sessions_lock);
+
+    if (
+        s->runner_valid ||
+        atomic_load(
+            &s->running
+        )
+    ) {
+
+        pthread_mutex_unlock(
+            &g_sessions_lock
+        );
+
         return 0;
     }
-    atomic_store(&s->stop_requested, 0);
-    int rc = pthread_create(&s->runner, NULL, session_runner_main, s);
-    if (rc == 0) s->runner_valid = 1;
-    pthread_mutex_unlock(&g_sessions_lock);
-    return rc == 0 ? 0 : -1101;
+
+    atomic_store(
+        &s->stop_requested,
+        0
+    );
+
+    int rc =
+        pthread_create(
+            &s->runner,
+            NULL,
+            session_runner_main,
+            s
+        );
+
+    if (rc == 0) {
+        s->runner_valid =
+            1;
+    }
+
+    pthread_mutex_unlock(
+        &g_sessions_lock
+    );
+
+    return rc == 0
+        ? 0
+        : -1101;
 }
 
-void jvm_bridge_session_set_active(int session_id) {
-    pthread_mutex_lock(&g_sessions_lock);
-    J2MESession *s = session_find_locked(session_id);
-    g_active_session_jvm = s ? s->jvm : NULL;
-    pthread_mutex_unlock(&g_sessions_lock);
 
-    j2me_render_set_active_jvm(g_active_session_jvm);
-    j2me_input_set_active_jvm(g_active_session_jvm);
+void jvm_bridge_session_set_active(
+    int session_id
+) {
+
+    pthread_mutex_lock(
+        &g_sessions_lock
+    );
+
+    J2MESession *s =
+        session_find_locked(
+            session_id
+        );
+
+    g_active_session_jvm =
+        s ? s->jvm : NULL;
+
+    pthread_mutex_unlock(
+        &g_sessions_lock
+    );
+
+    j2me_render_set_active_jvm(
+        g_active_session_jvm
+    );
+
+    j2me_input_set_active_jvm(
+        g_active_session_jvm
+    );
 }
 
-int jvm_bridge_session_is_running(int session_id) {
-    pthread_mutex_lock(&g_sessions_lock);
-    J2MESession *s = session_find_locked(session_id);
-    int result = s ? atomic_load(&s->running) : 0;
-    pthread_mutex_unlock(&g_sessions_lock);
+
+int jvm_bridge_session_is_running(
+    int session_id
+) {
+
+    pthread_mutex_lock(
+        &g_sessions_lock
+    );
+
+    J2MESession *s =
+        session_find_locked(
+            session_id
+        );
+
+    int result =
+        s
+            ? atomic_load(
+                &s->running
+            )
+            : 0;
+
+    pthread_mutex_unlock(
+        &g_sessions_lock
+    );
+
     return result;
 }
 
-void jvm_bridge_session_request_stop(int session_id) {
-    pthread_mutex_lock(&g_sessions_lock);
-    J2MESession *s = session_find_locked(session_id);
+
+void jvm_bridge_session_request_stop(
+    int session_id
+) {
+
+    pthread_mutex_lock(
+        &g_sessions_lock
+    );
+
+    J2MESession *s =
+        session_find_locked(
+            session_id
+        );
+
     if (s) {
-        atomic_store(&s->stop_requested, 1);
-        if (s->jvm && s->jvm->collector) {
-            s->jvm->collector->exit_flag = 1;
+
+        atomic_store(
+            &s->stop_requested,
+            1
+        );
+
+        if (
+            s->jvm &&
+            s->jvm->collector
+        ) {
+
+            s->jvm->collector->exit_flag =
+                1;
         }
     }
-    pthread_mutex_unlock(&g_sessions_lock);
+
+    pthread_mutex_unlock(
+        &g_sessions_lock
+    );
 }
 
-void jvm_bridge_session_destroy(int session_id) {
-    pthread_mutex_lock(&g_sessions_lock);
-    J2MESession *s = session_find_locked(session_id);
+
+void jvm_bridge_session_destroy(
+    int session_id
+) {
+
+    pthread_mutex_lock(
+        &g_sessions_lock
+    );
+
+    J2MESession *s =
+        session_find_locked(
+            session_id
+        );
+
     if (!s) {
-        pthread_mutex_unlock(&g_sessions_lock);
+
+        pthread_mutex_unlock(
+            &g_sessions_lock
+        );
+
         return;
     }
 
-    if (s->jvm == g_active_session_jvm) {
-        g_active_session_jvm = NULL;
-        j2me_render_set_active_jvm(NULL);
-        j2me_input_set_active_jvm(NULL);
+    if (
+        s->jvm ==
+        g_active_session_jvm
+    ) {
+
+        g_active_session_jvm =
+            NULL;
+
+        j2me_render_set_active_jvm(
+            NULL
+        );
+
+        j2me_input_set_active_jvm(
+            NULL
+        );
     }
 
-    pthread_mutex_unlock(&g_sessions_lock);
+    pthread_mutex_unlock(
+        &g_sessions_lock
+    );
 
-    jvm_bridge_session_request_stop(session_id);
+    jvm_bridge_session_request_stop(
+        session_id
+    );
 
-    pthread_mutex_lock(&g_sessions_lock);
-    s = session_find_locked(session_id);
+    pthread_mutex_lock(
+        &g_sessions_lock
+    );
+
+    s =
+        session_find_locked(
+            session_id
+        );
+
     if (!s) {
-        pthread_mutex_unlock(&g_sessions_lock);
+
+        pthread_mutex_unlock(
+            &g_sessions_lock
+        );
+
         return;
     }
-    MiniJVM *jvm = s->jvm;
-    pthread_t runner = s->runner;
-    int runner_valid = s->runner_valid;
-    pthread_mutex_unlock(&g_sessions_lock);
 
-    if (runner_valid && !pthread_equal(pthread_self(), runner)) {
-        pthread_join(runner, NULL);
+    MiniJVM *jvm =
+        s->jvm;
+
+    pthread_t runner =
+        s->runner;
+
+    int runner_valid =
+        s->runner_valid;
+
+    pthread_mutex_unlock(
+        &g_sessions_lock
+    );
+
+    if (
+        runner_valid &&
+        !pthread_equal(
+            pthread_self(),
+            runner
+        )
+    ) {
+
+        pthread_join(
+            runner,
+            NULL
+        );
     }
 
     if (jvm) {
-        jvm_destroy(jvm);
+
+        jvm_destroy(
+            jvm
+        );
     }
 
-    j2me_input_remove_jvm(jvm);
+    j2me_input_remove_jvm(
+        jvm
+    );
 
-    pthread_mutex_lock(&g_sessions_lock);
-    s = session_find_locked(session_id);
+    pthread_mutex_lock(
+        &g_sessions_lock
+    );
+
+    s =
+        session_find_locked(
+            session_id
+        );
+
     if (s) {
-        memset(s, 0, sizeof(*s));
+
+        memset(
+            s,
+            0,
+            sizeof(*s)
+        );
     }
-    pthread_mutex_unlock(&g_sessions_lock);
+
+    pthread_mutex_unlock(
+        &g_sessions_lock
+    );
 }
 
-void jvm_bridge_session_destroy_all(void) {
-    for (int i = 1; i <= J2ME_MAX_SESSIONS; i++) {
-        jvm_bridge_session_destroy(i);
+
+void jvm_bridge_session_destroy_all(
+    void
+) {
+
+    for (
+        int i = 1;
+        i <= J2ME_MAX_SESSIONS;
+        i++
+    ) {
+
+        jvm_bridge_session_destroy(
+            i
+        );
     }
 
     j2me_render_stop();
+
     j2me_render_cleanup();
 }
 
-int jvm_bridge_is_stop_requested_for_vm(MiniJVM *jvm) {
-    pthread_mutex_lock(&g_sessions_lock);
-    J2MESession *s = session_find_by_vm_locked(jvm);
-    int result = s ? atomic_load(&s->stop_requested) : 0;
-    pthread_mutex_unlock(&g_sessions_lock);
+
+int jvm_bridge_is_stop_requested_for_vm(
+    MiniJVM *jvm
+) {
+
+    pthread_mutex_lock(
+        &g_sessions_lock
+    );
+
+    J2MESession *s =
+        session_find_by_vm_locked(
+            jvm
+        );
+
+    int result =
+        s
+            ? atomic_load(
+                &s->stop_requested
+            )
+            : 0;
+
+    pthread_mutex_unlock(
+        &g_sessions_lock
+    );
+
     return result;
 }
+
 
 // ============================================================
 // Destroy
 // ============================================================
 
-void jvm_bridge_destroy(void) {
+void jvm_bridge_destroy(
+    void
+) {
 
     cpu_profiler_stop();
 
     if (g_jvm) {
 
-        printf("[JVM Bridge] Destroying JVM\n");
+        printf(
+            "[JVM Bridge] Destroying JVM\n"
+        );
 
         j2me_render_stop();
 
-        g_jvm->collector->exit_flag = 1;
+        g_jvm->collector->exit_flag =
+            1;
 
-        thread_stop_all(g_jvm);
+        thread_stop_all(
+            g_jvm
+        );
 
-        jvm_destroy(g_jvm);
+        jvm_destroy(
+            g_jvm
+        );
 
-        g_jvm = NULL;
+        g_jvm =
+            NULL;
 
         j2me_input_reset();
+
         j2me_audio_stop_all();
+
         j2me_micro3d_gl_cleanup();
+
         j2me_m3g_cleanup();
+
         j2me_render_cleanup();
 
         atomic_store(
@@ -1770,7 +2627,8 @@ void jvm_bridge_destroy(void) {
         );
     }
 
-    g_midlet_runner_pthread_valid = 0;
+    g_midlet_runner_pthread_valid =
+        0;
 
     stop_runtime_log();
 }
@@ -1780,9 +2638,13 @@ void jvm_bridge_destroy(void) {
 // Stop request
 // ============================================================
 
-void jvm_bridge_request_stop(void) {
+void jvm_bridge_request_stop(
+    void
+) {
 
-    printf("[JVM Bridge] Stop requested\n");
+    printf(
+        "[JVM Bridge] Stop requested\n"
+    );
 
     atomic_store(
         &g_jvm_stop_requested,
@@ -1790,6 +2652,12 @@ void jvm_bridge_request_stop(void) {
     );
 }
 
-int jvm_bridge_is_stop_requested(void) {
-    return atomic_load(&g_jvm_stop_requested);
+
+int jvm_bridge_is_stop_requested(
+    void
+) {
+
+    return atomic_load(
+        &g_jvm_stop_requested
+    );
 }
