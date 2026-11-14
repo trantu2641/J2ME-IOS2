@@ -49,20 +49,22 @@ class FormView: UIView, UIGestureRecognizerDelegate {
         // Title
         titleLabel.font = .boldSystemFont(ofSize: 18)
         titleLabel.textAlignment = .center
+        titleLabel.textColor = .label
         titleLabel.translatesAutoresizingMaskIntoConstraints = false
         addSubview(titleLabel)
 
         // Scroll + Stack for items
         scrollView.translatesAutoresizingMaskIntoConstraints = false
+        scrollView.alwaysBounceVertical = true
         addSubview(scrollView)
 
         stackView.axis = .vertical
-        stackView.spacing = 12
+        stackView.spacing = 6
         stackView.alignment = .fill
         stackView.layoutMargins = UIEdgeInsets(
-            top: 12,
+            top: 8,
             left: 16,
-            bottom: 12,
+            bottom: 8,
             right: 16
         )
         stackView.isLayoutMarginsRelativeArrangement = true
@@ -92,13 +94,13 @@ class FormView: UIView, UIGestureRecognizerDelegate {
 
             scrollView.topAnchor.constraint(
                 equalTo: titleLabel.bottomAnchor,
-                constant: 8
+                constant: 4
             ),
             scrollView.leadingAnchor.constraint(equalTo: leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: trailingAnchor),
             scrollView.bottomAnchor.constraint(
                 equalTo: commandBar.topAnchor,
-                constant: -8
+                constant: -6
             ),
 
             stackView.topAnchor.constraint(
@@ -322,9 +324,12 @@ class FormView: UIView, UIGestureRecognizerDelegate {
         if !label.isEmpty {
             let labelView = UILabel()
             labelView.text = label
-            labelView.font =
-                .boldSystemFont(ofSize: 14)
+            labelView.font = .systemFont(
+                ofSize: 16,
+                weight: .regular
+            )
             labelView.textColor = .secondaryLabel
+            labelView.numberOfLines = 0
 
             container.addArrangedSubview(labelView)
         }
@@ -332,8 +337,8 @@ class FormView: UIView, UIGestureRecognizerDelegate {
         if !text.isEmpty {
             let textView = UILabel()
             textView.text = text
-            textView.font =
-                .systemFont(ofSize: 16)
+            textView.font = .systemFont(ofSize: 16)
+            textView.textColor = .label
             textView.numberOfLines = 0
 
             container.addArrangedSubview(textView)
@@ -352,19 +357,36 @@ class FormView: UIView, UIGestureRecognizerDelegate {
         choiceType: Int32,
         selected: Bool
     ) {
-        let row = UIStackView()
+        let isFirstInGroup =
+            !choiceControls.contains {
+                $0.groupID == groupID
+            }
 
+        // Show the group label only once.
+        if isFirstInGroup && !label.isEmpty {
+            let groupLabel = UILabel()
+            groupLabel.text = label
+            groupLabel.font = .systemFont(
+                ofSize: 16,
+                weight: .regular
+            )
+            groupLabel.textColor = .secondaryLabel
+            groupLabel.numberOfLines = 0
+            groupLabel.translatesAutoresizingMaskIntoConstraints = false
+
+            stackView.addArrangedSubview(groupLabel)
+        }
+
+        let row = UIStackView()
         row.axis = .horizontal
         row.alignment = .center
-        row.spacing = 10
-
+        row.spacing = 6
         row.layoutMargins = UIEdgeInsets(
-            top: 4,
+            top: 1,
             left: 0,
-            bottom: 4,
+            bottom: 1,
             right: 0
         )
-
         row.isLayoutMarginsRelativeArrangement = true
 
         let button = UIButton(type: .system)
@@ -381,16 +403,14 @@ class FormView: UIView, UIGestureRecognizerDelegate {
 
         button.contentHorizontalAlignment = .leading
         button.titleLabel?.numberOfLines = 0
-
         button.tintColor = .systemBlue
-        button.semanticContentAttribute =
-            .forceLeftToRight
+        button.semanticContentAttribute = .forceLeftToRight
 
         button.imageEdgeInsets = UIEdgeInsets(
             top: 0,
             left: 0,
             bottom: 0,
-            right: 8
+            right: 6
         )
 
         button.tag = selected ? 1 : 0
@@ -416,7 +436,6 @@ class FormView: UIView, UIGestureRecognizerDelegate {
 
         button.addAction(
             UIAction { [weak self, weak button] _ in
-
                 guard
                     let self,
                     let button
@@ -425,9 +444,6 @@ class FormView: UIView, UIGestureRecognizerDelegate {
                 }
 
                 if isExclusive {
-
-                    // Only one option in this ChoiceGroup
-                    // can remain selected.
                     for control in self.choiceControls
                     where
                         control.groupID == groupID &&
@@ -443,9 +459,7 @@ class FormView: UIView, UIGestureRecognizerDelegate {
                         button,
                         selected: true
                     )
-
                 } else {
-
                     self.setChoiceButton(
                         button,
                         selected: button.tag != 1
@@ -464,37 +478,7 @@ class FormView: UIView, UIGestureRecognizerDelegate {
             )
         )
 
-        if !label.isEmpty {
-
-            let labelView = UILabel()
-
-            labelView.text = label
-            labelView.font =
-                .systemFont(
-                    ofSize: 14,
-                    weight: .medium
-                )
-
-            labelView.textColor =
-                .secondaryLabel
-
-            labelView.numberOfLines = 0
-
-            labelView.setContentHuggingPriority(
-                .defaultLow,
-                for: .horizontal
-            )
-
-            labelView.setContentCompressionResistancePriority(
-                .defaultLow,
-                for: .horizontal
-            )
-
-            row.addArrangedSubview(labelView)
-        }
-
         row.addArrangedSubview(button)
-
         stackView.addArrangedSubview(row)
     }
 
@@ -542,24 +526,20 @@ class FormView: UIView, UIGestureRecognizerDelegate {
         constraints: Int32
     ) {
         let container = UIStackView()
-
         container.axis = .vertical
-        container.spacing = 4
+        container.spacing = 3
 
         if !label.isEmpty {
-
             let labelView = UILabel()
-
             labelView.text = label
-            labelView.font =
-                .boldSystemFont(ofSize: 14)
-
-            labelView.textColor =
-                .secondaryLabel
-
-            container.addArrangedSubview(
-                labelView
+            labelView.font = .systemFont(
+                ofSize: 16,
+                weight: .regular
             )
+            labelView.textColor = .secondaryLabel
+            labelView.numberOfLines = 0
+
+            container.addArrangedSubview(labelView)
         }
 
         let tf = UITextField()
@@ -567,6 +547,8 @@ class FormView: UIView, UIGestureRecognizerDelegate {
         tf.text = text
         tf.borderStyle = .roundedRect
         tf.font = .systemFont(ofSize: 16)
+        tf.textColor = .label
+        tf.backgroundColor = .systemBackground
         tf.clearButtonMode = .whileEditing
 
         let baseConstraint =
@@ -576,11 +558,8 @@ class FormView: UIView, UIGestureRecognizerDelegate {
             (Int(constraints) & 0x10000) != 0
 
         switch baseConstraint {
-
         case 2:
             // TextField.NUMERIC
-            // iOS does not expose a literal J2ME T9 keyboard.
-            // Use the numeric keypad for numeric fields.
             tf.keyboardType = .numberPad
 
         case 3:
