@@ -339,6 +339,12 @@ public class Display {
                     if (alert.nextDisplayable != null) {
                         setCurrent(alert.nextDisplayable);
                     }
+
+                } else if (type == 13 && current instanceof Form) {
+
+                    // Native UIKit FormView has committed its edited controls.
+                    // Apply them before the following command event is handled.
+                    ((Form) current).applyNativeEdits();
                 }
             }
 

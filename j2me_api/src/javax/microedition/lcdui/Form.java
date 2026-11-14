@@ -44,6 +44,51 @@ public class Form extends Screen {
         if (itemStateListener != null) itemStateListener.itemStateChanged(item);
     }
 
+    /** Apply edits made by the native UIKit form before serializing it again. */
+    public void applyNativeEdits() {
+        int nativeIndex = 0;
+
+        for (Item item : items) {
+            int type = item.getItemType();
+
+            if (type == 1) { // TextField
+                TextField tf = (TextField) item;
+                if (NativeBridge.hasPendingFormItemText(nativeIndex)) {
+                    tf.setString(NativeBridge.getPendingFormItemText(nativeIndex));
+                }
+                nativeIndex++;
+
+            } else if (type == 2) { // ChoiceGroup
+                ChoiceGroup cg = (ChoiceGroup) item;
+                boolean[] flags = new boolean[cg.size()];
+                boolean changed = false;
+
+                for (int j = 0; j < cg.size(); j++) {
+                    if (NativeBridge.hasPendingFormItemSelected(nativeIndex)) {
+                        flags[j] = NativeBridge.getPendingFormItemSelected(nativeIndex);
+                        changed = true;
+                    } else {
+                        flags[j] = cg.isSelected(j);
+                    }
+                    nativeIndex++;
+                }
+
+                if (changed) {
+                    cg.setSelectedFlags(flags);
+                    notifyItemStateChanged(cg);
+                }
+
+            } else {
+                // StringItem and other fallback items do not currently accept
+                // editable native state, but they still occupy one native
+                // serialized item slot.
+                nativeIndex++;
+            }
+        }
+
+        NativeBridge.clearPendingFormEdits();
+    }
+
     /** Serialize form to native bridge and show it. */
     public void showNative() {
         NativeBridge.formBegin(getTitle(), 0); // type 0 = form

@@ -61,6 +61,13 @@ public class NativeBridge {
     public static native void formAddStringItem(String label, String text, int appearance);
     public static native void formAddTextField(String label, String text, int maxSize, int constraints);
     public static native void formAddChoiceItem(String label, String text, boolean selected, int choiceType);
+
+    // Pending edits produced by the native UIKit FormView.
+    public static native boolean hasPendingFormItemText(int index);
+    public static native String getPendingFormItemText(int index);
+    public static native boolean hasPendingFormItemSelected(int index);
+    public static native boolean getPendingFormItemSelected(int index);
+    public static native void clearPendingFormEdits();
     public static native void formAddCommand(String label, int type, int priority, int id);
     public static native void formShow();
     public static native void showCanvas();
