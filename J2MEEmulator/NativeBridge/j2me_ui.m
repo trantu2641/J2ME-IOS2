@@ -42,6 +42,13 @@ static FormCommand g_form_commands[MAX_COMMANDS];
 static int g_form_command_count = 0;
 static int g_form_type = 0; // 0=form, 1=list, 2=alert, 3=textbox
 
+// Pending edits written by the UIKit FormView and consumed by the
+// Java-side Form/ChoiceGroup/TextField on J2ME_UI_FORM_COMMIT.
+static char g_pending_form_text[MAX_FORM_ITEMS][1024];
+static unsigned char g_pending_form_text_valid[MAX_FORM_ITEMS];
+static int g_pending_form_selected[MAX_FORM_ITEMS];
+static unsigned char g_pending_form_selected_valid[MAX_FORM_ITEMS];
+
 // List items
 static char g_list_items[MAX_FORM_ITEMS][256];
 static int g_list_item_count = 0;
@@ -68,6 +75,62 @@ const char *j2me_ui_get_form_item_label(int index) { return index < g_form_item_
 const char *j2me_ui_get_form_item_text(int index) { return index < g_form_item_count ? g_form_items[index].text : ""; }
 int j2me_ui_get_form_item_param1(int index) { return index < g_form_item_count ? g_form_items[index].intParam1 : 0; }
 int j2me_ui_get_form_item_param2(int index) { return index < g_form_item_count ? g_form_items[index].intParam2 : 0; }
+
+// ============================================================
+// Pending form edits — Swift/UI -> Java synchronization
+// ============================================================
+
+void j2me_ui_set_form_item_text(int index, const char *text) {
+    if (index < 0 || index >= MAX_FORM_ITEMS) return;
+
+    if (!text) {
+        g_pending_form_text[index][0] = '\0';
+    } else {
+        strncpy(
+            g_pending_form_text[index],
+            text,
+            sizeof(g_pending_form_text[index]) - 1
+        );
+        g_pending_form_text[index][sizeof(g_pending_form_text[index]) - 1] = '\0';
+    }
+
+    g_pending_form_text_valid[index] = 1;
+}
+
+int j2me_ui_has_pending_form_item_text(int index) {
+    return index >= 0 && index < MAX_FORM_ITEMS
+        ? g_pending_form_text_valid[index]
+        : 0;
+}
+
+const char *j2me_ui_get_pending_form_item_text(int index) {
+    return index >= 0 && index < MAX_FORM_ITEMS
+        ? g_pending_form_text[index]
+        : "";
+}
+
+void j2me_ui_set_form_item_selected(int index, int selected) {
+    if (index < 0 || index >= MAX_FORM_ITEMS) return;
+    g_pending_form_selected[index] = selected ? 1 : 0;
+    g_pending_form_selected_valid[index] = 1;
+}
+
+int j2me_ui_has_pending_form_item_selected(int index) {
+    return index >= 0 && index < MAX_FORM_ITEMS
+        ? g_pending_form_selected_valid[index]
+        : 0;
+}
+
+int j2me_ui_get_pending_form_item_selected(int index) {
+    return index >= 0 && index < MAX_FORM_ITEMS
+        ? g_pending_form_selected[index]
+        : 0;
+}
+
+void j2me_ui_clear_pending_form_edits(void) {
+    memset(g_pending_form_text_valid, 0, sizeof(g_pending_form_text_valid));
+    memset(g_pending_form_selected_valid, 0, sizeof(g_pending_form_selected_valid));
+}
 
 int j2me_ui_get_command_count(void) { return g_form_command_count; }
 const char *j2me_ui_get_command_label(int index) { return index < g_form_command_count ? g_form_commands[index].label : ""; }
@@ -197,6 +260,43 @@ static s32 n_formAddChoiceItem(Runtime *runtime, JClass *clazz) {
     return RUNTIME_STATUS_NORMAL;
 }
 
+static s32 n_hasPendingFormItemText(Runtime *runtime, JClass *clazz) {
+    JniEnv *env = runtime->jnienv;
+    int index = env->localvar_getInt(runtime->localvar, 0);
+    env->push_int(runtime->stack, j2me_ui_has_pending_form_item_text(index));
+    return RUNTIME_STATUS_NORMAL;
+}
+
+static s32 n_getPendingFormItemText(Runtime *runtime, JClass *clazz) {
+    JniEnv *env = runtime->jnienv;
+    int index = env->localvar_getInt(runtime->localvar, 0);
+    Instance *jstr = env->jstring_create_cstr(
+        j2me_ui_get_pending_form_item_text(index),
+        runtime
+    );
+    env->push_ref(runtime->stack, jstr);
+    return RUNTIME_STATUS_NORMAL;
+}
+
+static s32 n_hasPendingFormItemSelected(Runtime *runtime, JClass *clazz) {
+    JniEnv *env = runtime->jnienv;
+    int index = env->localvar_getInt(runtime->localvar, 0);
+    env->push_int(runtime->stack, j2me_ui_has_pending_form_item_selected(index));
+    return RUNTIME_STATUS_NORMAL;
+}
+
+static s32 n_getPendingFormItemSelected(Runtime *runtime, JClass *clazz) {
+    JniEnv *env = runtime->jnienv;
+    int index = env->localvar_getInt(runtime->localvar, 0);
+    env->push_int(runtime->stack, j2me_ui_get_pending_form_item_selected(index));
+    return RUNTIME_STATUS_NORMAL;
+}
+
+static s32 n_clearPendingFormEdits(Runtime *runtime, JClass *clazz) {
+    j2me_ui_clear_pending_form_edits();
+    return RUNTIME_STATUS_NORMAL;
+}
+
 static s32 n_formAddCommand(Runtime *runtime, JClass *clazz) {
     JniEnv *env = runtime->jnienv;
     Instance *jlabel = env->localvar_getRefer(runtime->localvar, 0);
@@ -315,6 +415,11 @@ static java_native_method j2me_ui_methods[] = {
     {CLS, "formAddStringItem","(Ljava/lang/String;Ljava/lang/String;I)V",        n_formAddStringItem},
     {CLS, "formAddTextField", "(Ljava/lang/String;Ljava/lang/String;II)V",       n_formAddTextField},
     {CLS, "formAddChoiceItem","(Ljava/lang/String;Ljava/lang/String;ZI)V",       n_formAddChoiceItem},
+    {CLS, "hasPendingFormItemText", "(I)Z",                                      n_hasPendingFormItemText},
+    {CLS, "getPendingFormItemText", "(I)Ljava/lang/String;",                     n_getPendingFormItemText},
+    {CLS, "hasPendingFormItemSelected", "(I)Z",                                  n_hasPendingFormItemSelected},
+    {CLS, "getPendingFormItemSelected", "(I)Z",                                  n_getPendingFormItemSelected},
+    {CLS, "clearPendingFormEdits", "()V",                                         n_clearPendingFormEdits},
     {CLS, "formAddCommand",   "(Ljava/lang/String;III)V",                        n_formAddCommand},
     {CLS, "formShow",         "()V",                                             n_formShow},
     {CLS, "showCanvas",       "()V",                                             n_showCanvas},
