@@ -5,6 +5,9 @@ import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.Enumeration;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 import javax.microedition.io.Connector;
@@ -20,6 +23,20 @@ import javax.microedition.io.Connector;
  * MIDlet. One failed icon must not stop subsequent icon/resource loads.
  */
 public class Image {
+
+    private static final int MAX_REMOTE_IMAGE_REQUESTS = 4;
+    private static final int MAX_REMOTE_CACHE_BYTES = 8 * 1024 * 1024;
+    private static final int MAX_REMOTE_CACHE_ENTRIES = 64;
+
+    private static final Object REMOTE_LIMITER_LOCK = new Object();
+    private static int activeRemoteImageRequests = 0;
+
+    private static final Object REMOTE_CACHE_LOCK = new Object();
+    private static int remoteCacheBytes = 0;
+    private static final LinkedHashMap<String, byte[]> remoteImageCache =
+        new LinkedHashMap<String, byte[]>(16, 0.75f, true);
+    private static final Map<String, Object> remoteImageLocks =
+        new HashMap<String, Object>();
 
     public long nativeHandle;
 
@@ -209,91 +226,90 @@ public class Image {
          */
         if (isRemoteURL(name)) {
 
-            InputStream remote = null;
+            Object perURLLock;
+            synchronized (REMOTE_CACHE_LOCK) {
+                perURLLock = remoteImageLocks.get(name);
+                if (perURLLock == null) {
+                    perURLLock = new Object();
+                    remoteImageLocks.put(name, perURLLock);
+                }
+            }
 
             try {
-
-                System.out.println(
-                    "[Image] REMOTE: loading " + name
-                );
-
-                remote =
-                    Connector.openInputStream(
-                        name,
-                        Connector.READ
-                    );
-
-                if (remote == null) {
-
-                    logFallback(
-                        name,
-                        "remote connection returned null stream"
-                    );
-
-                    return createTransparentPlaceholder();
-                }
-
-                /*
-                 * IMPORTANT:
-                 *
-                 * createImage(InputStream) already reads and closes
-                 * the stream. Do not throw the remote IOException here.
-                 *
-                 * A broken icon is treated as an optional resource.
-                 */
-                return createImage(remote);
-
-            } catch (IOException e) {
-
-                /*
-                 * THIS is the important compatibility behavior.
-                 *
-                 * Previously this code did:
-                 *
-                 *     throw e;
-                 *
-                 * That allowed one failed server icon to propagate
-                 * into the game and potentially terminate its loader.
-                 *
-                 * Now the failed icon is replaced by a transparent
-                 * placeholder and the Java game is allowed to continue.
-                 */
-                logFallback(
-                    name,
-                    "remote image request failed: " + e
-                );
-
-                return createTransparentPlaceholder();
-
-            } catch (RuntimeException e) {
-
-                /*
-                 * Protect the MIDlet from native/network runtime errors
-                 * caused by one optional image.
-                 */
-                logFallback(
-                    name,
-                    "remote image runtime failure: " + e
-                );
-
-                return createTransparentPlaceholder();
-
-            } finally {
-
-                /*
-                 * Defensive close.
-                 *
-                 * Some InputStream implementations may already have
-                 * been closed by createImage(InputStream). Calling close()
-                 * again is intentionally ignored.
-                 */
-                if (remote != null) {
-
-                    try {
-                        remote.close();
-                    } catch (IOException ignored) {
-                    } catch (RuntimeException ignored) {
+                synchronized (perURLLock) {
+                    byte[] cached = getRemoteImageBytes(name);
+                    if (cached != null) {
+                        return createImage(cached, 0, cached.length);
                     }
+
+                    acquireRemoteImageSlot();
+                    try {
+                        cached = getRemoteImageBytes(name);
+                        if (cached != null) {
+                            return createImage(cached, 0, cached.length);
+                        }
+
+                        InputStream remote = null;
+                        try {
+                            System.out.println(
+                                "[Image] REMOTE: loading " + name
+                            );
+
+                            remote = Connector.openInputStream(
+                                name,
+                                Connector.READ
+                            );
+
+                            if (remote == null) {
+                                logFallback(
+                                    name,
+                                    "remote connection returned null stream"
+                                );
+                                return createTransparentPlaceholder();
+                            }
+
+                            byte[] data = readAllBytes(remote);
+                            if (data.length == 0) {
+                                logFallback(
+                                    name,
+                                    "remote image response was empty"
+                                );
+                                return createTransparentPlaceholder();
+                            }
+
+                            putRemoteImageBytes(name, data);
+                            return createImage(data, 0, data.length);
+
+                        } catch (IOException e) {
+                            logFallback(
+                                name,
+                                "remote image request failed: " + e
+                            );
+                            return createTransparentPlaceholder();
+
+                        } catch (RuntimeException e) {
+                            logFallback(
+                                name,
+                                "remote image runtime failure: " + e
+                            );
+                            return createTransparentPlaceholder();
+
+                        } finally {
+                            if (remote != null) {
+                                try {
+                                    remote.close();
+                                } catch (IOException ignored) {
+                                } catch (RuntimeException ignored) {
+                                }
+                            }
+                        }
+                    } finally {
+                        releaseRemoteImageSlot();
+                    }
+                }
+            } finally {
+                synchronized (REMOTE_CACHE_LOCK) {
+                    remoteImageLocks.remove(name);
                 }
             }
         }
@@ -337,6 +353,68 @@ public class Image {
             );
 
             return createTransparentPlaceholder();
+        }
+    }
+
+    private static void acquireRemoteImageSlot() {
+        synchronized (REMOTE_LIMITER_LOCK) {
+            while (activeRemoteImageRequests >= MAX_REMOTE_IMAGE_REQUESTS) {
+                try {
+                    REMOTE_LIMITER_LOCK.wait();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
+            }
+            activeRemoteImageRequests++;
+        }
+    }
+
+    private static void releaseRemoteImageSlot() {
+        synchronized (REMOTE_LIMITER_LOCK) {
+            if (activeRemoteImageRequests > 0) {
+                activeRemoteImageRequests--;
+            }
+            REMOTE_LIMITER_LOCK.notifyAll();
+        }
+    }
+
+    private static byte[] getRemoteImageBytes(String name) {
+        synchronized (REMOTE_CACHE_LOCK) {
+            return remoteImageCache.get(name);
+        }
+    }
+
+    private static void putRemoteImageBytes(String name, byte[] data) {
+        if (name == null || data == null || data.length == 0
+            || data.length > MAX_REMOTE_CACHE_BYTES) {
+            return;
+        }
+
+        synchronized (REMOTE_CACHE_LOCK) {
+            byte[] old = remoteImageCache.remove(name);
+            if (old != null) {
+                remoteCacheBytes -= old.length;
+            }
+
+            remoteImageCache.put(name, data);
+            remoteCacheBytes += data.length;
+
+            while (remoteCacheBytes > MAX_REMOTE_CACHE_BYTES
+                || remoteImageCache.size() > MAX_REMOTE_CACHE_ENTRIES) {
+
+                java.util.Iterator<Map.Entry<String, byte[]>> it =
+                    remoteImageCache.entrySet().iterator();
+
+                if (!it.hasNext()) {
+                    break;
+                }
+
+                Map.Entry<String, byte[]> eldest = it.next();
+                byte[] bytes = eldest.getValue();
+                it.remove();
+                remoteCacheBytes -= bytes != null ? bytes.length : 0;
+            }
         }
     }
 
