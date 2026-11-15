@@ -305,6 +305,10 @@ public class Image {
          */
         try {
 
+            System.out.println(
+                "[Image] JAR: request=" + name
+            );
+
             InputStream is =
                 findResource(name);
 
@@ -424,43 +428,67 @@ public class Image {
             return null;
         }
 
+        String normalized = normalizeResourceName(name);
+
         InputStream is =
-            tryLoadResource(name);
+            tryLoadResource(normalized);
 
         if (is != null) {
             return is;
         }
 
-        if (
-            name.lastIndexOf('.')
-            <= name.lastIndexOf('/')
-        ) {
+        /*
+         * Some real-world J2ME JARs contain resource references whose
+         * spelling differs from the ZIP entry only by case, slash style,
+         * or an omitted image extension. The old code only performed the
+         * prefix search when the requested name had NO extension. That
+         * means /items/sword.PNG could never find /items/sword.png.
+         *
+         * Do the compatibility scan for every failed local lookup. This
+         * path is only reached after the normal ClassLoader lookup fails,
+         * so correctly packaged resources keep the fast path.
+         */
+        String match =
+            findCompatibleJarEntry(normalized);
 
-            String searchName =
-                name.startsWith("/")
-                    ? name.substring(1)
-                    : name;
-
-            String match =
-                findEntryByPrefix(searchName);
-
-            if (match != null) {
-
-                is =
-                    tryLoadResource(
-                        "/" + match
-                    );
-
-                if (is != null) {
-                    return is;
-                }
+        if (match != null) {
+            is = tryLoadResource("/" + match);
+            if (is != null) {
+                return is;
             }
         }
 
         return null;
     }
 
-    private static String findEntryByPrefix(
+    private static String normalizeResourceName(
+        String name
+    ) {
+
+        if (name == null) {
+            return null;
+        }
+
+        String value = name.trim();
+
+        while (value.startsWith("/")) {
+            value = value.substring(1);
+        }
+
+        value = value.replace('\\', '/');
+
+        while (value.startsWith("./")) {
+            value = value.substring(2);
+        }
+
+        while (value.indexOf("//") >= 0) {
+            value = value.replace("//", "/");
+        }
+
+        return value;
+    }
+
+    private static String findCompatibleJarEntry(
         String name
     ) {
 
@@ -518,33 +546,43 @@ public class Image {
                     String entryName =
                         entry.getName();
 
-                    int dotIdx =
-                        entryName.lastIndexOf(
-                            '.'
-                        );
+                    String normalizedEntry =
+                        normalizeResourceName(entryName);
 
-                    if (dotIdx > 0) {
+                    boolean exact =
+                        normalizedEntry != null
+                        && normalizedEntry.equals(name);
 
-                        String baseName =
-                            entryName.substring(
-                                0,
-                                dotIdx
-                            );
+                    boolean caseInsensitive =
+                        normalizedEntry != null
+                        && normalizedEntry.equalsIgnoreCase(name);
 
-                        if (
-                            baseName.equals(name)
-                        ) {
+                    boolean extensionOmitted = false;
 
-                            /*
-                             * The stream itself will be opened separately.
-                             * Close this ZIP immediately.
-                             */
-                            zf.close();
+                    if (!name.contains(".")) {
+                        int dotIdx = normalizedEntry == null
+                            ? -1
+                            : normalizedEntry.lastIndexOf('.');
 
-                            zf = null;
+                        if (dotIdx > normalizedEntry.lastIndexOf('/')) {
+                            String baseName =
+                                normalizedEntry.substring(0, dotIdx);
 
-                            return entryName;
+                            extensionOmitted =
+                                baseName.equals(name)
+                                || baseName.equalsIgnoreCase(name);
                         }
+                    }
+
+                    if (exact || caseInsensitive || extensionOmitted) {
+
+                        /*
+                         * The stream itself will be opened separately.
+                         * Close this ZIP immediately.
+                         */
+                        zf.close();
+                        zf = null;
+                        return entryName;
                     }
                 }
 
