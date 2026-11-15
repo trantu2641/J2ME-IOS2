@@ -12,12 +12,12 @@ import javax.microedition.io.Connector;
 /**
  * J2ME Image compatibility layer.
  *
- * Missing, corrupted, empty, or failed image resources are replaced with
- * a transparent 1x1 image so that optional graphics do not stop the MIDlet.
+ * Image resources are resolved from the JAR or from an explicit HTTP/HTTPS
+ * URL supplied by the MIDlet. A failed lookup is never replaced by a fake
+ * transparent image.
  *
- * IMPORTANT:
- * Remote HTTP/HTTPS image failures are intentionally isolated from the
- * MIDlet. One failed icon must not stop subsequent icon/resource loads.
+ * If a resource is missing or cannot be decoded, the normal J2ME exception
+ * path is used so the caller can retry/resolve the actual resource.
  */
 public class Image {
 
@@ -88,118 +88,23 @@ public class Image {
         return img;
     }
 
-    /**
-     * Creates a transparent 1x1 fallback image.
-     *
-     * Used when an optional image/resource is missing, invalid,
-     * corrupted, empty, or cannot be downloaded.
-     */
-    private static Image createTransparentPlaceholder() {
 
-        long handle = 0;
-
-        try {
-
-            handle = NativeBridge.createMutableImage(1, 1);
-
-            if (handle == 0) {
-
-                System.out.println(
-                    "[Image] COMPAT: unable to allocate placeholder"
-                );
-
-                return new Image(0, 1, 1, false);
-            }
-
-            long context =
-                NativeBridge.getImageContext(handle);
-
-            if (context != 0) {
-
-                NativeBridge.drawRGB(
-                    context,
-                    new int[] { 0x00000000 },
-                    0,
-                    1,
-                    0,
-                    0,
-                    1,
-                    1,
-                    1
-                );
-            }
-
-            return new Image(
-                handle,
-                1,
-                1,
-                false
-            );
-
-        } catch (RuntimeException e) {
-
-            if (handle != 0) {
-
-                try {
-                    NativeBridge.destroyImage(handle);
-                } catch (RuntimeException ignored) {
-                }
-            }
-
-            System.out.println(
-                "[Image] COMPAT: placeholder creation failed: "
-                + e
-            );
-
-            return new Image(
-                0,
-                1,
-                1,
-                false
-            );
-        }
-    }
-
-    private static void logFallback(
-        String name,
-        String reason
-    ) {
-
-        System.out.println(
-            "[Image] COMPAT: "
-            + reason
-            + ": "
-            + name
-            + " (using transparent placeholder)"
-        );
-    }
 
     /**
-     * Creates an image from a JAR resource name.
+     * Creates an image from a JAR resource name or an HTTP/HTTPS URL.
      *
-     * Local missing/corrupted resources are replaced with a transparent
-     * placeholder.
+     * Local resources are resolved from the current JAR/class path.
+     * HTTP/HTTPS resources are loaded directly from the supplied server URL.
      *
-     * HTTP/HTTPS resources are also isolated:
-     *
-     *     request A -> OK
-     *     request B -> FAILED -> placeholder
-     *     request C -> still allowed to continue
-     *
-     * A failed remote icon must never be allowed to kill the resource
-     * loading chain by propagating its IOException.
+     * IMPORTANT: this method never creates a transparent fallback image.
+     * A missing/broken resource is returned to the caller as an IOException.
      */
     public static Image createImage(String name)
         throws IOException {
 
         if (name == null || name.length() == 0) {
 
-            logFallback(
-                String.valueOf(name),
-                "invalid resource name"
-            );
-
-            return createTransparentPlaceholder();
+            throw new IOException("Image resource name is empty");
         }
 
         /*
@@ -225,12 +130,9 @@ public class Image {
 
                 if (remote == null) {
 
-                    logFallback(
-                        name,
-                        "remote connection returned null stream"
+                    throw new IOException(
+                        "Remote image returned a null stream: " + name
                     );
-
-                    return createTransparentPlaceholder();
                 }
 
                 /*
@@ -258,12 +160,7 @@ public class Image {
                  * Now the failed icon is replaced by a transparent
                  * placeholder and the Java game is allowed to continue.
                  */
-                logFallback(
-                    name,
-                    "remote image request failed: " + e
-                );
-
-                return createTransparentPlaceholder();
+                throw e;
 
             } catch (RuntimeException e) {
 
@@ -271,12 +168,10 @@ public class Image {
                  * Protect the MIDlet from native/network runtime errors
                  * caused by one optional image.
                  */
-                logFallback(
-                    name,
-                    "remote image runtime failure: " + e
+                throw new IOException(
+                    "Remote image runtime failure: " + name,
+                    e
                 );
-
-                return createTransparentPlaceholder();
 
             } finally {
 
@@ -305,42 +200,28 @@ public class Image {
          */
         try {
 
-            System.out.println(
-                "[Image] JAR: request=" + name
-            );
-
             InputStream is =
                 findResource(name);
 
             if (is == null) {
 
-                logFallback(
-                    name,
-                    "local resource not found"
+                throw new IOException(
+                    "Image resource not found in JAR: " + name
                 );
-
-                return createTransparentPlaceholder();
             }
 
             return createImage(is);
 
         } catch (IOException e) {
 
-            logFallback(
-                name,
-                "local resource read failed: " + e
-            );
-
-            return createTransparentPlaceholder();
+            throw e;
 
         } catch (RuntimeException e) {
 
-            logFallback(
-                name,
-                "local resource loader failed: " + e
+            throw new IOException(
+                "JAR image resource loader failed: " + name,
+                e
             );
-
-            return createTransparentPlaceholder();
         }
     }
 
@@ -428,67 +309,43 @@ public class Image {
             return null;
         }
 
-        String normalized = normalizeResourceName(name);
-
         InputStream is =
-            tryLoadResource(normalized);
+            tryLoadResource(name);
 
         if (is != null) {
             return is;
         }
 
-        /*
-         * Some real-world J2ME JARs contain resource references whose
-         * spelling differs from the ZIP entry only by case, slash style,
-         * or an omitted image extension. The old code only performed the
-         * prefix search when the requested name had NO extension. That
-         * means /items/sword.PNG could never find /items/sword.png.
-         *
-         * Do the compatibility scan for every failed local lookup. This
-         * path is only reached after the normal ClassLoader lookup fails,
-         * so correctly packaged resources keep the fast path.
-         */
-        String match =
-            findCompatibleJarEntry(normalized);
+        if (
+            name.lastIndexOf('.')
+            <= name.lastIndexOf('/')
+        ) {
 
-        if (match != null) {
-            is = tryLoadResource("/" + match);
-            if (is != null) {
-                return is;
+            String searchName =
+                name.startsWith("/")
+                    ? name.substring(1)
+                    : name;
+
+            String match =
+                findEntryByPrefix(searchName);
+
+            if (match != null) {
+
+                is =
+                    tryLoadResource(
+                        "/" + match
+                    );
+
+                if (is != null) {
+                    return is;
+                }
             }
         }
 
         return null;
     }
 
-    private static String normalizeResourceName(
-        String name
-    ) {
-
-        if (name == null) {
-            return null;
-        }
-
-        String value = name.trim();
-
-        while (value.startsWith("/")) {
-            value = value.substring(1);
-        }
-
-        value = value.replace('\\', '/');
-
-        while (value.startsWith("./")) {
-            value = value.substring(2);
-        }
-
-        while (value.indexOf("//") >= 0) {
-            value = value.replace("//", "/");
-        }
-
-        return value;
-    }
-
-    private static String findCompatibleJarEntry(
+    private static String findEntryByPrefix(
         String name
     ) {
 
@@ -546,43 +403,33 @@ public class Image {
                     String entryName =
                         entry.getName();
 
-                    String normalizedEntry =
-                        normalizeResourceName(entryName);
+                    int dotIdx =
+                        entryName.lastIndexOf(
+                            '.'
+                        );
 
-                    boolean exact =
-                        normalizedEntry != null
-                        && normalizedEntry.equals(name);
+                    if (dotIdx > 0) {
 
-                    boolean caseInsensitive =
-                        normalizedEntry != null
-                        && normalizedEntry.equalsIgnoreCase(name);
+                        String baseName =
+                            entryName.substring(
+                                0,
+                                dotIdx
+                            );
 
-                    boolean extensionOmitted = false;
+                        if (
+                            baseName.equals(name)
+                        ) {
 
-                    if (!name.contains(".")) {
-                        int dotIdx = normalizedEntry == null
-                            ? -1
-                            : normalizedEntry.lastIndexOf('.');
+                            /*
+                             * The stream itself will be opened separately.
+                             * Close this ZIP immediately.
+                             */
+                            zf.close();
 
-                        if (dotIdx > normalizedEntry.lastIndexOf('/')) {
-                            String baseName =
-                                normalizedEntry.substring(0, dotIdx);
+                            zf = null;
 
-                            extensionOmitted =
-                                baseName.equals(name)
-                                || baseName.equalsIgnoreCase(name);
+                            return entryName;
                         }
-                    }
-
-                    if (exact || caseInsensitive || extensionOmitted) {
-
-                        /*
-                         * The stream itself will be opened separately.
-                         * Close this ZIP immediately.
-                         */
-                        zf.close();
-                        zf = null;
-                        return entryName;
                     }
                 }
 
@@ -685,8 +532,8 @@ public class Image {
     /**
      * Creates an image from an InputStream.
      *
-     * Any failure while reading/decoding an optional image is converted
-     * into a transparent placeholder.
+     * Any failure while reading/decoding is propagated as IOException.
+     * No placeholder image is manufactured.
      */
     public static Image createImage(
         InputStream stream
@@ -694,12 +541,7 @@ public class Image {
 
         if (stream == null) {
 
-            logFallback(
-                "InputStream",
-                "null input stream"
-            );
-
-            return createTransparentPlaceholder();
+            throw new IOException("Image InputStream is null");
         }
 
         try {
@@ -716,12 +558,7 @@ public class Image {
                 || data.length == 0
             ) {
 
-                logFallback(
-                    "InputStream",
-                    "empty image data"
-                );
-
-                return createTransparentPlaceholder();
+                throw new IOException("Image stream is empty");
             }
 
             return createImage(
@@ -732,21 +569,14 @@ public class Image {
 
         } catch (IOException e) {
 
-            logFallback(
-                "InputStream",
-                "image read failed: " + e
-            );
-
-            return createTransparentPlaceholder();
+            throw e;
 
         } catch (RuntimeException e) {
 
-            logFallback(
-                "InputStream",
-                "image decoding failed: " + e
+            throw new IOException(
+                "Image decoding failed",
+                e
             );
-
-            return createTransparentPlaceholder();
         }
     }
 
@@ -758,12 +588,9 @@ public class Image {
 
         if (imageData == null) {
 
-            logFallback(
-                "byte[]",
-                "null image data"
+            throw new IllegalArgumentException(
+                "Image data is null"
             );
-
-            return createTransparentPlaceholder();
         }
 
         if (
@@ -774,12 +601,9 @@ public class Image {
                     - imageLength
         ) {
 
-            logFallback(
-                "byte[]",
-                "invalid or empty image data"
+            throw new IllegalArgumentException(
+                "Invalid or empty image data"
             );
-
-            return createTransparentPlaceholder();
         }
 
         long handle = 0;
@@ -809,12 +633,9 @@ public class Image {
 
             if (handle == 0) {
 
-                logFallback(
-                    "byte[]",
-                    "native image decoder failed"
+                throw new IllegalArgumentException(
+                    "Native image decoder failed"
                 );
-
-                return createTransparentPlaceholder();
             }
 
             int w =
@@ -841,12 +662,9 @@ public class Image {
 
                 handle = 0;
 
-                logFallback(
-                    "byte[]",
-                    "invalid image dimensions"
+                throw new IllegalArgumentException(
+                    "Native image has invalid dimensions"
                 );
-
-                return createTransparentPlaceholder();
             }
 
             return new Image(
@@ -868,12 +686,10 @@ public class Image {
                 }
             }
 
-            logFallback(
-                "byte[]",
-                "image decoding exception: " + e
+            throw new IllegalArgumentException(
+                "Image decoding exception",
+                e
             );
-
-            return createTransparentPlaceholder();
         }
     }
 
