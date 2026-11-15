@@ -1149,7 +1149,7 @@ final class GameViewController:
             image: UIImage(systemName: "trash"),
             attributes: .destructive
         ) { [weak self] _ in
-            self?.confirmDeleteJarPickerItem(item)
+            self?.confirmDeleteJarPickerItem(for: item)
         }
         let destructiveActions = UIMenu(
             options: .displayInline,
