@@ -173,10 +173,35 @@ class AppsListViewController: UIViewController,
         duplicateInstallBarButtonItem.accessibilityLabel =
             "Sao chép một JAR khác"
 
+        let optionsButton = UIBarButtonItem(
+            image: UIImage(systemName: "ellipsis.circle"),
+            style: .plain,
+            target: self,
+            action: #selector(showHomeOptionsMenu)
+        )
+        optionsButton.tintColor = j2meToolbarTintColor
+        optionsButton.accessibilityLabel = "Tùy chọn"
+
         navigationItem.rightBarButtonItems = [
+            optionsButton,
             addButton,
             duplicateInstallBarButtonItem
         ]
+    }
+
+    @objc private func showHomeOptionsMenu() {
+        let alert = UIAlertController(title: "Tùy chọn", message: nil, preferredStyle: .actionSheet)
+        alert.addAction(UIAlertAction(title: "Nhập tệp JAR", style: .default) { [weak self] _ in
+            self?.addAppTapped()
+        })
+        alert.addAction(UIAlertAction(title: "Sao chép JAR đã cài", style: .default) { [weak self] _ in
+            self?.duplicateInstalledJARTapped()
+        })
+        alert.addAction(UIAlertAction(title: "Hủy", style: .cancel))
+        if let popover = alert.popoverPresentationController {
+            popover.barButtonItem = navigationItem.rightBarButtonItems?.first
+        }
+        present(alert, animated: true)
     }
 
     private func setupCollectionView() {
@@ -1401,6 +1426,14 @@ class AppsListViewController: UIViewController,
             ]
         }
 
+        // Import another JAR directly from the long-press menu.
+        let importJAR = UIAction(
+            title: "Nhập tệp JAR...",
+            image: UIImage(systemName: "folder.badge.plus")
+        ) { [weak self] _ in
+            self?.addAppTapped()
+        }
+
         // Install another copy.
         let duplicate = UIAction(
             title: "Sao chép JAR",
@@ -1524,6 +1557,7 @@ class AppsListViewController: UIViewController,
         // IMPORTANT: keep the requested system-menu order.
         return UIMenu(
             children: [
+                importJAR,
                 toggle3D,
                 manageMenu,
                 resMenu,
@@ -1670,7 +1704,7 @@ class AppsListViewController: UIViewController,
         guard let saved = UserDefaults.standard.object(
             forKey: key
         ) as? Int else {
-            return 30
+            return 0
         }
 
         switch saved {
@@ -1679,7 +1713,7 @@ class AppsListViewController: UIViewController,
             return saved
 
         default:
-            return 30
+            return 0
         }
     }
 
@@ -1690,7 +1724,7 @@ class AppsListViewController: UIViewController,
 
         let safeFPS = fpsLimitOptions.contains {
             $0.value == fps
-        } ? fps : 30
+        } ? fps : 0
 
         UserDefaults.standard.set(
             safeFPS,

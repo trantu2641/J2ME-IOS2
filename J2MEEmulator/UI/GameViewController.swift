@@ -8,6 +8,7 @@
 //
 
 import UIKit
+import AVFoundation
 
 private struct J2MERunningSession {
     let id: Int32
@@ -154,6 +155,11 @@ final class GameViewController:
         NSLayoutConstraint!
 
     private var keyboardIsVisible = false
+    private var backgroundTaskID: UIBackgroundTaskIdentifier = .invalid
+    private var backgroundAudioPlayer: AVAudioPlayer?
+    private var textEntryOverlay: UIView?
+    private var textEntryPanel: UIView?
+    private var textEntryTextView: UITextView?
 
     private var isCanvasScreenVisible: Bool {
 
@@ -238,8 +244,10 @@ final class GameViewController:
         NotificationCenter.default
             .removeObserver(self)
 
+        endBackgroundTaskIfNeeded()
+        backgroundAudioPlayer?.stop()
+        backgroundAudioPlayer = nil
         setGlobalEmulatorView(nil)
-        jvm_bridge_session_destroy_all()
     }
 
     override var prefersStatusBarHidden:
@@ -267,8 +275,12 @@ final class GameViewController:
                 : .systemBackground
         }
 
-        if UserDefaults.standard.bool(forKey: "J2MEKeepScreenOn") {
-            UIApplication.shared.isIdleTimerDisabled = true
+        let keepBackground = UserDefaults.standard.bool(forKey: "J2MEKeepBackgroundRunning")
+        UIApplication.shared.isIdleTimerDisabled = keepBackground
+            ? false
+            : UserDefaults.standard.bool(forKey: "J2MEKeepScreenOn")
+        if keepBackground {
+            startBackgroundKeepAlive()
         }
 
         emulatorView.canvasWidth =
@@ -390,6 +402,25 @@ final class GameViewController:
                 UIResponder.keyboardWillHideNotification,
             object: nil
         )
+
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(applicationWillResignActive(_:)),
+            name: UIApplication.willResignActiveNotification,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(applicationDidBecomeActive(_:)),
+            name: UIApplication.didBecomeActiveNotification,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(audioSessionInterruption(_:)),
+            name: AVAudioSession.interruptionNotification,
+            object: nil
+        )
     }
 
     override func viewDidAppear(
@@ -405,6 +436,103 @@ final class GameViewController:
         gameStarted = true
 
         startGame()
+    }
+
+    // MARK: - Background execution
+
+    @objc private func applicationWillResignActive(_ notification: Notification) {
+        guard UserDefaults.standard.bool(forKey: "J2MEKeepBackgroundRunning") else { return }
+        if backgroundTaskID == .invalid {
+            backgroundTaskID = UIApplication.shared.beginBackgroundTask(
+                withName: "J2ME-MIDlet-Background"
+            ) { [weak self] in
+                self?.endBackgroundTaskIfNeeded()
+            }
+        }
+        startBackgroundKeepAlive()
+    }
+
+    @objc private func applicationDidBecomeActive(_ notification: Notification) {
+        endBackgroundTaskIfNeeded()
+        if UserDefaults.standard.bool(forKey: "J2MEKeepBackgroundRunning") {
+            startBackgroundKeepAlive()
+        }
+    }
+
+    @objc private func audioSessionInterruption(_ notification: Notification) {
+        guard UserDefaults.standard.bool(forKey: "J2MEKeepBackgroundRunning") else { return }
+        guard let raw = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
+              let type = AVAudioSession.InterruptionType(rawValue: raw) else { return }
+        if type == .ended {
+            startBackgroundKeepAlive()
+        }
+    }
+
+    private func endBackgroundTaskIfNeeded() {
+        guard backgroundTaskID != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(backgroundTaskID)
+        backgroundTaskID = .invalid
+    }
+
+    private func makeSilentWAVData() -> Data {
+        // A one-second 44.1 kHz, 16-bit mono PCM silence loop.
+        let sampleRate: UInt32 = 44_100
+        let channels: UInt16 = 1
+        let bitsPerSample: UInt16 = 16
+        let dataSize = sampleRate * UInt32(channels) * UInt32(bitsPerSample / 8)
+        var data = Data()
+        func appendASCII(_ string: String) { data.append(contentsOf: string.utf8) }
+        func append16(_ value: UInt16) {
+            data.append(UInt8(value & 0xff))
+            data.append(UInt8((value >> 8) & 0xff))
+        }
+        func append32(_ value: UInt32) {
+            data.append(UInt8(value & 0xff))
+            data.append(UInt8((value >> 8) & 0xff))
+            data.append(UInt8((value >> 16) & 0xff))
+            data.append(UInt8((value >> 24) & 0xff))
+        }
+        appendASCII("RIFF")
+        append32(36 + dataSize)
+        appendASCII("WAVE")
+        appendASCII("fmt ")
+        append32(16)
+        append16(1)
+        append16(channels)
+        append32(sampleRate)
+        append32(sampleRate * UInt32(channels) * UInt32(bitsPerSample / 8))
+        append16(channels * (bitsPerSample / 8))
+        append16(bitsPerSample)
+        appendASCII("data")
+        append32(dataSize)
+        data.append(Data(repeating: 0, count: Int(dataSize)))
+        return data
+    }
+
+    private func startBackgroundKeepAlive() {
+        guard UserDefaults.standard.bool(forKey: "J2MEKeepBackgroundRunning"),
+              backgroundAudioPlayer?.isPlaying != true else { return }
+        do {
+            let audioSession = AVAudioSession.sharedInstance()
+            try audioSession.setCategory(.playback, mode: .default, options: [.mixWithOthers])
+            try audioSession.setActive(true)
+            let player = try AVAudioPlayer(data: makeSilentWAVData())
+            player.numberOfLoops = -1
+            player.volume = 0
+            player.prepareToPlay()
+            guard player.play() else {
+                print("[J2ME Background] Silent audio keepalive could not start")
+                return
+            }
+            backgroundAudioPlayer = player
+        } catch {
+            print("[J2ME Background] Keepalive error: \(error.localizedDescription)")
+        }
+    }
+
+    private func stopBackgroundKeepAlive() {
+        backgroundAudioPlayer?.stop()
+        backgroundAudioPlayer = nil
     }
 
     // MARK: - Interface style
@@ -823,17 +951,17 @@ final class GameViewController:
         label.alpha = 0
         label.translatesAutoresizingMaskIntoConstraints = false
 
-        // Put the "already open" notice just below the tab/header area
-        // instead of at the bottom of the JAR picker.
-        view.addSubview(label)
+        // Replace the picker heading temporarily. This keeps the message
+        // inside the modal and prevents it from covering the main tab row.
+        panel.addSubview(label)
 
         NSLayoutConstraint.activate([
-            label.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-            label.topAnchor.constraint(equalTo: headerStack.bottomAnchor, constant: 20),
-            label.leadingAnchor.constraint(greaterThanOrEqualTo: view.leadingAnchor, constant: 20),
-            label.trailingAnchor.constraint(lessThanOrEqualTo: view.trailingAnchor, constant: -20),
-            label.heightAnchor.constraint(equalToConstant: 38)
+            label.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 12),
+            label.trailingAnchor.constraint(equalTo: panel.trailingAnchor, constant: -12),
+            label.topAnchor.constraint(equalTo: panel.topAnchor, constant: 12),
+            label.heightAnchor.constraint(equalToConstant: 42)
         ])
+        panel.bringSubviewToFront(label)
 
         jarPickerMessageLabel = label
 
@@ -1034,6 +1162,35 @@ final class GameViewController:
         jarPickerOverlay = nil
     }
 
+    private func closeActiveSession() {
+        guard !runningSessions.isEmpty,
+              activeSessionIndex >= 0,
+              activeSessionIndex < runningSessions.count else { return }
+
+        let session = runningSessions[activeSessionIndex]
+        jvm_bridge_session_request_stop(session.id)
+        jvm_bridge_session_destroy(session.id)
+        runningSessions.remove(at: activeSessionIndex)
+
+        if runningSessions.isEmpty {
+            userRequestedExit = true
+            keyboardInput.resignFirstResponder()
+            stopBackgroundKeepAlive()
+            endBackgroundTaskIfNeeded()
+            dismiss(animated: true)
+            return
+        }
+
+        activeSessionIndex = min(activeSessionIndex, runningSessions.count - 1)
+        rebuildTabs()
+        switchToSession(at: activeSessionIndex)
+    }
+
+    func handleMIDletExitCommand() {
+        // Only the JAR whose EXIT command was tapped is destroyed.
+        closeActiveSession()
+    }
+
     @objc private func removeCurrentJarTapped() {
         guard !runningSessions.isEmpty else { return }
 
@@ -1047,23 +1204,7 @@ final class GameViewController:
         alert.addAction(UIAlertAction(title: "Đóng", style: .destructive) { [weak self] _ in
             guard let self, !self.runningSessions.isEmpty else { return }
 
-            let session = self.runningSessions[self.activeSessionIndex]
-            jvm_bridge_session_request_stop(session.id)
-            jvm_bridge_session_destroy(session.id)
-            self.runningSessions.remove(at: self.activeSessionIndex)
-
-            if self.runningSessions.isEmpty {
-                self.userRequestedExit = true
-                self.dismiss(animated: true)
-                return
-            }
-
-            self.activeSessionIndex = min(
-                self.activeSessionIndex,
-                self.runningSessions.count - 1
-            )
-            self.rebuildTabs()
-            self.switchToSession(at: self.activeSessionIndex)
+            self.closeActiveSession()
         })
 
         present(alert, animated: true)
@@ -1102,9 +1243,15 @@ final class GameViewController:
         ))
 
         stack.addArrangedSubview(makeMoreMenuButton(
-            title: UIApplication.shared.isIdleTimerDisabled ? "✓ Treo tắt màn" : "Treo tắt màn",
+            title: UserDefaults.standard.bool(forKey: "J2MEKeepBackgroundRunning") ? "✓ Treo khi tắt màn" : "Treo khi tắt màn",
             color: .systemBlue,
             action: #selector(toggleKeepScreenOnFromMenu)
+        ))
+
+        stack.addArrangedSubview(makeMoreMenuButton(
+            title: "Nhập văn bản vào JAR",
+            color: .systemBlue,
+            action: #selector(showTextEntryOverlay)
         ))
 
         stack.addArrangedSubview(makeMoreMenuButton(
@@ -1214,10 +1361,144 @@ final class GameViewController:
     }
 
     @objc private func toggleKeepScreenOnFromMenu() {
-        let newValue = !UIApplication.shared.isIdleTimerDisabled
-        UIApplication.shared.isIdleTimerDisabled = newValue
-        UserDefaults.standard.set(newValue, forKey: "J2MEKeepScreenOn")
+        let enabled = !UserDefaults.standard.bool(forKey: "J2MEKeepBackgroundRunning")
+        UserDefaults.standard.set(enabled, forKey: "J2MEKeepBackgroundRunning")
+
+        // Allow auto-lock when this mode is enabled; background audio is the
+        // execution assertion used to keep MIDlet worker threads alive.
+        UIApplication.shared.isIdleTimerDisabled = enabled
+            ? false
+            : UserDefaults.standard.bool(forKey: "J2MEKeepScreenOn")
+
+        if enabled {
+            startBackgroundKeepAlive()
+        } else {
+            stopBackgroundKeepAlive()
+        }
         closeMoreMenu()
+    }
+
+    @objc private func showTextEntryOverlay() {
+        closeMoreMenu()
+        guard !runningSessions.isEmpty, textEntryOverlay == nil else { return }
+
+        let overlay = UIControl()
+        overlay.backgroundColor = UIColor.black.withAlphaComponent(0.42)
+        overlay.translatesAutoresizingMaskIntoConstraints = false
+        overlay.addTarget(self, action: #selector(cancelTextEntryOverlay), for: .touchUpInside)
+
+        let panel = UIView()
+        panel.backgroundColor = uiPanelBackgroundColor
+        panel.layer.cornerRadius = 18
+        panel.layer.masksToBounds = true
+        panel.translatesAutoresizingMaskIntoConstraints = false
+
+        let title = UILabel()
+        title.text = "Nhập văn bản"
+        title.textColor = uiPrimaryTextColor
+        title.font = .systemFont(ofSize: 18, weight: .semibold)
+        title.textAlignment = .center
+        title.translatesAutoresizingMaskIntoConstraints = false
+
+        let textView = UITextView()
+        textView.font = .systemFont(ofSize: 17)
+        textView.backgroundColor = uiControlBackgroundColor
+        textView.textColor = uiPrimaryTextColor
+        textView.layer.cornerRadius = 10
+        textView.autocorrectionType = .no
+        textView.spellCheckingType = .no
+        textView.translatesAutoresizingMaskIntoConstraints = false
+
+        let cancel = UIButton(type: .system)
+        cancel.setTitle("HỦY", for: .normal)
+        cancel.titleLabel?.font = .systemFont(ofSize: 16, weight: .semibold)
+        cancel.addTarget(self, action: #selector(cancelTextEntryOverlay), for: .touchUpInside)
+        cancel.translatesAutoresizingMaskIntoConstraints = false
+
+        let save = UIButton(type: .system)
+        save.setTitle("LƯU", for: .normal)
+        save.titleLabel?.font = .systemFont(ofSize: 16, weight: .semibold)
+        save.addTarget(self, action: #selector(saveTextEntryOverlay), for: .touchUpInside)
+        save.translatesAutoresizingMaskIntoConstraints = false
+
+        let buttons = UIStackView(arrangedSubviews: [cancel, save])
+        buttons.axis = .horizontal
+        buttons.distribution = .fillEqually
+        buttons.spacing = 12
+        buttons.translatesAutoresizingMaskIntoConstraints = false
+
+        panel.addSubview(title)
+        panel.addSubview(textView)
+        panel.addSubview(buttons)
+        view.addSubview(overlay)
+        view.addSubview(panel)
+
+        NSLayoutConstraint.activate([
+            overlay.topAnchor.constraint(equalTo: view.topAnchor),
+            overlay.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            overlay.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            overlay.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            panel.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            panel.centerYAnchor.constraint(equalTo: view.centerYAnchor),
+            panel.widthAnchor.constraint(equalTo: view.widthAnchor, multiplier: 0.88),
+            title.topAnchor.constraint(equalTo: panel.topAnchor, constant: 18),
+            title.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 16),
+            title.trailingAnchor.constraint(equalTo: panel.trailingAnchor, constant: -16),
+            textView.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 14),
+            textView.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 14),
+            textView.trailingAnchor.constraint(equalTo: panel.trailingAnchor, constant: -14),
+            textView.heightAnchor.constraint(equalToConstant: 130),
+            buttons.topAnchor.constraint(equalTo: textView.bottomAnchor, constant: 12),
+            buttons.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 14),
+            buttons.trailingAnchor.constraint(equalTo: panel.trailingAnchor, constant: -14),
+            buttons.bottomAnchor.constraint(equalTo: panel.bottomAnchor, constant: -12),
+            buttons.heightAnchor.constraint(equalToConstant: 44)
+        ])
+
+        textEntryOverlay = overlay
+        textEntryPanel = panel
+        textEntryTextView = textView
+        overlay.alpha = 0
+        panel.alpha = 0
+        UIView.animate(withDuration: 0.16) {
+            overlay.alpha = 1
+            panel.alpha = 1
+        }
+        textView.becomeFirstResponder()
+    }
+
+    @objc private func cancelTextEntryOverlay() {
+        guard let overlay = textEntryOverlay else { return }
+        textEntryTextView?.resignFirstResponder()
+        textEntryTextView = nil
+        textEntryOverlay = nil
+        textEntryPanel?.removeFromSuperview()
+        textEntryPanel = nil
+        overlay.removeFromSuperview()
+    }
+
+    @objc private func saveTextEntryOverlay() {
+        guard !runningSessions.isEmpty else {
+            cancelTextEntryOverlay()
+            return
+        }
+        let text = textEntryTextView?.text ?? ""
+        textEntryTextView?.resignFirstResponder()
+
+        // Text is routed through the same active-session key queue as the
+        // on-screen and iOS keyboards. BMP characters are sent directly;
+        // supplementary characters are sent as UTF-16 surrogate code units.
+        for scalar in text.unicodeScalars {
+            if scalar.value <= 0xFFFF {
+                sendKeyPulse(Int32(scalar.value))
+            } else {
+                for unit in String(scalar).utf16 {
+                    sendKeyPulse(Int32(unit))
+                }
+            }
+        }
+        sendKeyPulse(-5) // Enter/OK
+        cancelTextEntryOverlay()
     }
 
     @objc private func showScreenSizeMenu() {
@@ -2284,6 +2565,9 @@ final class GameViewController:
             -7
 
         jvm_bridge_session_destroy_all()
+        runningSessions.removeAll()
+        stopBackgroundKeepAlive()
+        endBackgroundTaskIfNeeded()
 
         dismiss(animated: true)
     }
@@ -2422,6 +2706,7 @@ final class GameViewController:
                     j2me_ui_get_command_id(
                         Int32(index)
                     )
+                let commandType = j2me_ui_get_command_type(Int32(index))
 
                 alert.addAction(
                     UIAlertAction(
@@ -2437,6 +2722,9 @@ final class GameViewController:
                             ),
                             commandID
                         )
+                        if commandType == 7 {
+                            self.handleMIDletExitCommand()
+                        }
                     }
                 )
             }
