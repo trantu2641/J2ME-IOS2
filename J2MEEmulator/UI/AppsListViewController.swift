@@ -822,6 +822,12 @@ class AppsListViewController: UIViewController,
         }
     }
 
+    // Called by GameViewController when a JAR is renamed, imported, copied,
+    // deleted, or its custom icon changes while the game-screen picker is open.
+    func refreshAfterExternalJARChange() {
+        scanApps()
+    }
+
     private func updateEmptyState() {
 
         if allApps.isEmpty {

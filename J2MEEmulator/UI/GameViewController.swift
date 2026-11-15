@@ -8,6 +8,7 @@
 //
 
 import UIKit
+import UniformTypeIdentifiers
 
 private struct J2MERunningSession {
     let id: Int32
@@ -125,6 +126,17 @@ final class GameViewController:
     private var jarPickerItems: [(name: String, path: String, icon: UIImage)] = []
     private var jarPickerMessageLabel: UILabel?
     private var jarPickerMessageWork: DispatchWorkItem?
+
+    // Keep the latest nested context menu alive through UIKit's dismissal
+    // animation (important on iOS 16.x).
+    private var activeJarPickerContextMenu: UIMenu?
+
+    private enum JarPickerDocumentPurpose {
+        case importJAR
+        case customIcon(String)
+    }
+
+    private var jarPickerDocumentPurpose: JarPickerDocumentPurpose?
 
     private let titleLabel =
         UILabel()
@@ -995,6 +1007,495 @@ final class GameViewController:
                 self.jarPickerItems = items
                 table.reloadData()
             }
+        }
+    }
+
+    // MARK: - JAR-list long-press menu
+
+    private var jarPickerDocumentsURL: URL {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+    }
+
+    private func jarPickerCustomIconURL(for id: String) -> URL {
+        jarPickerDocumentsURL
+            .appendingPathComponent("Game Icons", isDirectory: true)
+            .appendingPathComponent("\(id).png")
+    }
+
+    private func makeJarPickerContextMenu(
+        for item: (name: String, path: String, icon: UIImage)
+    ) -> UIMenu {
+        let id = gameID(forPath: item.path)
+        let defaults = UserDefaults.standard
+        let fm = FileManager.default
+        let hasCustomIcon = fm.fileExists(atPath: jarPickerCustomIconURL(for: id).path)
+
+        // This picker action is deliberately included in the same menu as
+        // the home-screen JAR management options.
+        let importJAR = UIAction(
+            title: "Thêm tệp JAR",
+            image: UIImage(systemName: "doc.badge.plus")
+        ) { [weak self] _ in
+            self?.presentJarDocumentPicker(for: .importJAR)
+        }
+
+        let rename = UIAction(
+            title: "Đổi tên",
+            image: UIImage(systemName: "pencil")
+        ) { [weak self] _ in
+            self?.renameJarPickerItem(item)
+        }
+
+        let changeIcon = UIAction(
+            title: "Đổi biểu tượng...",
+            image: UIImage(systemName: "photo")
+        ) { [weak self] _ in
+            self?.presentJarDocumentPicker(for: .customIcon(id))
+        }
+
+        var manageActions: [UIMenuElement] = [rename, changeIcon]
+        if hasCustomIcon {
+            let resetIcon = UIAction(
+                title: "Khôi phục biểu tượng gốc",
+                image: UIImage(systemName: "arrow.uturn.backward")
+            ) { [weak self] _ in
+                self?.resetJarPickerCustomIcon(for: item)
+            }
+            manageActions.append(resetIcon)
+        }
+
+        let duplicate = UIAction(
+            title: "Sao chép JAR",
+            image: UIImage(systemName: "doc.on.doc")
+        ) { [weak self] _ in
+            self?.duplicateJarPickerItem(item)
+        }
+        manageActions.append(duplicate)
+
+        let manageMenu = UIMenu(
+            title: "Quản lý JAR",
+            image: UIImage(systemName: "app"),
+            children: manageActions
+        )
+
+        let threeDEnabled = defaults.bool(forKey: "ss3d_\(id)")
+        let toggle3D = UIAction(
+            title: threeDEnabled ? "Tắt tăng cường 3D" : "Bật tăng cường 3D",
+            image: UIImage(systemName: "cube"),
+            state: threeDEnabled ? .on : .off
+        ) { _ in
+            defaults.set(!threeDEnabled, forKey: "ss3d_\(id)")
+        }
+
+        let currentWidth = defaults.object(forKey: "resW_\(id)") as? Int ?? 320
+        let currentHeight = defaults.object(forKey: "resH_\(id)") as? Int ?? 400
+        let resolutionOptions: [(label: String, width: Int, height: Int)] = [
+            ("320×400", 320, 400),
+            ("330×360", 330, 360),
+            ("360×450", 360, 450),
+            ("400×500", 400, 500)
+        ]
+        let resolutionActions = resolutionOptions.map { option in
+            UIAction(
+                title: option.label,
+                state: option.width == currentWidth && option.height == currentHeight ? .on : .off
+            ) { _ in
+                defaults.set(option.width, forKey: "resW_\(id)")
+                defaults.set(option.height, forKey: "resH_\(id)")
+            }
+        }
+        let customResolution = UIAction(
+            title: "Độ phân giải tùy chỉnh...",
+            image: UIImage(systemName: "slider.horizontal.3")
+        ) { [weak self] _ in
+            self?.promptJarPickerCustomResolution(for: item)
+        }
+        let resolutionMenu = UIMenu(
+            title: "Độ phân giải màn hình",
+            image: UIImage(systemName: "aspectratio"),
+            children: resolutionActions + [customResolution]
+        )
+
+        let savedFPS = defaults.object(forKey: "fpsLimit_\(id)") as? Int ?? 30
+        let fpsOptions: [(label: String, value: Int)] = [
+            ("Không giới hạn", 0),
+            ("15 FPS", 15),
+            ("20 FPS", 20),
+            ("30 FPS", 30),
+            ("45 FPS", 45)
+        ]
+        let fpsActions = fpsOptions.map { option in
+            UIAction(
+                title: option.label,
+                state: option.value == savedFPS ? .on : .off
+            ) { _ in
+                defaults.set(option.value, forKey: "fpsLimit_\(id)")
+            }
+        }
+        let fpsMenu = UIMenu(
+            title: "Giới hạn FPS",
+            image: UIImage(systemName: "speedometer"),
+            children: fpsActions
+        )
+
+        let clearData = UIAction(
+            title: "Xóa dữ liệu trò chơi",
+            image: UIImage(systemName: "eraser")
+        ) { [weak self] _ in
+            self?.confirmClearJarPickerData(for: item)
+        }
+        let deleteJAR = UIAction(
+            title: "Xóa JAR",
+            image: UIImage(systemName: "trash"),
+            attributes: .destructive
+        ) { [weak self] _ in
+            self?.confirmDeleteJarPickerItem(item)
+        }
+        let destructiveActions = UIMenu(
+            options: .displayInline,
+            children: [clearData, deleteJAR]
+        )
+
+        return UIMenu(children: [
+            importJAR,
+            toggle3D,
+            manageMenu,
+            resolutionMenu,
+            fpsMenu,
+            destructiveActions
+        ])
+    }
+
+    private func presentJarDocumentPicker(for purpose: JarPickerDocumentPurpose) {
+        jarPickerDocumentPurpose = purpose
+        let contentTypes: [UTType]
+        switch purpose {
+        case .importJAR:
+            contentTypes = [.data]
+        case .customIcon(_):
+            contentTypes = [.image]
+        }
+
+        let picker = UIDocumentPickerViewController(
+            forOpeningContentTypes: contentTypes,
+            asCopy: true
+        )
+        picker.delegate = self
+        picker.allowsMultipleSelection = {
+            if case .importJAR = purpose { return true }
+            return false
+        }()
+
+        // Let UIKit finish dismissing the context menu before presenting the
+        // document picker above the game screen.
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.present(picker, animated: true)
+        }
+    }
+
+    private func renameJarPickerItem(_ item: (name: String, path: String, icon: UIImage)) {
+        let alert = UIAlertController(
+            title: "Đổi tên JAR",
+            message: "Tên mới sẽ được hiển thị trong danh sách JAR.",
+            preferredStyle: .alert
+        )
+        alert.addTextField { field in
+            field.text = item.name
+            field.placeholder = "Tên JAR"
+            field.clearButtonMode = .whileEditing
+        }
+        alert.addAction(UIAlertAction(title: "Hủy", style: .cancel))
+        alert.addAction(UIAlertAction(title: "Lưu", style: .default) { [weak self, weak alert] _ in
+            guard let self,
+                  let text = alert?.textFields?.first?.text else { return }
+            let newName = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !newName.isEmpty else { return }
+            let id = self.gameID(forPath: item.path)
+            UserDefaults.standard.set(newName, forKey: "jarbox_display_name_\(id)")
+            self.refreshJarPickerItems()
+            self.refreshUnderlyingHomeList()
+        })
+        DispatchQueue.main.async { [weak self] in
+            self?.present(alert, animated: true)
+        }
+    }
+
+    private func resetJarPickerCustomIcon(for item: (name: String, path: String, icon: UIImage)) {
+        let id = gameID(forPath: item.path)
+        try? FileManager.default.removeItem(at: jarPickerCustomIconURL(for: id))
+        refreshJarPickerItems()
+        refreshUnderlyingHomeList()
+    }
+
+    private func duplicateJarPickerItem(_ item: (name: String, path: String, icon: UIImage)) {
+        let fm = FileManager.default
+        let sourceURL = URL(fileURLWithPath: item.path)
+        guard fm.fileExists(atPath: sourceURL.path) else {
+            showJarPickerOperationResult(title: "Không thể sao chép JAR", message: "Tệp JAR gốc không còn tồn tại.")
+            return
+        }
+
+        let gamesURL = jarPickerDocumentsURL.appendingPathComponent("games", isDirectory: true)
+        let stem = sourceURL.deletingPathExtension().lastPathComponent
+        let ext = sourceURL.pathExtension.isEmpty ? "jar" : sourceURL.pathExtension
+        let destinationURL = gamesURL.appendingPathComponent("\(stem)__copy_\(UUID().uuidString).\(ext)")
+
+        do {
+            try fm.createDirectory(at: gamesURL, withIntermediateDirectories: true)
+            try fm.copyItem(at: sourceURL, to: destinationURL)
+
+            let oldID = gameID(forPath: item.path)
+            let newID = gameID(forPath: destinationURL.path)
+            let existingNames = Set(jarPickerItems.map { $0.name })
+            let baseName = "\(item.name) (Copy)"
+            var displayName = baseName
+            var suffix = 2
+            while existingNames.contains(displayName) {
+                displayName = "\(baseName) \(suffix)"
+                suffix += 1
+            }
+            UserDefaults.standard.set(displayName, forKey: "jarbox_display_name_\(newID)")
+
+            let oldIconURL = jarPickerCustomIconURL(for: oldID)
+            let newIconURL = jarPickerCustomIconURL(for: newID)
+            if fm.fileExists(atPath: oldIconURL.path) {
+                try fm.createDirectory(at: newIconURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try? fm.copyItem(at: oldIconURL, to: newIconURL)
+            }
+
+            for prefix in ["ss3d_", "resW_", "resH_", "fpsLimit_"] {
+                if let value = UserDefaults.standard.object(forKey: prefix + oldID) {
+                    UserDefaults.standard.set(value, forKey: prefix + newID)
+                }
+            }
+
+            refreshJarPickerItems()
+            refreshUnderlyingHomeList()
+            showJarPickerOperationResult(
+                title: "Đã sao chép JAR",
+                message: "\(displayName) đã được thêm vào danh sách. Dữ liệu lưu trò chơi được giữ riêng."
+            )
+        } catch {
+            showJarPickerOperationResult(title: "Sao chép thất bại", message: error.localizedDescription)
+        }
+    }
+
+    private func promptJarPickerCustomResolution(for item: (name: String, path: String, icon: UIImage)) {
+        let id = gameID(forPath: item.path)
+        let defaults = UserDefaults.standard
+        let alert = UIAlertController(
+            title: "Độ phân giải JAR tùy chỉnh",
+            message: "Nhập chiều rộng và chiều cao Canvas.",
+            preferredStyle: .alert
+        )
+        alert.addTextField { field in
+            field.placeholder = "Rộng"
+            field.keyboardType = .numberPad
+            field.text = "\(defaults.object(forKey: "resW_\(id)") as? Int ?? 320)"
+        }
+        alert.addTextField { field in
+            field.placeholder = "Cao"
+            field.keyboardType = .numberPad
+            field.text = "\(defaults.object(forKey: "resH_\(id)") as? Int ?? 400)"
+        }
+        alert.addAction(UIAlertAction(title: "Hủy", style: .cancel))
+        alert.addAction(UIAlertAction(title: "Áp dụng", style: .default) { [weak self, weak alert] _ in
+            guard let self else { return }
+            guard let fields = alert?.textFields,
+                  fields.count == 2,
+                  let width = Int(fields[0].text ?? ""),
+                  let height = Int(fields[1].text ?? ""),
+                  (1...4096).contains(width),
+                  (1...4096).contains(height) else {
+                self.showJarPickerOperationResult(
+                    title: "Độ phân giải không hợp lệ",
+                    message: "Chiều rộng và chiều cao phải từ 1 đến 4096."
+                )
+                return
+            }
+            defaults.set(width, forKey: "resW_\(id)")
+            defaults.set(height, forKey: "resH_\(id)")
+        })
+        DispatchQueue.main.async { [weak self] in
+            self?.present(alert, animated: true)
+        }
+    }
+
+    private func confirmClearJarPickerData(for item: (name: String, path: String, icon: UIImage)) {
+        let id = gameID(forPath: item.path)
+        let alert = UIAlertController(
+            title: "Xóa dữ liệu trò chơi",
+            message: "Xóa toàn bộ dữ liệu lưu của \(item.name)?",
+            preferredStyle: .alert
+        )
+        alert.addAction(UIAlertAction(title: "Hủy", style: .cancel))
+        alert.addAction(UIAlertAction(title: "Xóa dữ liệu", style: .destructive) { [weak self] _ in
+            guard let self else { return }
+            let saveURL = self.jarPickerDocumentsURL
+                .appendingPathComponent("Games Data", isDirectory: true)
+                .appendingPathComponent(id, isDirectory: true)
+            try? FileManager.default.removeItem(at: saveURL)
+        })
+        DispatchQueue.main.async { [weak self] in
+            self?.present(alert, animated: true)
+        }
+    }
+
+    private func confirmDeleteJarPickerItem(for item: (name: String, path: String, icon: UIImage)) {
+        let alert = UIAlertController(
+            title: "Xóa JAR",
+            message: "Xóa \(item.name) và toàn bộ dữ liệu lưu của trò chơi này?",
+            preferredStyle: .alert
+        )
+        alert.addAction(UIAlertAction(title: "Hủy", style: .cancel))
+        alert.addAction(UIAlertAction(title: "Xóa JAR", style: .destructive) { [weak self] _ in
+            guard let self else { return }
+            let id = self.gameID(forPath: item.path)
+            let saveURL = self.jarPickerDocumentsURL
+                .appendingPathComponent("Games Data", isDirectory: true)
+                .appendingPathComponent(id, isDirectory: true)
+            try? FileManager.default.removeItem(at: saveURL)
+            try? FileManager.default.removeItem(atPath: item.path)
+            try? FileManager.default.removeItem(at: self.jarPickerCustomIconURL(for: id))
+            for key in [
+                "jarbox_display_name_\(id)",
+                "ss3d_\(id)",
+                "resW_\(id)",
+                "resH_\(id)",
+                "fpsLimit_\(id)"
+            ] {
+                UserDefaults.standard.removeObject(forKey: key)
+            }
+            self.refreshJarPickerItems()
+            self.refreshUnderlyingHomeList()
+        })
+        DispatchQueue.main.async { [weak self] in
+            self?.present(alert, animated: true)
+        }
+    }
+
+    private func refreshJarPickerItems() {
+        guard let table = jarPickerTableView else { return }
+        DispatchQueue.global(qos: .userInitiated).async { [weak self, weak table] in
+            guard let self else { return }
+            let items = self.scanInstalledJARs()
+            DispatchQueue.main.async {
+                guard let table,
+                      table.superview != nil,
+                      self.jarPickerTableView === table else { return }
+                self.jarPickerItems = items
+                table.reloadData()
+            }
+        }
+    }
+
+    private func refreshUnderlyingHomeList() {
+        (presentingViewController as? AppsListViewController)?.refreshAfterExternalJARChange()
+    }
+
+    private func showJarPickerOperationResult(title: String, message: String) {
+        let alert = UIAlertController(title: title, message: message, preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "OK", style: .default))
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            if self.presentedViewController == nil {
+                self.present(alert, animated: true)
+            } else {
+                self.presentedViewController?.present(alert, animated: true)
+            }
+        }
+    }
+
+    private func importJARFilesFromPicker(_ urls: [URL]) {
+        let fm = FileManager.default
+        let gamesURL = jarPickerDocumentsURL.appendingPathComponent("games", isDirectory: true)
+        var imported: [String] = []
+        var failures: [String] = []
+
+        do {
+            try fm.createDirectory(at: gamesURL, withIntermediateDirectories: true)
+        } catch {
+            showJarPickerOperationResult(title: "Nhập JAR thất bại", message: error.localizedDescription)
+            return
+        }
+
+        for sourceURL in urls {
+            let fileName = sourceURL.lastPathComponent
+            guard sourceURL.pathExtension.lowercased() == "jar" else {
+                failures.append("\(fileName): không phải tệp .jar")
+                continue
+            }
+
+            let accessing = sourceURL.startAccessingSecurityScopedResource()
+            defer {
+                if accessing { sourceURL.stopAccessingSecurityScopedResource() }
+            }
+
+            let originalURL = gamesURL.appendingPathComponent(fileName)
+            let destinationURL: URL
+            if !fm.fileExists(atPath: originalURL.path) {
+                destinationURL = originalURL
+            } else {
+                let sourceName = URL(fileURLWithPath: fileName)
+                let stem = sourceName.deletingPathExtension().lastPathComponent
+                let ext = sourceName.pathExtension.isEmpty ? "jar" : sourceName.pathExtension
+                destinationURL = gamesURL.appendingPathComponent("\(stem)__install_\(UUID().uuidString).\(ext)")
+            }
+
+            let temporaryURL = gamesURL.appendingPathComponent(".import-\(UUID().uuidString).tmp")
+            do {
+                try fm.copyItem(at: sourceURL, to: temporaryURL)
+                try fm.moveItem(at: temporaryURL, to: destinationURL)
+                imported.append(destinationURL.lastPathComponent)
+            } catch {
+                try? fm.removeItem(at: temporaryURL)
+                failures.append("\(fileName): \(error.localizedDescription)")
+            }
+        }
+
+        if !imported.isEmpty {
+            refreshJarPickerItems()
+            refreshUnderlyingHomeList()
+        }
+        var resultParts: [String] = []
+        if !imported.isEmpty {
+            resultParts.append("Đã nhập \(imported.count) tệp JAR:\n" + imported.joined(separator: "\n"))
+        }
+        if !failures.isEmpty {
+            resultParts.append("Không thể nhập:\n" + failures.joined(separator: "\n"))
+        }
+        if resultParts.isEmpty { resultParts.append("Bạn chưa chọn tệp nào.") }
+        showJarPickerOperationResult(
+            title: imported.isEmpty ? "Không có JAR được nhập" : "Nhập JAR hoàn tất",
+            message: resultParts.joined(separator: "\n\n")
+        )
+    }
+
+    private func saveJarPickerCustomIcon(from url: URL, for id: String) {
+        let accessing = url.startAccessingSecurityScopedResource()
+        defer {
+            if accessing { url.stopAccessingSecurityScopedResource() }
+        }
+
+        guard let data = try? Data(contentsOf: url),
+              let image = UIImage(data: data),
+              let pngData = image.pngData() else {
+            showJarPickerOperationResult(title: "Lỗi biểu tượng", message: "Không thể đọc ảnh đã chọn.")
+            return
+        }
+
+        let destinationURL = jarPickerCustomIconURL(for: id)
+        do {
+            try FileManager.default.createDirectory(
+                at: destinationURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try pngData.write(to: destinationURL, options: .atomic)
+            refreshJarPickerItems()
+            refreshUnderlyingHomeList()
+        } catch {
+            showJarPickerOperationResult(title: "Lỗi biểu tượng", message: error.localizedDescription)
         }
     }
 
@@ -2516,7 +3017,7 @@ private final class J2MEJarPickerCell: UITableViewCell {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 }
 
-extension GameViewController: UITableViewDataSource, UITableViewDelegate {
+extension GameViewController: UITableViewDataSource, UITableViewDelegate, UIDocumentPickerDelegate {
     func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
         jarPickerItems.count
     }
@@ -2530,6 +3031,31 @@ extension GameViewController: UITableViewDataSource, UITableViewDelegate {
         cell.nameLabel.text = item.name
         cell.iconView.image = item.icon
         return cell
+    }
+
+    func tableView(
+        _ tableView: UITableView,
+        contextMenuConfigurationForRowAt indexPath: IndexPath,
+        point: CGPoint
+    ) -> UIContextMenuConfiguration? {
+        guard tableView === jarPickerTableView,
+              indexPath.row >= 0,
+              indexPath.row < jarPickerItems.count else {
+            return nil
+        }
+
+        let item = jarPickerItems[indexPath.row]
+        let identifier = NSString(string: gameID(forPath: item.path))
+        return UIContextMenuConfiguration(
+            identifier: identifier,
+            previewProvider: nil,
+            actionProvider: { [weak self] _ in
+                guard let self else { return nil }
+                let menu = self.makeJarPickerContextMenu(for: item)
+                self.activeJarPickerContextMenu = menu
+                return menu
+            }
+        )
     }
 
     func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
@@ -2581,6 +3107,26 @@ extension GameViewController: UITableViewDataSource, UITableViewDelegate {
             render3dScale: scale,
             fpsLimit: fps
         )
+    }
+
+    func documentPicker(
+        _ controller: UIDocumentPickerViewController,
+        didPickDocumentsAt urls: [URL]
+    ) {
+        guard let purpose = jarPickerDocumentPurpose else { return }
+        jarPickerDocumentPurpose = nil
+
+        switch purpose {
+        case .importJAR:
+            importJARFilesFromPicker(urls)
+        case .customIcon(let id):
+            guard let selectedURL = urls.first else { return }
+            saveJarPickerCustomIcon(from: selectedURL, for: id)
+        }
+    }
+
+    func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
+        jarPickerDocumentPurpose = nil
     }
 
     private func gameID(forPath path: String) -> String {
