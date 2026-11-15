@@ -784,13 +784,32 @@ s32 jvm_printf(const c8 *format, ...) {
     s32 result = 0;
 #if _JVM_DEBUG_LOG_TO_FILE
     if (logfile) {
+        /*
+         * Keep the old MiniJVM debug log, but ALSO mirror every JVM
+         * diagnostic line to stderr. JarBox's NativeBridge redirects
+         * stdout/stderr to the per-JAR minijvm.log, so this makes the
+         * complete MiniJVM runtime trace available in that file.
+         */
+        va_list vp_stderr;
+        va_copy(vp_stderr, vp);
 
         result = vfprintf(logfile, format, vp);
         fflush(logfile);
+
+        vfprintf(stderr, format, vp_stderr);
+        fflush(stderr);
+        va_end(vp_stderr);
+
         if (currentTimeMillis() - last_flush > 1000) {
             fflush(logfile);
+            fflush(stderr);
             last_flush = currentTimeMillis();
         }
+    } else {
+        /* If file logging was not opened, stderr is still captured by
+         * JarBox into the current JAR's minijvm.log. */
+        result = vfprintf(stderr, format, vp);
+        fflush(stderr);
     }
 #else
 #ifdef __JVM_OS_ANDROID__
@@ -825,10 +844,17 @@ void invoke_deepth(Runtime *runtime) {
     s32 len = i;
 
 #if _JVM_DEBUG_LOG_TO_FILE
-    fprintf(logfile, "%llx", (s64) (intptr_t) thrd_current());
-    for (i = 0; i < len; i++) {
-        fprintf(logfile, "  ");
+    if (logfile) {
+        fprintf(logfile, "%llx", (s64) (intptr_t) thrd_current());
+        fflush(logfile);
     }
+
+    /* NativeBridge captures stderr into the per-JAR minijvm.log. */
+    fprintf(stderr, "%llx", (s64) (intptr_t) thrd_current());
+    for (i = 0; i < len; i++) {
+        fprintf(stderr, "  ");
+    }
+    fflush(stderr);
 #else
     fprintf(stderr, "%llx", (s64) (intptr_t) thrd_current());
     for (i = 0; i < len; i++) {
