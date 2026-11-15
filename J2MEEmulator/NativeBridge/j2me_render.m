@@ -42,8 +42,13 @@ typedef struct RenderContext {
 } RenderContext;
 
 typedef struct RenderImage {
+    // Immutable JAR images are decoded lazily. The compressed source is
+    // retained only until the first draw, then released after the bitmap
+    // context has been created. This mirrors the reference runtime's
+    // visible-item loading behaviour much more closely than eagerly
+    // decoding every catalog icon.
     CGContextRef ctx;
-    CGImageRef cachedImage;
+    CFDataRef encodedData;
     int width;
     int height;
     int isMutable;
@@ -354,13 +359,13 @@ static inline void img_release(RenderImage *img) {
         int pixels = img->width * img->height * 4;
 
         CGContextRef ctx = img->ctx;
-        CGImageRef cachedImage = img->cachedImage;
+        CFDataRef encodedData = img->encodedData;
 
         img->ctx = NULL;
-        img->cachedImage = NULL;
+        img->encodedData = NULL;
 
-        if (cachedImage) {
-            CGImageRelease(cachedImage);
+        if (encodedData) {
+            CFRelease(encodedData);
         }
 
         if (ctx) {
@@ -676,43 +681,131 @@ static RenderImage *createImageFromData(
     atomic_init(&img->refcount, 1);
     img->isMutable = 0;
 
-    CFDataRef cfData = CFDataCreate(
+    if (!data || length <= 0) {
+        free(img);
+        return NULL;
+    }
+
+    // Keep the compressed image bytes, but do not decode the pixel buffer yet.
+    // The J2ME list can contain a very large number of Image objects; only
+    // images that actually reach drawImage/drawRegion need a decoded bitmap.
+    img->encodedData = CFDataCreate(
         NULL,
         data,
         length
     );
 
-    if (!cfData) {
+    if (!img->encodedData) {
         free(img);
         return NULL;
     }
 
+    // ImageIO can obtain PNG/JPEG dimensions without materialising the full
+    // decoded bitmap. Width/height are required by LCDUI anchor calculations.
     CGImageSourceRef source = CGImageSourceCreateWithData(
-        cfData,
+        img->encodedData,
         NULL
     );
 
-    CFRelease(cfData);
-
-    CGImageRef cgImage = NULL;
-
-    if (source) {
-        cgImage = CGImageSourceCreateImageAtIndex(
-            source,
-            0,
-            NULL
-        );
-
-        CFRelease(source);
-    }
-
-    if (!cgImage) {
+    if (!source) {
+        CFRelease(img->encodedData);
         free(img);
         return NULL;
     }
 
-    img->width = (int)CGImageGetWidth(cgImage);
-    img->height = (int)CGImageGetHeight(cgImage);
+    CFDictionaryRef properties = CGImageSourceCopyPropertiesAtIndex(
+        source,
+        0,
+        NULL
+    );
+
+    if (properties) {
+        CFNumberRef widthNumber = CFDictionaryGetValue(
+            properties,
+            kCGImagePropertyPixelWidth
+        );
+        CFNumberRef heightNumber = CFDictionaryGetValue(
+            properties,
+            kCGImagePropertyPixelHeight
+        );
+
+        if (widthNumber) {
+            CFNumberGetValue(
+                widthNumber,
+                kCFNumberIntType,
+                &img->width
+            );
+        }
+
+        if (heightNumber) {
+            CFNumberGetValue(
+                heightNumber,
+                kCFNumberIntType,
+                &img->height
+            );
+        }
+
+        CFRelease(properties);
+    }
+
+    CFRelease(source);
+
+    // Some unusual codecs may not expose dimensions through ImageIO
+    // properties. Leave the object valid and let the first draw resolve them.
+    if (img->width <= 0 || img->height <= 0) {
+        img->width = 1;
+        img->height = 1;
+    }
+
+    track_img(img);
+
+    // No decoded pixel memory is allocated here, so do not charge the native
+    // heap for a bitmap that does not exist yet.
+    return img;
+}
+
+static int ensureImageDecoded(RenderImage *img) {
+
+    if (!img) {
+        return 0;
+    }
+
+    if (img->ctx) {
+        return 1;
+    }
+
+    if (!img->encodedData) {
+        return 0;
+    }
+
+    CGImageSourceRef source = CGImageSourceCreateWithData(
+        img->encodedData,
+        NULL
+    );
+
+    if (!source) {
+        return 0;
+    }
+
+    CGImageRef cgImage = CGImageSourceCreateImageAtIndex(
+        source,
+        0,
+        NULL
+    );
+
+    CFRelease(source);
+
+    if (!cgImage) {
+        return 0;
+    }
+
+    int decodedWidth = (int)CGImageGetWidth(cgImage);
+    int decodedHeight = (int)CGImageGetHeight(cgImage);
+
+    if (decodedWidth > 0 && decodedHeight > 0) {
+        img->width = decodedWidth;
+        img->height = decodedHeight;
+    }
 
     CGColorSpaceRef cs = getColorSpace();
 
@@ -729,8 +822,7 @@ static RenderImage *createImageFromData(
 
     if (!img->ctx) {
         CGImageRelease(cgImage);
-        free(img);
-        return NULL;
+        return 0;
     }
 
     CGContextClearRect(
@@ -746,19 +838,26 @@ static RenderImage *createImageFromData(
 
     CGImageRelease(cgImage);
 
-    // Immutable JAR image data never changes after loading.
-    // Keep one CGImage snapshot and reuse it for drawImage/drawRegion.
-    img->cachedImage = CGBitmapContextCreateImage(img->ctx);
+    // Once decoded, the compressed copy is no longer needed. This is the
+    // important memory property for very large remote/catalog lists:
+    // decoded images keep one bitmap, while not-yet-visible images keep only
+    // their compressed representation.
+    CFDataRef encodedData = img->encodedData;
+    img->encodedData = NULL;
 
-    track_img(img);
+    if (encodedData) {
+        CFRelease(encodedData);
+    }
+
     native_heap_add(img->width * img->height * 4);
 
-    return img;
+    return 1;
 }
 
-/// Returns a cached image for immutable assets.
-/// Mutable images still get a fresh snapshot so updates remain visible.
-/// Set releaseAfterUse when the returned image is owned by the caller.
+/// Returns an image ready for drawing. Immutable images are decoded on first
+/// use and then reuse the single bitmap context. A temporary CGImage is made
+/// only for the actual Core Graphics draw call, avoiding a second permanent
+/// full-size pixel copy for every icon.
 static CGImageRef drawingImageFor(
     RenderImage *img,
     int *releaseAfterUse
@@ -772,8 +871,8 @@ static CGImageRef drawingImageFor(
         return NULL;
     }
 
-    if (!img->isMutable && img->cachedImage) {
-        return img->cachedImage;
+    if (!img->ctx && !ensureImageDecoded(img)) {
+        return NULL;
     }
 
     if (!img->ctx) {
@@ -2740,14 +2839,14 @@ void j2me_render_cleanup(void) {
 
         RenderImage *img = g_live_img[i];
 
-        if (img->cachedImage) {
-            CGImageRelease(img->cachedImage);
-            img->cachedImage = NULL;
-        }
-
         if (img->ctx) {
             CGContextRelease(img->ctx);
             img->ctx = NULL;
+        }
+
+        if (img->encodedData) {
+            CFRelease(img->encodedData);
+            img->encodedData = NULL;
         }
 
         free(img);
