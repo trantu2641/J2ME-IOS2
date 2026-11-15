@@ -13,13 +13,13 @@
 #endif
 
 /*
- * Persistent JAR readers.
+ * Keep JAR readers alive between class/resource requests.
  *
- * The reference runtime exposes JarFile/ResourceLoader-style access. The
- * MiniJVM class loader already resolves classes from JARs, but the old ZIP
- * wrapper reopened and reparsed the archive for every class/resource read.
- * Keep a small LRU set of mz_zip_archive readers alive instead so the central
- * directory and file handle are reused across class loads.
+ * The old implementation reopened and reparsed the JAR for every
+ * zip_loadfile()/zip_get_file_*() call. A MIDlet can perform hundreds or
+ * thousands of resource/class lookups during startup. Reusing the parsed
+ * central directory makes JAR execution behave like a normal persistent
+ * JarFile/ResourceLoader instead of repeatedly rescanning the archive.
  */
 #define ZIP_READER_CACHE_CAPACITY 24
 
@@ -39,11 +39,7 @@ static ZipReaderCacheEntry g_zip_reader_cache[ZIP_READER_CACHE_CAPACITY];
 static pthread_mutex_t g_zip_reader_cache_lock = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t g_zip_reader_cache_clock = 0;
 
-static void zip_cache_stat_values(
-    const struct stat *st,
-    time_t *sec,
-    long *nsec
-) {
+static void zip_cache_stat_values(const struct stat *st, time_t *sec, long *nsec) {
 #if defined(__APPLE__)
     *sec = st->st_mtimespec.tv_sec;
     *nsec = st->st_mtimespec.tv_nsec;
@@ -53,19 +49,15 @@ static void zip_cache_stat_values(
 #endif
 }
 
-static int zip_cache_matches_stat(
-    const ZipReaderCacheEntry *entry,
-    const struct stat *st
-) {
-    time_t modified_sec = 0;
-    long modified_nsec = 0;
-    zip_cache_stat_values(st, &modified_sec, &modified_nsec);
-
+static int zip_cache_matches_stat(const ZipReaderCacheEntry *entry, const struct stat *st) {
+    time_t sec = 0;
+    long nsec = 0;
+    zip_cache_stat_values(st, &sec, &nsec);
     return entry->device == st->st_dev &&
            entry->inode == st->st_ino &&
            entry->file_size == st->st_size &&
-           entry->modified_sec == modified_sec &&
-           entry->modified_nsec == modified_nsec;
+           entry->modified_sec == sec &&
+           entry->modified_nsec == nsec;
 }
 
 static void zip_cache_close_entry(ZipReaderCacheEntry *entry) {
@@ -74,14 +66,11 @@ static void zip_cache_close_entry(ZipReaderCacheEntry *entry) {
     memset(entry, 0, sizeof(*entry));
 }
 
-/* Caller must hold g_zip_reader_cache_lock. */
 static void zip_cache_invalidate_locked(const char *path) {
-    if (!path || !path[0]) return;
-
+    if (!path) return;
     for (int i = 0; i < ZIP_READER_CACHE_CAPACITY; i++) {
-        ZipReaderCacheEntry *entry = &g_zip_reader_cache[i];
-        if (entry->used && strcmp(entry->path, path) == 0) {
-            zip_cache_close_entry(entry);
+        if (g_zip_reader_cache[i].used && strcmp(g_zip_reader_cache[i].path, path) == 0) {
+            zip_cache_close_entry(&g_zip_reader_cache[i]);
         }
     }
 }
@@ -110,21 +99,19 @@ static ZipReaderCacheEntry *zip_cache_get_locked(const char *path) {
                 return entry;
             }
 
-            /* The JAR was replaced or modified. Rebuild its ZIP index. */
+            /* The JAR was replaced/updated. Rebuild its index. */
             zip_cache_close_entry(entry);
             empty = entry;
             break;
         }
 
-        if (!lru || entry->last_used < lru->last_used) {
-            lru = entry;
-        }
+        if (!lru || entry->last_used < lru->last_used) lru = entry;
     }
 
     ZipReaderCacheEntry *slot = empty ? empty : lru;
     if (!slot) return NULL;
-
     if (slot->used) zip_cache_close_entry(slot);
+
     memset(slot, 0, sizeof(*slot));
     mz_zip_zero_struct(&slot->archive);
 
@@ -152,48 +139,39 @@ void zip_reader_cache_clear(void) {
     pthread_mutex_unlock(&g_zip_reader_cache_lock);
 }
 
+static const char *zip_normalize_name(const char *filename) {
+    if (!filename) return NULL;
+    while (*filename == '/') filename++;
+    return filename;
+}
 
 s32 zip_loadfile(char const *jarpath, char const *filename, ByteBuf *buf) {
     if (!jarpath || !filename || !buf) return -1;
-
-    if (filename[0] == '/') filename++;
+    filename = zip_normalize_name(filename);
 
     s32 ret = -1;
     pthread_mutex_lock(&g_zip_reader_cache_lock);
-
     ZipReaderCacheEntry *entry = zip_cache_get_locked(jarpath);
+
     if (entry) {
-        int file_index = mz_zip_reader_locate_file(
-            &entry->archive,
-            filename,
-            NULL,
-            MZ_ZIP_FLAG_CASE_SENSITIVE
-        );
+        int index = mz_zip_reader_locate_file(
+            &entry->archive, filename, NULL, MZ_ZIP_FLAG_CASE_SENSITIVE);
+        mz_zip_archive_file_stat st;
+        memset(&st, 0, sizeof(st));
 
-        mz_zip_archive_file_stat file_stat;
-        memset(&file_stat, 0, sizeof(file_stat));
-
-        if (file_index >= 0 &&
-            mz_zip_reader_file_stat(&entry->archive, (mz_uint)file_index, &file_stat)) {
-            mz_uint64 unzip_size = file_stat.m_uncomp_size;
-
-            if (unzip_size <= 0x7FFFFFFFULL) {
-                if (unzip_size > 0 && buf->_alloc_size < (u32)unzip_size) {
-                    bytebuf_expand(buf, (u32)unzip_size);
+        if (index >= 0 && mz_zip_reader_file_stat(&entry->archive, (mz_uint)index, &st)) {
+            mz_uint64 size = st.m_uncomp_size;
+            if (size <= 0x7FFFFFFFULL) {
+                if (size > 0 && buf->_alloc_size < (u32)size) {
+                    bytebuf_expand(buf, (u32)size);
                 }
-
-                if (unzip_size == 0) {
+                if (size == 0) {
                     buf->wp = 0;
                     ret = 0;
-                } else if (buf->buf && buf->_alloc_size >= (u32)unzip_size) {
-                    if (mz_zip_reader_extract_to_mem(
-                        &entry->archive,
-                        (mz_uint)file_index,
-                        buf->buf,
-                        (size_t)unzip_size,
-                        0
-                    ) != MZ_FALSE) {
-                        buf->wp = (s32)unzip_size;
+                } else if (buf->buf && buf->_alloc_size >= (u32)size) {
+                    if (mz_zip_reader_extract_to_mem(&entry->archive, (mz_uint)index,
+                                                     buf->buf, (size_t)size, 0) != MZ_FALSE) {
+                        buf->wp = (s32)size;
                         ret = 0;
                     }
                 }
@@ -205,44 +183,25 @@ s32 zip_loadfile(char const *jarpath, char const *filename, ByteBuf *buf) {
     return ret;
 }
 
-s32 zip_loadfile_to_mem(
-    char const *jarpath,
-    char const *filename,
-    c8 *buf,
-    s64 bufsize
-) {
+s32 zip_loadfile_to_mem(char const *jarpath, char const *filename, c8 *buf, s64 bufsize) {
     if (!jarpath || !filename || !buf || bufsize < 0) return -1;
-
-    if (filename[0] == '/') filename++;
+    filename = zip_normalize_name(filename);
 
     s32 ret = -1;
     pthread_mutex_lock(&g_zip_reader_cache_lock);
-
     ZipReaderCacheEntry *entry = zip_cache_get_locked(jarpath);
+
     if (entry) {
-        int file_index = mz_zip_reader_locate_file(
-            &entry->archive,
-            filename,
-            NULL,
-            MZ_ZIP_FLAG_CASE_SENSITIVE
-        );
+        int index = mz_zip_reader_locate_file(
+            &entry->archive, filename, NULL, MZ_ZIP_FLAG_CASE_SENSITIVE);
+        mz_zip_archive_file_stat st;
+        memset(&st, 0, sizeof(st));
 
-        mz_zip_archive_file_stat file_stat;
-        memset(&file_stat, 0, sizeof(file_stat));
-
-        if (file_index >= 0 &&
-            mz_zip_reader_file_stat(&entry->archive, (mz_uint)file_index, &file_stat)) {
-            mz_uint64 unzip_size = file_stat.m_uncomp_size;
-
-            if (unzip_size <= (mz_uint64)bufsize &&
-                unzip_size <= (mz_uint64)SIZE_MAX) {
-                if (mz_zip_reader_extract_to_mem(
-                    &entry->archive,
-                    (mz_uint)file_index,
-                    buf,
-                    (size_t)unzip_size,
-                    0
-                ) != MZ_FALSE) {
+        if (index >= 0 && mz_zip_reader_file_stat(&entry->archive, (mz_uint)index, &st)) {
+            mz_uint64 size = st.m_uncomp_size;
+            if (size <= (mz_uint64)bufsize && size <= (mz_uint64)SIZE_MAX) {
+                if (mz_zip_reader_extract_to_mem(&entry->archive, (mz_uint)index,
+                                                 buf, (size_t)size, 0) != MZ_FALSE) {
                     ret = 0;
                 }
             }
@@ -255,27 +214,20 @@ s32 zip_loadfile_to_mem(
 
 s64 zip_get_file_unzip_size(char const *jarpath, char const *filename) {
     if (!jarpath || !filename) return -1;
-    if (filename[0] == '/') filename++;
+    filename = zip_normalize_name(filename);
 
     s64 ret = -1;
     pthread_mutex_lock(&g_zip_reader_cache_lock);
-
     ZipReaderCacheEntry *entry = zip_cache_get_locked(jarpath);
+
     if (entry) {
-        int file_index = mz_zip_reader_locate_file(
-            &entry->archive,
-            filename,
-            NULL,
-            MZ_ZIP_FLAG_CASE_SENSITIVE
-        );
-
-        mz_zip_archive_file_stat file_stat;
-        memset(&file_stat, 0, sizeof(file_stat));
-
-        if (file_index >= 0 &&
-            mz_zip_reader_file_stat(&entry->archive, (mz_uint)file_index, &file_stat) &&
-            file_stat.m_uncomp_size <= (mz_uint64)INT64_MAX) {
-            ret = (s64)file_stat.m_uncomp_size;
+        int index = mz_zip_reader_locate_file(
+            &entry->archive, filename, NULL, MZ_ZIP_FLAG_CASE_SENSITIVE);
+        mz_zip_archive_file_stat st;
+        memset(&st, 0, sizeof(st));
+        if (index >= 0 && mz_zip_reader_file_stat(&entry->archive, (mz_uint)index, &st) &&
+            st.m_uncomp_size <= (mz_uint64)INT64_MAX) {
+            ret = (s64)st.m_uncomp_size;
         }
     }
 
@@ -285,26 +237,19 @@ s64 zip_get_file_unzip_size(char const *jarpath, char const *filename) {
 
 s32 zip_get_file_index(char const *jarpath, char const *filename) {
     if (!jarpath || !filename) return -1;
-    if (filename[0] == '/') filename++;
+    filename = zip_normalize_name(filename);
 
     s32 ret = -1;
     pthread_mutex_lock(&g_zip_reader_cache_lock);
-
     ZipReaderCacheEntry *entry = zip_cache_get_locked(jarpath);
+
     if (entry) {
-        int file_index = mz_zip_reader_locate_file(
-            &entry->archive,
-            filename,
-            NULL,
-            MZ_ZIP_FLAG_CASE_SENSITIVE
-        );
-
-        mz_zip_archive_file_stat file_stat;
-        memset(&file_stat, 0, sizeof(file_stat));
-
-        if (file_index >= 0 &&
-            mz_zip_reader_file_stat(&entry->archive, (mz_uint)file_index, &file_stat)) {
-            ret = file_index;
+        int index = mz_zip_reader_locate_file(
+            &entry->archive, filename, NULL, MZ_ZIP_FLAG_CASE_SENSITIVE);
+        mz_zip_archive_file_stat st;
+        memset(&st, 0, sizeof(st));
+        if (index >= 0 && mz_zip_reader_file_stat(&entry->archive, (mz_uint)index, &st)) {
+            ret = index;
         }
     }
 
@@ -318,8 +263,6 @@ s32 zip_savefile_mem(
     char const *buf,
     int size
 ) {
-    pthread_mutex_lock(&g_zip_reader_cache_lock);
-    zip_cache_invalidate_locked(jarpath);
     mz_zip_archive zipArchive = {0};
 
     if (filename && filename[0] == '/') {
@@ -356,7 +299,6 @@ s32 zip_savefile_mem(
         mz_zip_writer_end(&zipArchive);
     }
 
-    pthread_mutex_unlock(&g_zip_reader_cache_lock);
     return ret;
 }
 
@@ -380,52 +322,63 @@ s32 zip_savefile(
 
 
 s32 zip_filecount(char *jarpath) {
-    if (!jarpath) return -1;
+    mz_zip_archive zipArchive = {0};
 
-    s32 ret = -1;
-    pthread_mutex_lock(&g_zip_reader_cache_lock);
+    int ret = 0;
 
-    ZipReaderCacheEntry *entry = zip_cache_get_locked(jarpath);
-    if (entry) {
-        ret = (s32)mz_zip_reader_get_num_files(&entry->archive);
+    if (mz_zip_reader_init_file(&zipArchive, jarpath, 0) == MZ_FALSE) {
+        ret = -1;
+    } else {
+        ret = mz_zip_reader_get_num_files(&zipArchive);
+        mz_zip_reader_end(&zipArchive);
     }
 
-    pthread_mutex_unlock(&g_zip_reader_cache_lock);
     return ret;
 }
 
 
 ArrayList *zip_get_filenames(char *jarpath) {
-    if (!jarpath) return NULL;
+    mz_zip_archive zipArchive = {0};
 
     ArrayList *list = arraylist_create(0);
-    if (!list) return NULL;
 
-    pthread_mutex_lock(&g_zip_reader_cache_lock);
+    if (!list) {
+        return NULL;
+    }
 
-    ZipReaderCacheEntry *entry = zip_cache_get_locked(jarpath);
-    if (entry) {
-        mz_uint count = mz_zip_reader_get_num_files(&entry->archive);
+    if (mz_zip_reader_init_file(&zipArchive, jarpath, 0) == MZ_FALSE) {
+        return list;
+    }
 
-        for (mz_uint i = 0; i < count; i++) {
-            char name_buffer[1024] = {0};
-            mz_zip_reader_get_filename(
-                &entry->archive,
-                i,
-                name_buffer,
-                sizeof(name_buffer)
-            );
+    int count = mz_zip_reader_get_num_files(&zipArchive);
+    int i;
 
-            if (name_buffer[0]) {
-                Utf8String *name = utf8_create_c(name_buffer);
-                if (name) arraylist_push_back_unsafe(list, name);
+    for (i = 0; i < count; i++) {
+        char buf[1024] = {0};
+
+        mz_uint requiremore = mz_zip_reader_get_filename(
+            &zipArchive,
+            i,
+            buf,
+            sizeof(buf)
+        );
+
+        (void)requiremore;
+
+        if (strlen(buf)) {
+            Utf8String *ustr = utf8_create_c(buf);
+
+            if (ustr) {
+                arraylist_push_back_unsafe(list, ustr);
             }
         }
     }
 
-    pthread_mutex_unlock(&g_zip_reader_cache_lock);
+    mz_zip_reader_end(&zipArchive);
+
     return list;
 }
+
 
 void zip_destroy_filenames_list(ArrayList *list) {
     if (!list) {
@@ -447,19 +400,20 @@ void zip_destroy_filenames_list(ArrayList *list) {
 
 
 s32 zip_is_directory(char *jarpath, int index) {
-    if (!jarpath || index < 0) return -1;
+    mz_zip_archive zipArchive = {0};
 
-    s32 ret = -1;
-    pthread_mutex_lock(&g_zip_reader_cache_lock);
+    int ret = -1;
 
-    ZipReaderCacheEntry *entry = zip_cache_get_locked(jarpath);
-    if (entry && (mz_uint)index < mz_zip_reader_get_num_files(&entry->archive)) {
-        ret = mz_zip_reader_is_file_a_directory(&entry->archive, (mz_uint)index);
+    if (mz_zip_reader_init_file(&zipArchive, jarpath, 0) == MZ_FALSE) {
+        ret = -1;
+    } else {
+        ret = mz_zip_reader_is_file_a_directory(&zipArchive, index);
+        mz_zip_reader_end(&zipArchive);
     }
 
-    pthread_mutex_unlock(&g_zip_reader_cache_lock);
     return ret;
 }
+
 
 s32 zip_extract(char *zip_data, int size, ByteBuf *data) {
     mz_zip_archive zipArchive = {0};
