@@ -1,6 +1,8 @@
 #ifndef JVM_BRIDGE_H
 #define JVM_BRIDGE_H
 
+#include <stdint.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -110,6 +112,17 @@ void jvm_bridge_request_stop(void);
  * Check whether global JVM stop has been requested.
  */
 int jvm_bridge_is_stop_requested(void);
+
+/*
+ * Read one file from a JAR using the native Miniz ZIP reader.
+ * The returned buffer is owned by the caller and must be released with
+ * jvm_bridge_release_jar_entry(). Returns 0 on success.
+ */
+int jvm_bridge_extract_jar_entry(const char *jar_path,
+                                 const char *entry_name,
+                                 void **out_data,
+                                 int64_t *out_size);
+void jvm_bridge_release_jar_entry(void *data);
 
 #ifdef __cplusplus
 }

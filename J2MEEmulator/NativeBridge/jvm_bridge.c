@@ -2666,3 +2666,51 @@ int jvm_bridge_is_stop_requested(
         &g_jvm_stop_requested
     );
 }
+
+
+// ============================================================
+// JAR resource access for the Swift icon/metadata loader
+// ============================================================
+
+int jvm_bridge_extract_jar_entry(
+    const char *jar_path,
+    const char *entry_name,
+    void **out_data,
+    int64_t *out_size
+) {
+    if (!jar_path || !entry_name || !out_data || !out_size) {
+        return -1;
+    }
+
+    *out_data = NULL;
+    *out_size = 0;
+
+    /* Keep metadata and icon reads bounded, matching the old Swift limit. */
+    const s64 entry_size = zip_get_file_unzip_size(jar_path, entry_name);
+    if (entry_size <= 0 || entry_size > (50LL * 1024LL * 1024LL)) {
+        return -1;
+    }
+
+    void *buffer = malloc((size_t)entry_size);
+    if (!buffer) {
+        return -1;
+    }
+
+    if (zip_loadfile_to_mem(
+            jar_path,
+            entry_name,
+            (c8 *)buffer,
+            entry_size
+        ) != 0) {
+        free(buffer);
+        return -1;
+    }
+
+    *out_data = buffer;
+    *out_size = (int64_t)entry_size;
+    return 0;
+}
+
+void jvm_bridge_release_jar_entry(void *data) {
+    free(data);
+}
