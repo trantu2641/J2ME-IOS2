@@ -1149,7 +1149,7 @@ final class GameViewController:
             image: UIImage(systemName: "trash"),
             attributes: .destructive
         ) { [weak self] _ in
-            self?.confirmDeleteJarPickerItem(for: item)
+            self?.confirmDeleteJarPickerItem(item)
         }
         let destructiveActions = UIMenu(
             options: .displayInline,
@@ -1391,7 +1391,60 @@ final class GameViewController:
     }
 
     private func refreshUnderlyingHomeList() {
-        (presentingViewController as? AppsListViewController)?.refreshAfterExternalJARChange()
+        // GameViewController is normally presented directly by
+        // AppsListViewController, but keep this lookup robust in case the
+        // presentation is wrapped by a navigation/tab/presentation
+        // controller.  The JAR picker and the Home list must use the same
+        // files and UserDefaults keys, so every external change made here
+        // must refresh the real Home controller instance.
+        var current: UIViewController? = self
+
+        while let controller = current {
+            if let appsList = controller as? AppsListViewController {
+                appsList.refreshAfterExternalJARChange()
+                return
+            }
+
+            if let presented = controller.presentedViewController,
+               presented !== self {
+                if let appsList = findAppsListViewController(in: presented) {
+                    appsList.refreshAfterExternalJARChange()
+                    return
+                }
+            }
+
+            current = controller.presentingViewController
+        }
+    }
+
+    private func findAppsListViewController(in controller: UIViewController) -> AppsListViewController? {
+        if let appsList = controller as? AppsListViewController {
+            return appsList
+        }
+
+        if let navigation = controller as? UINavigationController {
+            for child in navigation.viewControllers.reversed() {
+                if let appsList = findAppsListViewController(in: child) {
+                    return appsList
+                }
+            }
+        }
+
+        if let tabBar = controller as? UITabBarController {
+            for child in tabBar.viewControllers ?? [] {
+                if let appsList = findAppsListViewController(in: child) {
+                    return appsList
+                }
+            }
+        }
+
+        for child in controller.children.reversed() {
+            if let appsList = findAppsListViewController(in: child) {
+                return appsList
+            }
+        }
+
+        return nil
     }
 
     private func showJarPickerOperationResult(title: String, message: String) {
