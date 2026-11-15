@@ -1391,6 +1391,14 @@ final class GameViewController:
     }
 
     private func refreshUnderlyingHomeList() {
+        // Notify the live Home controller immediately. viewDidAppear on the
+        // Home controller does not run again while this game screen is shown.
+        NotificationCenter.default.post(
+            name: Notification.Name("J2MEExternalJARChange"),
+            object: nil
+        )
+
+        // Keep the existing controller lookup as a fallback.
         // GameViewController is normally presented directly by
         // AppsListViewController, but keep this lookup robust in case the
         // presentation is wrapped by a navigation/tab/presentation

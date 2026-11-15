@@ -14,6 +14,8 @@ class AppsListViewController: UIViewController,
                               UICollectionViewDelegate,
                               UIDocumentPickerDelegate {
 
+    private static let externalJARChangeNotification = Notification.Name("J2MEExternalJARChange")
+
     // MARK: - Views
 
     private var springboardCollectionView: UICollectionView!
@@ -122,6 +124,16 @@ class AppsListViewController: UIViewController,
         setupCollectionView()
         setupEmptyState()
         createDirectories()
+
+        // GameViewController can modify the shared JAR directory while this
+        // controller is still underneath the game screen. Observe that change
+        // directly instead of relying on viewDidAppear.
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleExternalJARChangeNotification),
+            name: Self.externalJARChangeNotification,
+            object: nil
+        )
 
         scanApps()
     }
@@ -264,6 +276,18 @@ class AppsListViewController: UIViewController,
             atPath: Self.iconsDirectory,
             withIntermediateDirectories: true
         )
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(
+            self,
+            name: Self.externalJARChangeNotification,
+            object: nil
+        )
+    }
+
+    @objc private func handleExternalJARChangeNotification() {
+        scanApps()
     }
 
     // MARK: - Background lifecycle
