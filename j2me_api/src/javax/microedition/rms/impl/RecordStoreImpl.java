@@ -159,11 +159,12 @@ public class RecordStoreImpl extends RecordStore {
 			}
 
 			if (recordListeners != null) {
-				recordListeners.removeAllElements();
+					recordListeners.removeAllElements();
 			}
 
-			records.clear();
-
+			// Keep RMS records in memory after close. Avatar icon records are
+			// opened/closed repeatedly; clearing them forces a full disk reload
+			// for every icon. The manager owns the lifetime of the cached store.
 			open = false;
 		}
 		System.out.println("RecordStore " + recordStoreName + " closed");

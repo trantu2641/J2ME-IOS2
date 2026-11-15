@@ -28,12 +28,14 @@ package javax.microedition.rms.impl;
 
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.util.Map;
+import java.util.Vector;
 import java.util.concurrent.ConcurrentHashMap;
 
 import javax.microedition.rms.InvalidRecordIDException;
@@ -49,6 +51,17 @@ public class AndroidRecordStoreManager implements RecordStoreManager {
 	private final static Object NULL_STORE = new Object();
 
 	private Map<String, Object> recordStores = null;
+
+	/*
+	 * RMS writes are deliberately serialized by the original implementation.
+	 * The Avatar game writes one image record for every server icon, so doing
+	 * a header + record file write synchronously for every icon can stall the
+	 * packet thread long enough for subsequent icon packets to be missed.
+	 * Keep the latest RMS state in memory and persist snapshots in the
+	 * background instead.
+	 */
+	private final Vector<PendingSave> pendingSaves = new Vector<PendingSave>();
+	private Thread saveThread;
 
 	private static String getDataDir() {
 		String root = System.getProperty("app.save.root");
@@ -119,9 +132,13 @@ public class AndroidRecordStoreManager implements RecordStoreManager {
 		recordStoreName = sanitizeName(recordStoreName);
 
 		Object value = recordStores.get(recordStoreName);
-		if (value instanceof RecordStoreImpl && ((RecordStoreImpl) value).isOpen()) {
-			((RecordStoreImpl) value).setOpen();
-			return (RecordStoreImpl) value;
+		if (value instanceof RecordStoreImpl) {
+			// Reuse the in-memory RMS after a close. The game opens/closes the
+			// same icon store for every image, so reloading it from disk each
+			// time defeats the cache and creates unnecessary I/O.
+			RecordStoreImpl cached = (RecordStoreImpl) value;
+			cached.setOpen();
+			return cached;
 		}
 
 		RecordStoreImpl recordStoreImpl;
@@ -225,7 +242,39 @@ public class AndroidRecordStoreManager implements RecordStoreManager {
 	@Override
 	public void saveRecord(RecordStoreImpl recordStoreImpl, int recordId)
 			throws RecordStoreException {
-		saveToDisk(recordStoreImpl, recordId);
+		/*
+		 * Snapshot the bytes while the RMS is still open. Do not hand the
+		 * RecordStoreImpl itself to the worker because closeRecordStore() may
+		 * subsequently change its state.
+		 */
+		byte[] header;
+		byte[] record;
+		try {
+			ByteArrayOutputStream hb = new ByteArrayOutputStream(128);
+			DataOutputStream hdos = new DataOutputStream(hb);
+			synchronized (recordStoreImpl.records) {
+				recordStoreImpl.writeHeader(hdos);
+			}
+			hdos.close();
+			header = hb.toByteArray();
+
+			ByteArrayOutputStream rb = new ByteArrayOutputStream();
+			DataOutputStream rdos = new DataOutputStream(rb);
+			synchronized (recordStoreImpl.records) {
+				recordStoreImpl.writeRecord(rdos, recordId);
+			}
+			rdos.close();
+			record = rb.toByteArray();
+		} catch (IOException e) {
+			throw new RecordStoreException(e.getMessage());
+		}
+
+		enqueueSave(new PendingSave(
+			recordStoreImpl.getName(),
+			header,
+			recordId,
+			record
+		));
 	}
 
 	private synchronized void deleteFromDisk(RecordStoreImpl recordStore, int recordId)
@@ -244,6 +293,69 @@ public class AndroidRecordStoreManager implements RecordStoreManager {
 	/**
 	 * @param recordId -1 for storing only header
 	 */
+	private synchronized void enqueueSave(PendingSave save) {
+		pendingSaves.addElement(save);
+		if (saveThread == null) {
+			saveThread = new Thread(new Runnable() {
+				@Override
+				public void run() {
+					for (;;) {
+						PendingSave next = null;
+						synchronized (AndroidRecordStoreManager.this) {
+							while (pendingSaves.isEmpty()) {
+								try {
+									AndroidRecordStoreManager.this.wait();
+								} catch (InterruptedException ignored) {
+								}
+							}
+							next = pendingSaves.remove(0);
+						}
+
+						try {
+							writeSnapshot(next);
+						} catch (Exception e) {
+							System.out.println(
+								"RecordStore async save failed: " + e.getMessage()
+							);
+						}
+					}
+				}
+			});
+			saveThread.setDaemon(true);
+			saveThread.start();
+		}
+		notifyAll();
+	}
+
+	private void writeSnapshot(PendingSave save) throws IOException {
+		File dataDir = new File(getDataDir());
+		try (DataOutputStream dos = new DataOutputStream(
+				new FileOutputStream(new File(dataDir, getHeaderFileName(save.storeName))))) {
+			dos.write(save.header);
+		}
+
+		if (save.recordId != -1) {
+			try (DataOutputStream dos = new DataOutputStream(
+					new FileOutputStream(new File(dataDir, getRecordFileName(save.storeName, save.recordId))))) {
+				dos.write(save.record);
+			}
+		}
+	}
+
+	private static final class PendingSave {
+		final String storeName;
+		final byte[] header;
+		final int recordId;
+		final byte[] record;
+
+		PendingSave(String storeName, byte[] header, int recordId, byte[] record) {
+			this.storeName = storeName;
+			this.header = header;
+			this.recordId = recordId;
+			this.record = record;
+		}
+	}
+
 	private synchronized void saveToDisk(RecordStoreImpl recordStore, int recordId)
 			throws RecordStoreException {
 		String headerName = getHeaderFileName(recordStore.getName());
