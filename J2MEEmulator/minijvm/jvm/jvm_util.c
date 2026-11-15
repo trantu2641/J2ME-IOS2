@@ -5,6 +5,7 @@
 
 #include <stdarg.h>
 #include <sys/stat.h>
+#include <time.h>
 #include "jvm.h"
 
 #include "../utils/miniz_wrapper.h"
@@ -659,6 +660,75 @@ void close_log() {
         last_flush = 0;
     }
 #endif
+}
+
+static void jvm_runtime_error_log(Runtime *runtime, s32 exception_type, c8 const *errmsg) {
+    FILE *fp = fopen("./J2ME_Runtime_Errors.log", "ab");
+    if (!fp) return;
+
+    time_t now = time(NULL);
+    struct tm tm_now;
+    c8 timebuf[64] = {0};
+#if defined(_POSIX_THREAD_SAFE_FUNCTIONS) || defined(__APPLE__)
+    localtime_r(&now, &tm_now);
+#else
+    struct tm *tmp = localtime(&now);
+    if (tmp) tm_now = *tmp;
+#endif
+    strftime(timebuf, sizeof(timebuf), "%Y-%m-%d %H:%M:%S", &tm_now);
+
+    const c8 *type_name = "UNKNOWN_EXCEPTION";
+    if (exception_type >= 0) {
+        type_name = STRS_CLASS_EXCEPTION[exception_type];
+    }
+
+    fprintf(fp, "\n============================================================\n");
+    fprintf(fp, "J2ME RUNTIME ERROR\n");
+    fprintf(fp, "TIME: %s\n", timebuf[0] ? timebuf : "unknown");
+    fprintf(fp, "EXCEPTION: %s\n", type_name ? type_name : "UNKNOWN_EXCEPTION");
+    fprintf(fp, "MESSAGE: %s\n", errmsg ? errmsg : "");
+
+    if (runtime) {
+        fprintf(fp, "THREAD: %llx\n", (s64)(intptr_t)thrd_current());
+        fprintf(fp, "RUNTIME: %llx\n", (s64)(intptr_t)runtime);
+
+        Runtime *frame = runtime;
+        s32 depth = 0;
+        fprintf(fp, "STACK: \n");
+        while (frame && depth < 64) {
+            const c8 *clazz = "<unknown-class>";
+            const c8 *method = "<unknown-method>";
+            const c8 *source = "<unknown-source>";
+
+            if (frame->clazz && frame->clazz->name) {
+                clazz = utf8_cstr(frame->clazz->name);
+            }
+            if (frame->method && frame->method->name) {
+                method = utf8_cstr(frame->method->name);
+            }
+            if (frame->clazz && frame->clazz->source) {
+                source = frame->clazz->source;
+            }
+
+            fprintf(fp, "  #%d %s.%s", depth, clazz, method);
+            if (source && source[0]) {
+                fprintf(fp, " [%s]", source);
+            }
+            fprintf(fp, "\n");
+
+            frame = frame->parent;
+            depth++;
+        }
+        if (frame) {
+            fprintf(fp, "  ... stack truncated at 64 frames ...\n");
+        }
+    } else {
+        fprintf(fp, "RUNTIME: NULL\n");
+    }
+
+    fprintf(fp, "============================================================\n");
+    fflush(fp);
+    fclose(fp);
 }
 
 s32 jvm_printf(const c8 *format, ...) {
@@ -1649,6 +1719,7 @@ Instance *exception_create_str(s32 exception_type, Runtime *runtime, c8 const *e
 
 
 void exception_throw(s32 exception_type, Runtime *runtime, c8 const *errmsg) {
+    jvm_runtime_error_log(runtime, exception_type, errmsg);
     Instance *ex = exception_create_str(exception_type, runtime, errmsg);
     push_ref(runtime->stack, ex);
 }
