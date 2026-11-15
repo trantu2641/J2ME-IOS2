@@ -32,9 +32,6 @@ class FormView: UIView, UIGestureRecognizerDelegate {
 
     private var choiceControls: [ChoiceControl] = []
     private var textControls: [TextControl] = []
-    private var keyboardFrameObserver: NSObjectProtocol?
-    private var keyboardHideObserver: NSObjectProtocol?
-    private var commandBarBottomConstraint: NSLayoutConstraint!
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -80,11 +77,6 @@ class FormView: UIView, UIGestureRecognizerDelegate {
         commandBar.distribution = .fillEqually
         commandBar.translatesAutoresizingMaskIntoConstraints = false
         addSubview(commandBar)
-
-        commandBarBottomConstraint = commandBar.bottomAnchor.constraint(
-            equalTo: safeAreaLayoutGuide.bottomAnchor,
-            constant: -8
-        )
 
         NSLayoutConstraint.activate([
             titleLabel.topAnchor.constraint(
@@ -135,7 +127,10 @@ class FormView: UIView, UIGestureRecognizerDelegate {
                 equalTo: trailingAnchor,
                 constant: -16
             ),
-            commandBarBottomConstraint,
+            commandBar.bottomAnchor.constraint(
+                equalTo: safeAreaLayoutGuide.bottomAnchor,
+                constant: -8
+            ),
             commandBar.heightAnchor.constraint(
                 equalToConstant: 44
             )
@@ -152,66 +147,6 @@ class FormView: UIView, UIGestureRecognizerDelegate {
         outsideTap.delegate = self
 
         addGestureRecognizer(outsideTap)
-
-        keyboardFrameObserver = NotificationCenter.default.addObserver(
-            forName: UIResponder.keyboardWillChangeFrameNotification,
-            object: nil,
-            queue: .main
-        ) { [weak self] notification in
-            self?.adjustForKeyboard(notification)
-        }
-
-        keyboardHideObserver = NotificationCenter.default.addObserver(
-            forName: UIResponder.keyboardWillHideNotification,
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            self?.restoreAfterKeyboard()
-        }
-    }
-
-    deinit {
-        if let keyboardFrameObserver {
-            NotificationCenter.default.removeObserver(keyboardFrameObserver)
-        }
-        if let keyboardHideObserver {
-            NotificationCenter.default.removeObserver(keyboardHideObserver)
-        }
-    }
-
-    private func adjustForKeyboard(_ notification: Notification) {
-        guard let screenFrame = notification.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect else {
-            return
-        }
-
-        let keyboardFrame = convert(screenFrame, from: nil)
-        let overlap = max(0, bounds.maxY - keyboardFrame.minY)
-        guard overlap > 80 else { return }
-
-        let duration = notification.userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double ?? 0.25
-        let curve = notification.userInfo?[UIResponder.keyboardAnimationCurveUserInfoKey] as? UInt ?? 7
-        let options = UIView.AnimationOptions(rawValue: curve << 16).union(.beginFromCurrentState)
-
-        // Move the command row above the keyboard. The scroll view is
-        // constrained to the command row, so it automatically gains the
-        // remaining visible height instead of being covered by the keyboard.
-        commandBarBottomConstraint.constant = -(overlap + 8)
-        UIView.animate(withDuration: duration, delay: 0, options: options) {
-            self.layoutIfNeeded()
-        }
-
-        if let responder = stackView.findFirstResponder() {
-            let rect = responder.convert(responder.bounds, to: scrollView)
-            scrollView.scrollRectToVisible(rect.insetBy(dx: 0, dy: -20), animated: true)
-        }
-    }
-
-    private func restoreAfterKeyboard() {
-        let duration = 0.22
-        commandBarBottomConstraint.constant = -8
-        UIView.animate(withDuration: duration) {
-            self.layoutIfNeeded()
-        }
     }
 
     // MARK: - Dismiss keyboard on outside tap
@@ -707,10 +642,6 @@ class FormView: UIView, UIGestureRecognizerDelegate {
             Int32(J2ME_UI_COMMAND_ACTION),
             cmdId
         )
-
-        if commandType == 7 { // Command.EXIT
-            activeGameViewController?.handleMIDletExitCommand()
-        }
     }
 
     private func commitFormEdits() {
@@ -756,16 +687,6 @@ class FormView: UIView, UIGestureRecognizerDelegate {
     }
 }
 
-
-private extension UIView {
-    func findFirstResponder() -> UIView? {
-        if isFirstResponder { return self }
-        for subview in subviews {
-            if let responder = subview.findFirstResponder() { return responder }
-        }
-        return nil
-    }
-}
 
 // ============================================================
 // List view
@@ -930,7 +851,6 @@ class J2MEListView: UIView,
                 j2me_ui_get_command_id(
                     Int32(i)
                 )
-            let cmdType = j2me_ui_get_command_type(Int32(i))
 
             let btn =
                 UIButton(type: .system)
@@ -941,7 +861,6 @@ class J2MEListView: UIView,
             )
 
             btn.tag = Int(cmdId)
-            btn.accessibilityIdentifier = "j2me-command-type-\(cmdType)"
 
             btn.backgroundColor =
                 .systemBlue
@@ -1015,15 +934,5 @@ class J2MEListView: UIView,
             Int32(J2ME_UI_COMMAND_ACTION),
             Int32(sender.tag)
         )
-
-        let commandType = Int32(
-            sender.accessibilityIdentifier?.replacingOccurrences(
-                of: "j2me-command-type-",
-                with: ""
-            ) ?? "0"
-        ) ?? 0
-        if commandType == 7 { // Command.EXIT
-            activeGameViewController?.handleMIDletExitCommand()
-        }
     }
 }
