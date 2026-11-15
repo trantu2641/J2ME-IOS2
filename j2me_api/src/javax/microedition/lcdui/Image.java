@@ -749,15 +749,11 @@ public class Image {
         try {
 
             /*
-             * The original Avatar runtime does not pass server PNG bytes
-             * straight to the platform decoder.  It first normalizes PNG
-             * chunks and keeps only the chunks it actually needs:
-             * IHDR, PLTE, tRNS, gAMA, IDAT and IEND.
-             *
-             * Review/inventory icons are delivered as raw byte[] packets,
-             * so this path is critical for those images.  Some server PNGs
-             * contain ancillary chunks that CoreGraphics rejects even though
-             * the PNG itself is otherwise valid.
+             * Normalize PNG resources before handing them to the native
+             * decoder. Some MIDlets contain valid PNGs with ancillary chunks
+             * that the native decoder does not accept. The reference runtime
+             * has a dedicated PNG decoder path, so keep this compatibility
+             * step inside the J2ME Image byte[] resource path.
              */
             byte[] decodeData =
                 normalizePNGForNativeDecoder(
@@ -844,11 +840,10 @@ public class Image {
     }
 
     /**
-     * Normalize a PNG exactly for the server-icon decode path.
+     * Keep the PNG decode path compatible with J2ME runtimes that accept
+     * ordinary PNG data but reject unsupported ancillary chunks.
      *
-     * The reference J2ME runtime strips unsupported/ancillary PNG chunks
-     * before handing the image to the native decoder.  This is intentionally
-     * limited to PNG data; JPEG and other formats are passed through intact.
+     * Non-PNG data is returned unchanged.
      */
     private static byte[] normalizePNGForNativeDecoder(
         byte[] data,
@@ -878,7 +873,6 @@ public class Image {
         ByteArrayOutputStream out =
             new ByteArrayOutputStream(length);
 
-        // PNG signature
         out.write(PNG, 0, PNG.length);
 
         int p = 8;
@@ -892,8 +886,6 @@ public class Image {
                 | (data[offset + p + 3] & 0xFF);
 
             if (chunkLength < 0 || chunkLength > length - p - 12) {
-                // Malformed PNG: preserve the original bytes and let the
-                // native decoder make the final decision.
                 byte[] raw = new byte[length];
                 System.arraycopy(data, offset, raw, 0, length);
                 return raw;
@@ -937,7 +929,6 @@ public class Image {
         byte[] data,
         String name
     ) {
-
         return
             data[typeOffset] == (byte) name.charAt(0)
             && data[typeOffset + 1] == (byte) name.charAt(1)
