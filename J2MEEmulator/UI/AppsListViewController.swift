@@ -44,6 +44,10 @@ class AppsListViewController: UIViewController,
     private var allApps: [AppInfo] = []
     private var apps: [AppInfo] = []
 
+    // Generation of the latest Home JAR scan. Older async scans must never
+    // overwrite newer results after an external rename/delete/import.
+    private var scanGeneration: UInt = 0
+
     // MARK: - Directories
 
     private static var documentsDirectory: String {
@@ -569,6 +573,13 @@ class AppsListViewController: UIViewController,
 
     private func scanApps() {
 
+        // Every refresh starts a new generation. The scan itself runs in the
+        // background, but only the newest generation is allowed to update
+        // the Home list. This is important when GameViewController triggers
+        // several refreshes in quick succession (rename/delete/import).
+        scanGeneration &+= 1
+        let generation = scanGeneration
+
         let gamesDir = Self.gamesDirectory
 
         //
@@ -696,6 +707,14 @@ class AppsListViewController: UIViewController,
             DispatchQueue.main.async { [weak self] in
 
                 guard let self else {
+                    return
+                }
+
+                // Ignore a result produced by an older scan. A previous
+                // background scan may have started before the JAR was
+                // renamed/deleted/imported and can otherwise put stale data
+                // back into the Home list.
+                guard self.scanGeneration == generation else {
                     return
                 }
 
