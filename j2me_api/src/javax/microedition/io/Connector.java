@@ -170,8 +170,8 @@ public final class Connector {
             return false;
         }
 
-        return startsWithIgnoreCase(name, "http://")
-            || startsWithIgnoreCase(name, "https://");
+        return name.regionMatches(true, 0, "http://", 0, 7)
+            || name.regionMatches(true, 0, "https://", 0, 8);
     }
 
     /**
