@@ -10,6 +10,8 @@ import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.net.URLConnection;
+import java.util.Hashtable;
+import java.util.Vector;
 
 /**
  * J2ME Connector implementation for JarBox.
@@ -17,9 +19,10 @@ import java.net.URLConnection;
  * HTTP/HTTPS are backed by the platform Java URL connection so MIDlets can
  * download remote icons, images and other game data.
  *
- * Resources that are actually missing from a JAR are handled separately by
- * the resource/image compatibility layer. A remote URL is never treated as
- * a local JAR resource.
+ * Remote resources are deliberately detached from the HTTP connection before
+ * they are returned to the MIDlet. A small byte cache and same-URL request
+ * coalescing are used because avatar/review screens can ask for the same
+ * image many times while a large item list is being built.
  */
 public final class Connector {
 
@@ -29,38 +32,30 @@ public final class Connector {
 
     private static final int DEFAULT_CONNECT_TIMEOUT = 8000;
     private static final int DEFAULT_READ_TIMEOUT = 10000;
-    private static final int MAX_HTTP_RETRIES = 0;
+    private static final int MAX_HTTP_RETRIES = 1;
 
     /*
-     * Remote image protection:
+     * Remote image/resource cache.
      *
-     * Many MIDlets request dozens/hundreds of HTTP icons at once.
-     * The old implementation opened one HTTP connection per request,
-     * so a burst could overload the image server and make the whole
-     * icon set appear empty.
-     *
-     * Keep this deliberately J2ME-friendly: Hashtable + synchronized
-     * + wait/notify, with no java.util.concurrent dependency.
+     * The cache stores raw response bytes, not Image objects. This keeps the
+     * Connector independent from lcdui and lets Image.createImage(byte[],...)
+     * perform the actual decoding.
      */
-    private static final int MAX_CONCURRENT_HTTP_REQUESTS = 2;
-    private static final int MAX_REMOTE_CACHE_ENTRIES = 64;
-    private static final int MAX_REMOTE_CACHE_BYTES = 8 * 1024 * 1024;
+    private static final int MAX_REMOTE_CACHE_ENTRIES = 128;
+    private static final long MAX_REMOTE_CACHE_BYTES = 16L * 1024L * 1024L;
 
-    private static final Object REMOTE_LOCK = new Object();
-    private static int activeRemoteRequests = 0;
-    private static int remoteCacheBytes = 0;
+    private static final Hashtable REMOTE_CACHE = new Hashtable();
+    private static final Vector REMOTE_CACHE_ORDER = new Vector();
+    private static long remoteCacheBytes = 0L;
 
-    private static final java.util.Hashtable REMOTE_CACHE =
-        new java.util.Hashtable();
+    /* One in-flight request per exact URL. Other callers wait for its bytes. */
+    private static final Hashtable REMOTE_IN_FLIGHT = new Hashtable();
 
-    private static final java.util.Hashtable REMOTE_CACHE_SIZES =
-        new java.util.Hashtable();
-
-    private static final java.util.Vector REMOTE_CACHE_ORDER =
-        new java.util.Vector();
-
-    private static final java.util.Hashtable REMOTE_INFLIGHT =
-        new java.util.Hashtable();
+    private static final class RemoteRequest {
+        byte[] data;
+        IOException error;
+        boolean finished;
+    }
 
     private Connector() {
     }
@@ -125,241 +120,201 @@ public final class Connector {
     public static InputStream openInputStream(String name, int mode)
         throws IOException {
 
-        if (name == null || name.length() == 0) {
-            throw new IOException("HTTP request URL is empty");
+        if (isHTTPURL(name) && (mode & READ) != 0) {
+            return new ByteArrayInputStream(loadRemoteBytes(name));
         }
-
-        /*
-         * This optimization is intentionally done only for HTTP/HTTPS.
-         * Local/other connector behavior remains unchanged.
-         */
-        boolean remote = startsWithIgnoreCase(name, "http://")
-            || startsWithIgnoreCase(name, "https://");
-
-        if (!remote) {
-            return openInputStreamDirect(name, mode);
-        }
-
-        /*
-         * 1. Return a previously downloaded response immediately.
-         * 2. If the same URL is already being downloaded, wait for that
-         *    one request instead of creating another server request.
-         * 3. Different URLs are limited to two active HTTP downloads.
-         */
-        synchronized (REMOTE_LOCK) {
-
-            byte[] cached = remoteCacheGet(name);
-
-            if (cached != null) {
-                return new ByteArrayInputStream(cached);
-            }
-
-            RemoteRequest existing =
-                (RemoteRequest) REMOTE_INFLIGHT.get(name);
-
-            if (existing != null) {
-
-                while (!existing.done) {
-                    try {
-                        REMOTE_LOCK.wait();
-                    } catch (InterruptedException e) {
-                        throw new IOException(
-                            "Interrupted while waiting for remote image: "
-                            + name
-                        );
-                    }
-                }
-
-                if (existing.data != null) {
-                    return new ByteArrayInputStream(existing.data);
-                }
-
-                throw new IOException(
-                    existing.error != null
-                        ? existing.error
-                        : "Remote image request failed: " + name
-                );
-            }
-
-            RemoteRequest request = new RemoteRequest();
-            REMOTE_INFLIGHT.put(name, request);
-
-            while (activeRemoteRequests >=
-                MAX_CONCURRENT_HTTP_REQUESTS) {
-
-                try {
-                    REMOTE_LOCK.wait();
-                } catch (InterruptedException e) {
-
-                    REMOTE_INFLIGHT.remove(name);
-                    request.done = true;
-                    REMOTE_LOCK.notifyAll();
-
-                    throw new IOException(
-                        "Interrupted while waiting for HTTP slot: "
-                        + name
-                    );
-                }
-            }
-
-            activeRemoteRequests++;
-        }
-
-        byte[] data = null;
-        String error = null;
-
-        try {
-
-            data = openInputStreamDirectBytes(name, mode);
-
-            if (data == null || data.length == 0) {
-                throw new IOException(
-                    "Remote image response is empty: " + name
-                );
-            }
-
-            return new ByteArrayInputStream(data);
-
-        } catch (IOException e) {
-
-            error = e.toString();
-
-            throw e;
-
-        } finally {
-
-            synchronized (REMOTE_LOCK) {
-
-                RemoteRequest request =
-                    (RemoteRequest) REMOTE_INFLIGHT.remove(name);
-
-                if (data != null && data.length > 0) {
-                    remoteCachePut(name, data);
-                }
-
-                if (request != null) {
-                    request.data = data;
-                    request.error = error;
-                    request.done = true;
-                }
-
-                if (activeRemoteRequests > 0) {
-                    activeRemoteRequests--;
-                }
-
-                REMOTE_LOCK.notifyAll();
-            }
-        }
-    }
-
-    private static InputStream openInputStreamDirect(
-        String name,
-        int mode
-    ) throws IOException {
-
-        return new ByteArrayInputStream(
-            openInputStreamDirectBytes(name, mode)
-        );
-    }
-
-    private static byte[] openInputStreamDirectBytes(
-        String name,
-        int mode
-    ) throws IOException {
 
         IOException lastError = null;
 
-        for (int attempt = 0;
-             attempt <= MAX_HTTP_RETRIES;
-             attempt++) {
-
+        for (int attempt = 0; attempt <= MAX_HTTP_RETRIES; attempt++) {
             Connection connection = null;
 
             try {
                 connection = open(name, mode, false);
 
                 if (!(connection instanceof InputConnection)) {
-                    throw new IOException(
-                        "Connection does not support input"
-                    );
+                    throw new IOException("Connection does not support input");
                 }
 
                 InputStream source =
                     ((InputConnection) connection).openInputStream();
 
                 if (source == null) {
-                    throw new IOException(
-                        "HTTP input stream is null"
-                    );
+                    throw new IOException("HTTP input stream is null");
                 }
 
-                return readAllAndClose(
-                    source,
-                    connection
-                );
+                byte[] data = readAllAndClose(source, connection);
+                return new ByteArrayInputStream(data);
 
             } catch (IOException e) {
-
                 lastError = e;
 
-                if (connection != null) {
-                    try {
-                        connection.close();
-                    } catch (IOException ignored) {
-                    } catch (RuntimeException ignored) {
-                    }
-                }
+                closeQuietly(connection);
 
                 if (attempt < MAX_HTTP_RETRIES) {
                     continue;
                 }
-
             } catch (RuntimeException e) {
-
-                if (connection != null) {
-                    try {
-                        connection.close();
-                    } catch (IOException ignored) {
-                    } catch (RuntimeException ignored) {
-                    }
-                }
-
+                closeQuietly(connection);
                 throw e;
             }
         }
 
         throw lastError != null
             ? lastError
-            : new IOException(
-                "HTTP request failed: " + name
-            );
+            : new IOException("HTTP request failed: " + name);
     }
 
-    private static byte[] remoteCacheGet(String name) {
-
-        byte[] data =
-            (byte[]) REMOTE_CACHE.get(name);
-
-        if (data != null) {
-
-            /*
-             * Move the URL to the newest position.
-             * This gives us a small LRU-like eviction policy without
-             * requiring LinkedHashMap.
-             */
-            REMOTE_CACHE_ORDER.removeElement(name);
-            REMOTE_CACHE_ORDER.addElement(name);
+    private static boolean isHTTPURL(String name) {
+        if (name == null || name.length() < 7) {
+            return false;
         }
 
-        return data;
+        return startsWithIgnoreCase(name, "http://")
+            || startsWithIgnoreCase(name, "https://");
     }
 
-    private static void remoteCachePut(
-        String name,
-        byte[] data
-    ) {
+    /**
+     * Loads a remote resource once and shares its bytes with simultaneous
+     * callers. Different URLs remain independent and may download in
+     * parallel; there is intentionally no global "2 requests" bottleneck.
+     */
+    private static byte[] loadRemoteBytes(String url) throws IOException {
 
-        if (data == null || data.length == 0) {
+        byte[] cached = getCachedRemote(url);
+        if (cached != null) {
+            return cached;
+        }
+
+        RemoteRequest request;
+        boolean owner = false;
+
+        synchronized (REMOTE_IN_FLIGHT) {
+            request = (RemoteRequest) REMOTE_IN_FLIGHT.get(url);
+
+            if (request == null) {
+                request = new RemoteRequest();
+                REMOTE_IN_FLIGHT.put(url, request);
+                owner = true;
+            }
+        }
+
+        if (owner) {
+            try {
+                byte[] data = fetchRemoteBytes(url);
+
+                synchronized (request) {
+                    request.data = data;
+                    request.finished = true;
+                    request.notifyAll();
+                }
+
+                if (data != null && data.length > 0) {
+                    putCachedRemote(url, data);
+                }
+
+                return data;
+
+            } catch (IOException e) {
+                synchronized (request) {
+                    request.error = e;
+                    request.finished = true;
+                    request.notifyAll();
+                }
+
+                throw e;
+
+            } finally {
+                synchronized (REMOTE_IN_FLIGHT) {
+                    REMOTE_IN_FLIGHT.remove(url);
+                }
+            }
+        }
+
+        synchronized (request) {
+            while (!request.finished) {
+                try {
+                    request.wait(10000L);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new IOException("Interrupted while loading: " + url);
+                }
+            }
+
+            if (request.data != null) {
+                return request.data;
+            }
+
+            if (request.error != null) {
+                throw request.error;
+            }
+
+            throw new IOException("Remote request returned no data: " + url);
+        }
+    }
+
+    private static byte[] fetchRemoteBytes(String url) throws IOException {
+
+        IOException lastError = null;
+
+        for (int attempt = 0; attempt <= MAX_HTTP_RETRIES; attempt++) {
+            Connection connection = null;
+
+            try {
+                connection = open(url, READ, false);
+
+                if (!(connection instanceof InputConnection)) {
+                    throw new IOException("Connection does not support input");
+                }
+
+                InputStream source =
+                    ((InputConnection) connection).openInputStream();
+
+                if (source == null) {
+                    throw new IOException("HTTP input stream is null");
+                }
+
+                byte[] data = readAllAndClose(source, connection);
+
+                if (data == null || data.length == 0) {
+                    throw new IOException("Empty HTTP response: " + url);
+                }
+
+                return data;
+
+            } catch (IOException e) {
+                lastError = e;
+                closeQuietly(connection);
+
+                if (attempt < MAX_HTTP_RETRIES) {
+                    continue;
+                }
+            } catch (RuntimeException e) {
+                closeQuietly(connection);
+                throw e;
+            }
+        }
+
+        throw lastError != null
+            ? lastError
+            : new IOException("HTTP request failed: " + url);
+    }
+
+    private static byte[] getCachedRemote(String url) {
+        synchronized (REMOTE_CACHE) {
+            byte[] data = (byte[]) REMOTE_CACHE.get(url);
+
+            if (data != null) {
+                REMOTE_CACHE_ORDER.remove(url);
+                REMOTE_CACHE_ORDER.addElement(url);
+            }
+
+            return data;
+        }
+    }
+
+    private static void putCachedRemote(String url, byte[] data) {
+        if (url == null || data == null || data.length == 0) {
             return;
         }
 
@@ -367,53 +322,77 @@ public final class Connector {
             return;
         }
 
-        byte[] old =
-            (byte[]) REMOTE_CACHE.get(name);
+        synchronized (REMOTE_CACHE) {
+            byte[] old = (byte[]) REMOTE_CACHE.remove(url);
 
-        if (old != null) {
-            remoteCacheBytes -= old.length;
-            REMOTE_CACHE_ORDER.removeElement(name);
-        }
+            if (old != null) {
+                remoteCacheBytes -= old.length;
+                REMOTE_CACHE_ORDER.remove(url);
+            }
 
-        /*
-         * Evict oldest entries until both limits are satisfied.
-         */
-        while (
-            (REMOTE_CACHE.size() >= MAX_REMOTE_CACHE_ENTRIES
-                || remoteCacheBytes + data.length
-                    > MAX_REMOTE_CACHE_BYTES)
-            && REMOTE_CACHE_ORDER.size() > 0
-        ) {
+            REMOTE_CACHE.put(url, data);
+            REMOTE_CACHE_ORDER.addElement(url);
+            remoteCacheBytes += data.length;
 
-            String oldest =
-                (String) REMOTE_CACHE_ORDER.elementAt(0);
+            while (
+                REMOTE_CACHE_ORDER.size() > MAX_REMOTE_CACHE_ENTRIES
+                || remoteCacheBytes > MAX_REMOTE_CACHE_BYTES
+            ) {
+                if (REMOTE_CACHE_ORDER.size() == 0) {
+                    break;
+                }
 
-            REMOTE_CACHE_ORDER.removeElementAt(0);
+                String oldest =
+                    (String) REMOTE_CACHE_ORDER.elementAt(0);
 
-            byte[] removed =
-                (byte[]) REMOTE_CACHE.remove(oldest);
+                REMOTE_CACHE_ORDER.removeElementAt(0);
 
-            REMOTE_CACHE_SIZES.remove(oldest);
+                byte[] removed =
+                    (byte[]) REMOTE_CACHE.remove(oldest);
 
-            if (removed != null) {
-                remoteCacheBytes -= removed.length;
+                if (removed != null) {
+                    remoteCacheBytes -= removed.length;
+                }
             }
         }
-
-        REMOTE_CACHE.put(name, data);
-        REMOTE_CACHE_SIZES.put(
-            name,
-            new Integer(data.length)
-        );
-        REMOTE_CACHE_ORDER.addElement(name);
-        remoteCacheBytes += data.length;
     }
 
-    private static final class RemoteRequest {
+    private static void closeQuietly(Connection connection) {
+        if (connection == null) {
+            return;
+        }
 
-        boolean done;
-        byte[] data;
-        String error;
+        try {
+            connection.close();
+        } catch (IOException ignored) {
+        } catch (RuntimeException ignored) {
+        }
+    }
+
+    private static byte[] readAllAndClose(
+        InputStream source,
+        Connection connection
+    ) throws IOException {
+
+        ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+        byte[] chunk = new byte[8192];
+
+        try {
+            int count;
+            while ((count = source.read(chunk)) != -1) {
+                if (count > 0) {
+                    buffer.write(chunk, 0, count);
+                }
+            }
+            return buffer.toByteArray();
+        } finally {
+            try {
+                source.close();
+            } catch (IOException ignored) {
+            } finally {
+                closeQuietly(connection);
+            }
+        }
     }
 
     public static OutputStream openOutputStream(String name)
@@ -427,10 +406,7 @@ public final class Connector {
         Connection connection = open(name, mode, false);
 
         if (!(connection instanceof OutputConnection)) {
-            try {
-                connection.close();
-            } catch (IOException ignored) {
-            }
+            closeQuietly(connection);
             throw new IOException("Connection does not support output");
         }
 
@@ -463,9 +439,14 @@ public final class Connector {
 
             connection.setInstanceFollowRedirects(true);
             connection.setUseCaches(false);
-            // Do not keep a broken server socket alive between icon requests.
+
+            /*
+             * Do not force a new socket policy here. The resource cache above
+             * already removes repeated icon requests. Keeping the individual
+             * connection implementation simple also preserves normal J2ME
+             * HTTP semantics for non-image data.
+             */
             connection.setRequestProperty("Connection", "close");
-            connection.setRequestProperty("Cache-Control", "max-age=300");
             connection.setConnectTimeout(
                 timeouts ? 0 : DEFAULT_CONNECT_TIMEOUT
             );
@@ -494,67 +475,36 @@ public final class Connector {
         }
 
         @Override
-        public InputStream openInputStream() throws IOException {
-            ensureOpen();
-
-            if ((mode & READ) == 0) {
-                throw new IOException("Connection is not open for reading");
-            }
-
-            try {
-                ensureConnected();
-
-                int responseCode = connection.getResponseCode();
-
-                if (responseCode >= 400) {
-                    InputStream error = connection.getErrorStream();
-
-                    if (error != null) {
-                        try {
-                            error.close();
-                        } catch (IOException ignored) {
-                        }
-                    }
-
-                    String message;
-                    try {
-                        message = connection.getResponseMessage();
-                    } catch (IOException ignored) {
-                        message = "";
-                    }
-
-                    throw new IOException(
-                        "HTTP " + responseCode
-                        + " " + message
-                    );
-                }
-
-                InputStream input = connection.getInputStream();
-
-                if (input == null) {
-                    throw new IOException("HTTP input stream is null");
-                }
-
-                return new ConnectionInputStream(
-                    input,
-                    this
-                );
-            } catch (IOException e) {
-                // A failed request must not poison the following image
-                // requests. Disconnect immediately before propagating
-                // the error to the J2ME caller.
-                close();
-                throw e;
-            } catch (RuntimeException e) {
-                close();
-                throw e;
-            }
-        }
-
-
-        @Override
         public DataInputStream openDataInputStream() throws IOException {
             return new DataInputStream(openInputStream());
+        }
+
+        @Override
+        public InputStream openInputStream() throws IOException {
+            ensureConnected();
+
+            int responseCode = connection.getResponseCode();
+
+            if (responseCode < 200 || responseCode >= 400) {
+                String message;
+                try {
+                    message = connection.getResponseMessage();
+                } catch (IOException ignored) {
+                    message = "";
+                }
+
+                throw new IOException(
+                    "HTTP " + responseCode + " " + message
+                );
+            }
+
+            InputStream input = connection.getInputStream();
+
+            if (input == null) {
+                throw new IOException("HTTP input stream is null");
+            }
+
+            return new ConnectionInputStream(input, this);
         }
 
         @Override
