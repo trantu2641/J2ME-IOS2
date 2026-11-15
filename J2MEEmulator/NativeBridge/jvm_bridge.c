@@ -2544,6 +2544,9 @@ void jvm_bridge_session_destroy_all(
     j2me_render_stop();
 
     j2me_render_cleanup();
+
+    /* All MIDlet threads are stopped; release cached JAR archive handles. */
+    zip_reader_cache_clear();
 }
 
 
@@ -2616,6 +2619,8 @@ void jvm_bridge_destroy(
         j2me_m3g_cleanup();
 
         j2me_render_cleanup();
+
+        zip_reader_cache_clear();
 
         atomic_store(
             &g_jvm_stop_requested,
