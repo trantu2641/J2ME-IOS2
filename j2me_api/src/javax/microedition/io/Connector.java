@@ -29,7 +29,7 @@ public final class Connector {
 
     private static final int DEFAULT_CONNECT_TIMEOUT = 8000;
     private static final int DEFAULT_READ_TIMEOUT = 10000;
-    private static final int MAX_HTTP_RETRIES = 0;
+    private static final int MAX_HTTP_RETRIES = 1;
 
     private Connector() {
     }
