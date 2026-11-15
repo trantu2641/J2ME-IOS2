@@ -27,6 +27,81 @@ static FILE *logfile = NULL;
 static s64 last_flush = 0;
 static s64 nano_sec_start_at = 0;
 
+/*
+ * JarBox per-JAR runtime trace.
+ *
+ * The NativeBridge also redirects stderr to minijvm.log, but keep a direct
+ * file handle here as well. This makes the log independent from stdout/stderr
+ * redirection and guarantees that jvm_printf() data is written to the same
+ * per-JAR save directory.
+ */
+static FILE *runtime_logfile = NULL;
+static char runtime_log_path[4096] = {0};
+
+static void runtime_log_open_for_root(const c8 *save_root) {
+    char path[4096];
+
+    if (!save_root || !save_root[0]) {
+        return;
+    }
+
+    snprintf(path, sizeof(path), "%s/minijvm.log", save_root);
+
+    if (runtime_logfile && strcmp(runtime_log_path, path) == 0) {
+        return;
+    }
+
+    if (runtime_logfile) {
+        fflush(runtime_logfile);
+        fclose(runtime_logfile);
+        runtime_logfile = NULL;
+        runtime_log_path[0] = 0;
+    }
+
+    runtime_logfile = fopen(path, "ab");
+    if (!runtime_logfile) {
+        return;
+    }
+
+    strncpy(runtime_log_path, path, sizeof(runtime_log_path) - 1);
+    runtime_log_path[sizeof(runtime_log_path) - 1] = 0;
+
+    {
+        time_t now = time(NULL);
+        struct tm tm_now;
+        char timebuf[64] = {0};
+
+#if defined(_POSIX_THREAD_SAFE_FUNCTIONS) || defined(__APPLE__)
+        localtime_r(&now, &tm_now);
+#else
+        struct tm *tmp = localtime(&now);
+        if (tmp) tm_now = *tmp;
+#endif
+
+        strftime(timebuf, sizeof(timebuf), "%Y-%m-%d %H:%M:%S", &tm_now);
+
+        fprintf(runtime_logfile,
+                "\n============================================================\n"
+                "MINIJVM RUNTIME LOG START\n"
+                "TIME: %s\n"
+                "SAVE_ROOT: %s\n"
+                "============================================================\n",
+                timebuf[0] ? timebuf : "unknown",
+                save_root);
+        fflush(runtime_logfile);
+    }
+}
+
+static void runtime_log_close(void) {
+    if (runtime_logfile) {
+        fflush(runtime_logfile);
+        fclose(runtime_logfile);
+        runtime_logfile = NULL;
+        runtime_log_path[0] = 0;
+    }
+}
+
+
 /**
  * =============================== JClass ==============================
  */
@@ -552,6 +627,13 @@ s32 isDataReferByIndex(s32 index) {
 void sys_properties_set_c(MiniJVM *jvm, c8 const *key, c8 const *val) {
     Utf8String *ukey = utf8_create_c(key);
     Utf8String *uval = utf8_create_c(val);
+
+    // JarBox passes the per-JAR save directory through app.save.root.
+    // Open the diagnostic file immediately when that property becomes known.
+    if (key && val && strcmp(key, "app.save.root") == 0) {
+        runtime_log_open_for_root(val);
+    }
+
     //this hashtable has a value destroy function , so just keep putting it in
     hashtable_put(jvm->sys_prop, ukey, uval);
 }
@@ -641,6 +723,7 @@ s32 sys_properties_load(MiniJVM *jvm) {
 }
 
 void sys_properties_dispose(MiniJVM *jvm) {
+    runtime_log_close();
     hashtable_destroy(jvm->sys_prop);
 }
 
@@ -781,54 +864,45 @@ static void jvm_runtime_error_log(Runtime *runtime, s32 exception_type, c8 const
 s32 jvm_printf(const c8 *format, ...) {
     va_list vp;
     va_start(vp, format);
+
+    /*
+     * Always write the diagnostic stream to the per-JAR minijvm.log when
+     * app.save.root has already been configured. Keep stderr as well so the
+     * existing NativeBridge capture continues to work.
+     */
+    va_list vp_runtime;
+    va_list vp_stderr;
+    va_copy(vp_runtime, vp);
+    va_copy(vp_stderr, vp);
+
     s32 result = 0;
+
+    if (runtime_logfile) {
+        result = vfprintf(runtime_logfile, format, vp_runtime);
+        fflush(runtime_logfile);
+    }
+
+    vfprintf(stderr, format, vp_stderr);
+    fflush(stderr);
+
+    va_end(vp_runtime);
+    va_end(vp_stderr);
+
 #if _JVM_DEBUG_LOG_TO_FILE
     if (logfile) {
-        /*
-         * Keep the old MiniJVM debug log, but ALSO mirror every JVM
-         * diagnostic line to stderr. JarBox's NativeBridge redirects
-         * stdout/stderr to the per-JAR minijvm.log, so this makes the
-         * complete MiniJVM runtime trace available in that file.
-         */
-        va_list vp_stderr;
-        va_copy(vp_stderr, vp);
-
-        result = vfprintf(logfile, format, vp);
+        va_list vp_debug;
+        va_copy(vp_debug, vp);
+        vfprintf(logfile, format, vp_debug);
         fflush(logfile);
-
-        vfprintf(stderr, format, vp_stderr);
-        fflush(stderr);
-        va_end(vp_stderr);
+        va_end(vp_debug);
 
         if (currentTimeMillis() - last_flush > 1000) {
             fflush(logfile);
-            fflush(stderr);
             last_flush = currentTimeMillis();
         }
-    } else {
-        /* If file logging was not opened, stderr is still captured by
-         * JarBox into the current JAR's minijvm.log. */
-        result = vfprintf(stderr, format, vp);
-        fflush(stderr);
     }
-#else
-#ifdef __JVM_OS_ANDROID__
-    static c8 buf[1024];
-    static u32 buf_pos = 0, buf_writable_len = sizeof(buf) - 1;
-    s32 w = vsnprintf(buf + buf_pos, sizeof(buf) - buf_pos - 1, format, vp);//maybe some bytes lost
-    buf_pos += (u32) w;
-    buf[buf_pos] = 0;
-    if ((buf_pos > 0 && memchr(buf, '\n', buf_pos) != NULL)// if '\n' in buf, print buf and clear buf
-        || buf_pos == buf_writable_len) { // or buf is full, print buf and clear buf
-        __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, "%s", buf);
-        buf_pos = 0;
-    }
-    result = strlen(buf);
-#else
-    result = vfprintf(stderr, format, vp);
-    fflush(stderr);
 #endif
-#endif
+
     va_end(vp);
     return result;
 }
@@ -842,6 +916,14 @@ void invoke_deepth(Runtime *runtime) {
         r = r->parent;
     }
     s32 len = i;
+
+    if (runtime_logfile) {
+        fprintf(runtime_logfile, "%llx", (s64) (intptr_t) thrd_current());
+        for (i = 0; i < len; i++) {
+            fprintf(runtime_logfile, "  ");
+        }
+        fflush(runtime_logfile);
+    }
 
 #if _JVM_DEBUG_LOG_TO_FILE
     if (logfile) {
