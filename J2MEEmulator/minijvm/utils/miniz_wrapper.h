@@ -9,6 +9,9 @@ extern "C" {
 #include "arraylist.h"
 #include "utf8_string.h"
 
+/* Drops all persistent ZIP/JAR readers. Call after all MIDlet sessions stop. */
+void zip_reader_cache_clear(void);
+
 s32 zip_loadfile(char const *jarpath, char const *filename, ByteBuf *buf);
 
 s32 zip_loadfile_to_mem(char const *jarpath, char const *filename, c8 *buf, s64 bufsize);
