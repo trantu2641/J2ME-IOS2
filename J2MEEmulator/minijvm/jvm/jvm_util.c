@@ -662,8 +662,75 @@ void close_log() {
 #endif
 }
 
+static FILE *jvm_runtime_error_open_log(Runtime *runtime) {
+    c8 log_path[4096] = {0};
+    c8 jar_path[4096] = {0};
+    const c8 *selected_jar = NULL;
+
+    if (runtime && runtime->clazz) {
+        MiniJVM *jvm = runtime->jvm;
+        PeerClassLoader *pcl = NULL;
+
+        if (runtime->clazz->jloader) {
+            pcl = classLoaders_find_by_instance(jvm, runtime->clazz->jloader);
+        } else if (jvm) {
+            pcl = jvm->boot_classloader;
+        }
+
+        if (pcl && pcl->classpath) {
+            s32 i;
+            for (i = 0; i < pcl->classpath->length; i++) {
+                Utf8String *cp = arraylist_get_value(pcl->classpath, i);
+                if (!cp || !cp->data || cp->length < 4) continue;
+
+                const c8 *path = utf8_cstr(cp);
+                s32 len = (s32)strlen(path);
+                if (len >= 4) {
+                    const c8 *ext = path + len - 4;
+                    if ((ext[0] == '.' || ext[0] == '.') &&
+                        (ext[1] == 'j' || ext[1] == 'J') &&
+                        (ext[2] == 'a' || ext[2] == 'A') &&
+                        (ext[3] == 'r' || ext[3] == 'R')) {
+                        selected_jar = path;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    if (selected_jar && selected_jar[0]) {
+        snprintf(jar_path, sizeof(jar_path), "%s", selected_jar);
+
+        c8 *slash = strrchr(jar_path, '/');
+        c8 *jar_name = slash ? slash + 1 : jar_path;
+        if (slash) {
+            *slash = '\0';
+        } else {
+            snprintf(jar_path, sizeof(jar_path), ".");
+            jar_name = (c8 *)selected_jar;
+        }
+
+        c8 *dot = strrchr(jar_name, '.');
+        if (dot) *dot = '\0';
+
+        // Each JAR gets its own error-log directory, next to the JAR.
+        // Example: Documents/games/GameName/GameName.J2ME_Runtime_Errors.log
+        c8 jar_data_dir[4096] = {0};
+        snprintf(jar_data_dir, sizeof(jar_data_dir), "%s/%s", jar_path, jar_name);
+        mkdir(jar_data_dir, 0755);
+        snprintf(log_path, sizeof(log_path), "%s/J2ME_Runtime_Errors.log", jar_data_dir);
+    }
+
+    if (!log_path[0]) {
+        snprintf(log_path, sizeof(log_path), "./J2ME_Runtime_Errors.log");
+    }
+
+    return fopen(log_path, "ab");
+}
+
 static void jvm_runtime_error_log(Runtime *runtime, s32 exception_type, c8 const *errmsg) {
-    FILE *fp = fopen("./J2ME_Runtime_Errors.log", "ab");
+    FILE *fp = jvm_runtime_error_open_log(runtime);
     if (!fp) return;
 
     time_t now = time(NULL);
