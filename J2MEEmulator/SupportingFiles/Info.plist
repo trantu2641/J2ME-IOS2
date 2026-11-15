@@ -26,10 +26,6 @@
 			</array>
 		</dict>
 	</dict>
-	<key>UIBackgroundModes</key>
-	<array>
-		<string>audio</string>
-	</array>
 	<key>UIFileSharingEnabled</key>
 	<true/>
 </dict>
