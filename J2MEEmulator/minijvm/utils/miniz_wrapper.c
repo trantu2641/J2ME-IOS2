@@ -145,6 +145,40 @@ static const char *zip_normalize_name(const char *filename) {
     return filename;
 }
 
+/*
+ * Resource lookup compatibility helper.
+ *
+ * JAR/ZIP entry names are technically case-sensitive, but a significant
+ * number of old J2ME MIDlets were built on case-insensitive filesystems and
+ * contain references whose case does not exactly match the ZIP entry.
+ *
+ * Keep exact lookup first. Only when it fails do we ask miniz for a
+ * case-insensitive match. This does not impose an item/resource count limit.
+ */
+static int zip_locate_file_compatible(
+    mz_zip_archive *archive,
+    const char *filename
+) {
+    if (!archive || !filename || !filename[0]) return -1;
+
+    int index = mz_zip_reader_locate_file(
+        archive,
+        filename,
+        NULL,
+        MZ_ZIP_FLAG_CASE_SENSITIVE
+    );
+
+    if (index >= 0) return index;
+
+    /* miniz performs the non-case-sensitive lookup when the flag is clear. */
+    return mz_zip_reader_locate_file(
+        archive,
+        filename,
+        NULL,
+        0
+    );
+}
+
 s32 zip_loadfile(char const *jarpath, char const *filename, ByteBuf *buf) {
     if (!jarpath || !filename || !buf) return -1;
     filename = zip_normalize_name(filename);
@@ -154,8 +188,8 @@ s32 zip_loadfile(char const *jarpath, char const *filename, ByteBuf *buf) {
     ZipReaderCacheEntry *entry = zip_cache_get_locked(jarpath);
 
     if (entry) {
-        int index = mz_zip_reader_locate_file(
-            &entry->archive, filename, NULL, MZ_ZIP_FLAG_CASE_SENSITIVE);
+        int index = zip_locate_file_compatible(
+            &entry->archive, filename);
         mz_zip_archive_file_stat st;
         memset(&st, 0, sizeof(st));
 
@@ -192,8 +226,8 @@ s32 zip_loadfile_to_mem(char const *jarpath, char const *filename, c8 *buf, s64 
     ZipReaderCacheEntry *entry = zip_cache_get_locked(jarpath);
 
     if (entry) {
-        int index = mz_zip_reader_locate_file(
-            &entry->archive, filename, NULL, MZ_ZIP_FLAG_CASE_SENSITIVE);
+        int index = zip_locate_file_compatible(
+            &entry->archive, filename);
         mz_zip_archive_file_stat st;
         memset(&st, 0, sizeof(st));
 
@@ -221,8 +255,8 @@ s64 zip_get_file_unzip_size(char const *jarpath, char const *filename) {
     ZipReaderCacheEntry *entry = zip_cache_get_locked(jarpath);
 
     if (entry) {
-        int index = mz_zip_reader_locate_file(
-            &entry->archive, filename, NULL, MZ_ZIP_FLAG_CASE_SENSITIVE);
+        int index = zip_locate_file_compatible(
+            &entry->archive, filename);
         mz_zip_archive_file_stat st;
         memset(&st, 0, sizeof(st));
         if (index >= 0 && mz_zip_reader_file_stat(&entry->archive, (mz_uint)index, &st) &&
@@ -244,8 +278,8 @@ s32 zip_get_file_index(char const *jarpath, char const *filename) {
     ZipReaderCacheEntry *entry = zip_cache_get_locked(jarpath);
 
     if (entry) {
-        int index = mz_zip_reader_locate_file(
-            &entry->archive, filename, NULL, MZ_ZIP_FLAG_CASE_SENSITIVE);
+        int index = zip_locate_file_compatible(
+            &entry->archive, filename);
         mz_zip_archive_file_stat st;
         memset(&st, 0, sizeof(st));
         if (index >= 0 && mz_zip_reader_file_stat(&entry->archive, (mz_uint)index, &st)) {
