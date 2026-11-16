@@ -12,10 +12,8 @@ import javax.microedition.io.Connector;
 /**
  * J2ME Image compatibility layer.
  *
- * Failed/missing image resources are NOT replaced with generated
- * transparent placeholder images. A failed icon simply produces no Image.
- *
- * No diagnostic logging is performed from this class.
+ * Failed image resources are ignored without creating a fallback image.
+ * No image-error logging is performed here.
  */
 public class Image {
 
@@ -37,9 +35,6 @@ public class Image {
     public static Image createImage(int width, int height) {
 
         long handle = NativeBridge.createMutableImage(width, height);
-
-        if (handle == 0) {
-        }
 
         return new Image(handle, width, height, true);
     }
@@ -73,24 +68,27 @@ public class Image {
             );
 
         } catch (RuntimeException e) {
+            // Ignore failed optional image initialization.
         }
 
         return img;
     }
 
-/**
+    /**
      * Creates an image from a JAR resource name.
      *
-     * Failed resources are returned as null instead of allocating a
-     * transparent placeholder image.
+     * Local missing/corrupted resources are ignored.
+     *
+     * HTTP/HTTPS resources are also isolated:
+     *
+     *     request A -> OK
+     *     request B -> FAILED -> ignored
+     *     request C -> still allowed to continue
      */
     public static Image createImage(String name)
         throws IOException {
 
         if (name == null || name.length() == 0) {
-
-
-
             return null;
         }
 
@@ -112,25 +110,23 @@ public class Image {
                     );
 
                 if (remote == null) {
-
-
-
                     return null;
                 }
 
                 /*
-                 * createImage(InputStream) reads and closes the stream.
+                 * IMPORTANT:
+                 *
+                 * createImage(InputStream) already reads and closes
+                 * the stream. Do not throw the remote IOException here.
+                 *
+                 * A broken icon is treated as an optional resource.
                  */
                 return createImage(remote);
 
             } catch (IOException e) {
-
-
                 return null;
 
             } catch (RuntimeException e) {
-
-
                 return null;
 
             } finally {
@@ -164,24 +160,15 @@ public class Image {
                 findResource(name);
 
             if (is == null) {
-
-
-
                 return null;
             }
 
             return createImage(is);
 
         } catch (IOException e) {
-
-
-
             return null;
 
         } catch (RuntimeException e) {
-
-
-
             return null;
         }
     }
@@ -478,6 +465,7 @@ public class Image {
             }
 
         } catch (RuntimeException e) {
+            return null;
         }
 
         return null;
@@ -486,16 +474,14 @@ public class Image {
     /**
      * Creates an image from an InputStream.
      *
-     * Failed/empty image data returns null without creating a placeholder.
+     * Failed/empty image data is simply ignored. No fallback image
+     * is created and no image error is written to a log.
      */
     public static Image createImage(
         InputStream stream
     ) throws IOException {
 
         if (stream == null) {
-
-
-
             return null;
         }
 
@@ -504,17 +490,10 @@ public class Image {
             byte[] data =
                 readAllBytes(stream);
 
-            /*
-             * Empty response body is treated as a missing/broken image,
-             * not as a fatal MIDlet error.
-             */
             if (
                 data == null
                 || data.length == 0
             ) {
-
-
-
                 return null;
             }
 
@@ -525,15 +504,9 @@ public class Image {
             );
 
         } catch (IOException e) {
-
-
-
             return null;
 
         } catch (RuntimeException e) {
-
-
-
             return null;
         }
     }
@@ -545,9 +518,6 @@ public class Image {
     ) {
 
         if (imageData == null) {
-
-
-
             return null;
         }
 
@@ -558,9 +528,6 @@ public class Image {
                 > imageData.length
                     - imageLength
         ) {
-
-
-
             return null;
         }
 
@@ -576,9 +543,6 @@ public class Image {
                 );
 
             if (handle == 0) {
-
-
-
                 return null;
             }
 
@@ -605,9 +569,6 @@ public class Image {
                 }
 
                 handle = 0;
-
-
-
                 return null;
             }
 
@@ -629,8 +590,6 @@ public class Image {
                 } catch (RuntimeException ignored) {
                 }
             }
-
-
 
             return null;
         }
