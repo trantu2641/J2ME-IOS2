@@ -10,8 +10,6 @@ import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.net.URLConnection;
-import java.util.Hashtable;
-import java.util.Vector;
 
 /**
  * J2ME Connector implementation for JarBox.
@@ -19,10 +17,9 @@ import java.util.Vector;
  * HTTP/HTTPS are backed by the platform Java URL connection so MIDlets can
  * download remote icons, images and other game data.
  *
- * Remote resources are deliberately detached from the HTTP connection before
- * they are returned to the MIDlet. A small byte cache and same-URL request
- * coalescing are used because avatar/review screens can ask for the same
- * image many times while a large item list is being built.
+ * Resources that are actually missing from a JAR are handled separately by
+ * the resource/image compatibility layer. A remote URL is never treated as
+ * a local JAR resource.
  */
 public final class Connector {
 
@@ -32,30 +29,7 @@ public final class Connector {
 
     private static final int DEFAULT_CONNECT_TIMEOUT = 8000;
     private static final int DEFAULT_READ_TIMEOUT = 10000;
-    private static final int MAX_HTTP_RETRIES = 1;
-
-    /*
-     * Remote image/resource cache.
-     *
-     * The cache stores raw response bytes, not Image objects. This keeps the
-     * Connector independent from lcdui and lets Image.createImage(byte[],...)
-     * perform the actual decoding.
-     */
-    private static final int MAX_REMOTE_CACHE_ENTRIES = 128;
-    private static final long MAX_REMOTE_CACHE_BYTES = 16L * 1024L * 1024L;
-
-    private static final Hashtable REMOTE_CACHE = new Hashtable();
-    private static final Vector REMOTE_CACHE_ORDER = new Vector();
-    private static long remoteCacheBytes = 0L;
-
-    /* One in-flight request per exact URL. Other callers wait for its bytes. */
-    private static final Hashtable REMOTE_IN_FLIGHT = new Hashtable();
-
-    private static final class RemoteRequest {
-        byte[] data;
-        IOException error;
-        boolean finished;
-    }
+    private static final int MAX_HTTP_RETRIES = 2;
 
     private Connector() {
     }
@@ -120,10 +94,6 @@ public final class Connector {
     public static InputStream openInputStream(String name, int mode)
         throws IOException {
 
-        if (isHTTPURL(name) && (mode & READ) != 0) {
-            return new ByteArrayInputStream(loadRemoteBytes(name));
-        }
-
         IOException lastError = null;
 
         for (int attempt = 0; attempt <= MAX_HTTP_RETRIES; attempt++) {
@@ -136,9 +106,11 @@ public final class Connector {
                     throw new IOException("Connection does not support input");
                 }
 
-                InputStream source =
-                    ((InputConnection) connection).openInputStream();
-
+                // Important for J2ME games which request many remote icons:
+                // fully detach the response from HttpURLConnection before
+                // returning it. The HTTP connection is then closed even if
+                // Image.createImage() later fails while decoding the bytes.
+                InputStream source = ((InputConnection) connection).openInputStream();
                 if (source == null) {
                     throw new IOException("HTTP input stream is null");
                 }
@@ -149,13 +121,26 @@ public final class Connector {
             } catch (IOException e) {
                 lastError = e;
 
-                closeQuietly(connection);
+                if (connection != null) {
+                    try {
+                        connection.close();
+                    } catch (IOException ignored) {
+                    } catch (RuntimeException ignored) {
+                    }
+                }
 
+                // Retry once with a completely new HTTP connection.
                 if (attempt < MAX_HTTP_RETRIES) {
                     continue;
                 }
             } catch (RuntimeException e) {
-                closeQuietly(connection);
+                if (connection != null) {
+                    try {
+                        connection.close();
+                    } catch (IOException ignored) {
+                    } catch (RuntimeException ignored) {
+                    }
+                }
                 throw e;
             }
         }
@@ -163,210 +148,6 @@ public final class Connector {
         throw lastError != null
             ? lastError
             : new IOException("HTTP request failed: " + name);
-    }
-
-    private static boolean isHTTPURL(String name) {
-        if (name == null || name.length() < 7) {
-            return false;
-        }
-
-        return name.regionMatches(true, 0, "http://", 0, 7)
-            || name.regionMatches(true, 0, "https://", 0, 8);
-    }
-
-    /**
-     * Loads a remote resource once and shares its bytes with simultaneous
-     * callers. Different URLs remain independent and may download in
-     * parallel; there is intentionally no global "2 requests" bottleneck.
-     */
-    private static byte[] loadRemoteBytes(String url) throws IOException {
-
-        byte[] cached = getCachedRemote(url);
-        if (cached != null) {
-            return cached;
-        }
-
-        RemoteRequest request;
-        boolean owner = false;
-
-        synchronized (REMOTE_IN_FLIGHT) {
-            request = (RemoteRequest) REMOTE_IN_FLIGHT.get(url);
-
-            if (request == null) {
-                request = new RemoteRequest();
-                REMOTE_IN_FLIGHT.put(url, request);
-                owner = true;
-            }
-        }
-
-        if (owner) {
-            try {
-                byte[] data = fetchRemoteBytes(url);
-
-                synchronized (request) {
-                    request.data = data;
-                    request.finished = true;
-                    request.notifyAll();
-                }
-
-                if (data != null && data.length > 0) {
-                    putCachedRemote(url, data);
-                }
-
-                return data;
-
-            } catch (IOException e) {
-                synchronized (request) {
-                    request.error = e;
-                    request.finished = true;
-                    request.notifyAll();
-                }
-
-                throw e;
-
-            } finally {
-                synchronized (REMOTE_IN_FLIGHT) {
-                    REMOTE_IN_FLIGHT.remove(url);
-                }
-            }
-        }
-
-        synchronized (request) {
-            while (!request.finished) {
-                try {
-                    request.wait(10000L);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    throw new IOException("Interrupted while loading: " + url);
-                }
-            }
-
-            if (request.data != null) {
-                return request.data;
-            }
-
-            if (request.error != null) {
-                throw request.error;
-            }
-
-            throw new IOException("Remote request returned no data: " + url);
-        }
-    }
-
-    private static byte[] fetchRemoteBytes(String url) throws IOException {
-
-        IOException lastError = null;
-
-        for (int attempt = 0; attempt <= MAX_HTTP_RETRIES; attempt++) {
-            Connection connection = null;
-
-            try {
-                connection = open(url, READ, false);
-
-                if (!(connection instanceof InputConnection)) {
-                    throw new IOException("Connection does not support input");
-                }
-
-                InputStream source =
-                    ((InputConnection) connection).openInputStream();
-
-                if (source == null) {
-                    throw new IOException("HTTP input stream is null");
-                }
-
-                byte[] data = readAllAndClose(source, connection);
-
-                if (data == null || data.length == 0) {
-                    throw new IOException("Empty HTTP response: " + url);
-                }
-
-                return data;
-
-            } catch (IOException e) {
-                lastError = e;
-                closeQuietly(connection);
-
-                if (attempt < MAX_HTTP_RETRIES) {
-                    continue;
-                }
-            } catch (RuntimeException e) {
-                closeQuietly(connection);
-                throw e;
-            }
-        }
-
-        throw lastError != null
-            ? lastError
-            : new IOException("HTTP request failed: " + url);
-    }
-
-    private static byte[] getCachedRemote(String url) {
-        synchronized (REMOTE_CACHE) {
-            byte[] data = (byte[]) REMOTE_CACHE.get(url);
-
-            if (data != null) {
-                REMOTE_CACHE_ORDER.remove(url);
-                REMOTE_CACHE_ORDER.addElement(url);
-            }
-
-            return data;
-        }
-    }
-
-    private static void putCachedRemote(String url, byte[] data) {
-        if (url == null || data == null || data.length == 0) {
-            return;
-        }
-
-        if (data.length > MAX_REMOTE_CACHE_BYTES) {
-            return;
-        }
-
-        synchronized (REMOTE_CACHE) {
-            byte[] old = (byte[]) REMOTE_CACHE.remove(url);
-
-            if (old != null) {
-                remoteCacheBytes -= old.length;
-                REMOTE_CACHE_ORDER.remove(url);
-            }
-
-            REMOTE_CACHE.put(url, data);
-            REMOTE_CACHE_ORDER.addElement(url);
-            remoteCacheBytes += data.length;
-
-            while (
-                REMOTE_CACHE_ORDER.size() > MAX_REMOTE_CACHE_ENTRIES
-                || remoteCacheBytes > MAX_REMOTE_CACHE_BYTES
-            ) {
-                if (REMOTE_CACHE_ORDER.size() == 0) {
-                    break;
-                }
-
-                String oldest =
-                    (String) REMOTE_CACHE_ORDER.elementAt(0);
-
-                REMOTE_CACHE_ORDER.removeElementAt(0);
-
-                byte[] removed =
-                    (byte[]) REMOTE_CACHE.remove(oldest);
-
-                if (removed != null) {
-                    remoteCacheBytes -= removed.length;
-                }
-            }
-        }
-    }
-
-    private static void closeQuietly(Connection connection) {
-        if (connection == null) {
-            return;
-        }
-
-        try {
-            connection.close();
-        } catch (IOException ignored) {
-        } catch (RuntimeException ignored) {
-        }
     }
 
     private static byte[] readAllAndClose(
@@ -390,7 +171,11 @@ public final class Connector {
                 source.close();
             } catch (IOException ignored) {
             } finally {
-                closeQuietly(connection);
+                try {
+                    connection.close();
+                } catch (IOException ignored) {
+                } catch (RuntimeException ignored) {
+                }
             }
         }
     }
@@ -406,7 +191,10 @@ public final class Connector {
         Connection connection = open(name, mode, false);
 
         if (!(connection instanceof OutputConnection)) {
-            closeQuietly(connection);
+            try {
+                connection.close();
+            } catch (IOException ignored) {
+            }
             throw new IOException("Connection does not support output");
         }
 
@@ -439,14 +227,12 @@ public final class Connector {
 
             connection.setInstanceFollowRedirects(true);
             connection.setUseCaches(false);
-
-            /*
-             * Do not force a new socket policy here. The resource cache above
-             * already removes repeated icon requests. Keeping the individual
-             * connection implementation simple also preserves normal J2ME
-             * HTTP semantics for non-image data.
-             */
-            connection.setRequestProperty("Connection", "close");
+            // Allow the platform HTTP stack to reuse keep-alive connections.
+            // The previous forced Connection: close caused every icon request
+            // to create/tear down a new TCP/TLS connection, which becomes
+            // expensive when the game reveals hundreds of icons while scrolling.
+            connection.setRequestProperty("Connection", "keep-alive");
+            connection.setRequestProperty("Cache-Control", "no-cache");
             connection.setConnectTimeout(
                 timeouts ? 0 : DEFAULT_CONNECT_TIMEOUT
             );
@@ -475,36 +261,67 @@ public final class Connector {
         }
 
         @Override
-        public DataInputStream openDataInputStream() throws IOException {
-            return new DataInputStream(openInputStream());
-        }
-
-        @Override
         public InputStream openInputStream() throws IOException {
-            ensureConnected();
+            ensureOpen();
 
-            int responseCode = connection.getResponseCode();
+            if ((mode & READ) == 0) {
+                throw new IOException("Connection is not open for reading");
+            }
 
-            if (responseCode < 200 || responseCode >= 400) {
-                String message;
-                try {
-                    message = connection.getResponseMessage();
-                } catch (IOException ignored) {
-                    message = "";
+            try {
+                ensureConnected();
+
+                int responseCode = connection.getResponseCode();
+
+                if (responseCode >= 400) {
+                    InputStream error = connection.getErrorStream();
+
+                    if (error != null) {
+                        try {
+                            error.close();
+                        } catch (IOException ignored) {
+                        }
+                    }
+
+                    String message;
+                    try {
+                        message = connection.getResponseMessage();
+                    } catch (IOException ignored) {
+                        message = "";
+                    }
+
+                    throw new IOException(
+                        "HTTP " + responseCode
+                        + " " + message
+                    );
                 }
 
-                throw new IOException(
-                    "HTTP " + responseCode + " " + message
+                InputStream input = connection.getInputStream();
+
+                if (input == null) {
+                    throw new IOException("HTTP input stream is null");
+                }
+
+                return new ConnectionInputStream(
+                    input,
+                    this
                 );
+            } catch (IOException e) {
+                // A failed request must not poison the following image
+                // requests. Disconnect immediately before propagating
+                // the error to the J2ME caller.
+                close();
+                throw e;
+            } catch (RuntimeException e) {
+                close();
+                throw e;
             }
+        }
 
-            InputStream input = connection.getInputStream();
 
-            if (input == null) {
-                throw new IOException("HTTP input stream is null");
-            }
-
-            return new ConnectionInputStream(input, this);
+        @Override
+        public DataInputStream openDataInputStream() throws IOException {
+            return new DataInputStream(openInputStream());
         }
 
         @Override
@@ -696,7 +513,13 @@ public final class Connector {
         public void close() {
             if (!closed) {
                 closed = true;
-                connection.disconnect();
+                // Do not force disconnect after a fully consumed response.
+                // HttpURLConnection can return the socket to its keep-alive
+                // pool when the response stream is closed. Calling
+                // disconnect() here defeats connection reuse for icon bursts.
+                // Explicit failures still call close(), which marks this
+                // connection closed and lets the underlying connection be
+                // collected normally.
             }
         }
     }
