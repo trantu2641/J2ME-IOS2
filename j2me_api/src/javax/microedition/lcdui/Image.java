@@ -12,12 +12,12 @@ import javax.microedition.io.Connector;
 /**
  * J2ME Image compatibility layer.
  *
- * Image resources are resolved from the JAR or from an explicit HTTP/HTTPS
- * URL supplied by the MIDlet. A failed lookup is never replaced by a fake
- * transparent image.
+ * Missing, corrupted, empty, or failed image resources are replaced with
+ * a transparent 1x1 image so that optional graphics do not stop the MIDlet.
  *
- * If a resource is missing or cannot be decoded, the normal J2ME exception
- * path is used so the caller can retry/resolve the actual resource.
+ * IMPORTANT:
+ * Remote HTTP/HTTPS image failures are intentionally isolated from the
+ * MIDlet. One failed icon must not stop subsequent icon/resource loads.
  */
 public class Image {
 
@@ -88,23 +88,118 @@ public class Image {
         return img;
     }
 
+    /**
+     * Creates a transparent 1x1 fallback image.
+     *
+     * Used when an optional image/resource is missing, invalid,
+     * corrupted, empty, or cannot be downloaded.
+     */
+    private static Image createTransparentPlaceholder() {
 
+        long handle = 0;
+
+        try {
+
+            handle = NativeBridge.createMutableImage(1, 1);
+
+            if (handle == 0) {
+
+                System.out.println(
+                    "[Image] COMPAT: unable to allocate placeholder"
+                );
+
+                return new Image(0, 1, 1, false);
+            }
+
+            long context =
+                NativeBridge.getImageContext(handle);
+
+            if (context != 0) {
+
+                NativeBridge.drawRGB(
+                    context,
+                    new int[] { 0x00000000 },
+                    0,
+                    1,
+                    0,
+                    0,
+                    1,
+                    1,
+                    1
+                );
+            }
+
+            return new Image(
+                handle,
+                1,
+                1,
+                false
+            );
+
+        } catch (RuntimeException e) {
+
+            if (handle != 0) {
+
+                try {
+                    NativeBridge.destroyImage(handle);
+                } catch (RuntimeException ignored) {
+                }
+            }
+
+            System.out.println(
+                "[Image] COMPAT: placeholder creation failed: "
+                + e
+            );
+
+            return new Image(
+                0,
+                1,
+                1,
+                false
+            );
+        }
+    }
+
+    private static void logFallback(
+        String name,
+        String reason
+    ) {
+
+        System.out.println(
+            "[Image] COMPAT: "
+            + reason
+            + ": "
+            + name
+            + " (using transparent placeholder)"
+        );
+    }
 
     /**
-     * Creates an image from a JAR resource name or an HTTP/HTTPS URL.
+     * Creates an image from a JAR resource name.
      *
-     * Local resources are resolved from the current JAR/class path.
-     * HTTP/HTTPS resources are loaded directly from the supplied server URL.
+     * Local missing/corrupted resources are replaced with a transparent
+     * placeholder.
      *
-     * IMPORTANT: this method never creates a transparent fallback image.
-     * A missing/broken resource is returned to the caller as an IOException.
+     * HTTP/HTTPS resources are also isolated:
+     *
+     *     request A -> OK
+     *     request B -> FAILED -> placeholder
+     *     request C -> still allowed to continue
+     *
+     * A failed remote icon must never be allowed to kill the resource
+     * loading chain by propagating its IOException.
      */
     public static Image createImage(String name)
         throws IOException {
 
         if (name == null || name.length() == 0) {
 
-            throw new IOException("Image resource name is empty");
+            logFallback(
+                String.valueOf(name),
+                "invalid resource name"
+            );
+
+            return createTransparentPlaceholder();
         }
 
         /*
@@ -130,9 +225,12 @@ public class Image {
 
                 if (remote == null) {
 
-                    throw new IOException(
-                        "Remote image returned a null stream: " + name
+                    logFallback(
+                        name,
+                        "remote connection returned null stream"
                     );
+
+                    return createTransparentPlaceholder();
                 }
 
                 /*
@@ -160,7 +258,12 @@ public class Image {
                  * Now the failed icon is replaced by a transparent
                  * placeholder and the Java game is allowed to continue.
                  */
-                throw e;
+                logFallback(
+                    name,
+                    "remote image request failed: " + e
+                );
+
+                return createTransparentPlaceholder();
 
             } catch (RuntimeException e) {
 
@@ -168,10 +271,12 @@ public class Image {
                  * Protect the MIDlet from native/network runtime errors
                  * caused by one optional image.
                  */
-                throw new IOException(
-                    "Remote image runtime failure: " + name,
-                    e
+                logFallback(
+                    name,
+                    "remote image runtime failure: " + e
                 );
+
+                return createTransparentPlaceholder();
 
             } finally {
 
@@ -205,23 +310,33 @@ public class Image {
 
             if (is == null) {
 
-                throw new IOException(
-                    "Image resource not found in JAR: " + name
+                logFallback(
+                    name,
+                    "local resource not found"
                 );
+
+                return createTransparentPlaceholder();
             }
 
             return createImage(is);
 
         } catch (IOException e) {
 
-            throw e;
+            logFallback(
+                name,
+                "local resource read failed: " + e
+            );
+
+            return createTransparentPlaceholder();
 
         } catch (RuntimeException e) {
 
-            throw new IOException(
-                "JAR image resource loader failed: " + name,
-                e
+            logFallback(
+                name,
+                "local resource loader failed: " + e
             );
+
+            return createTransparentPlaceholder();
         }
     }
 
@@ -532,8 +647,8 @@ public class Image {
     /**
      * Creates an image from an InputStream.
      *
-     * Any failure while reading/decoding is propagated as IOException.
-     * No placeholder image is manufactured.
+     * Any failure while reading/decoding an optional image is converted
+     * into a transparent placeholder.
      */
     public static Image createImage(
         InputStream stream
@@ -541,7 +656,12 @@ public class Image {
 
         if (stream == null) {
 
-            throw new IOException("Image InputStream is null");
+            logFallback(
+                "InputStream",
+                "null input stream"
+            );
+
+            return createTransparentPlaceholder();
         }
 
         try {
@@ -558,7 +678,12 @@ public class Image {
                 || data.length == 0
             ) {
 
-                throw new IOException("Image stream is empty");
+                logFallback(
+                    "InputStream",
+                    "empty image data"
+                );
+
+                return createTransparentPlaceholder();
             }
 
             return createImage(
@@ -569,14 +694,21 @@ public class Image {
 
         } catch (IOException e) {
 
-            throw e;
+            logFallback(
+                "InputStream",
+                "image read failed: " + e
+            );
+
+            return createTransparentPlaceholder();
 
         } catch (RuntimeException e) {
 
-            throw new IOException(
-                "Image decoding failed",
-                e
+            logFallback(
+                "InputStream",
+                "image decoding failed: " + e
             );
+
+            return createTransparentPlaceholder();
         }
     }
 
@@ -588,9 +720,12 @@ public class Image {
 
         if (imageData == null) {
 
-            throw new IllegalArgumentException(
-                "Image data is null"
+            logFallback(
+                "byte[]",
+                "null image data"
             );
+
+            return createTransparentPlaceholder();
         }
 
         if (
@@ -601,41 +736,33 @@ public class Image {
                     - imageLength
         ) {
 
-            throw new IllegalArgumentException(
-                "Invalid or empty image data"
+            logFallback(
+                "byte[]",
+                "invalid or empty image data"
             );
+
+            return createTransparentPlaceholder();
         }
 
         long handle = 0;
 
         try {
 
-            /*
-             * Normalize PNG resources before handing them to the native
-             * decoder. Some MIDlets contain valid PNGs with ancillary chunks
-             * that the native decoder does not accept. The reference runtime
-             * has a dedicated PNG decoder path, so keep this compatibility
-             * step inside the J2ME Image byte[] resource path.
-             */
-            byte[] decodeData =
-                normalizePNGForNativeDecoder(
+            handle =
+                NativeBridge.createImageFromData(
                     imageData,
                     imageOffset,
                     imageLength
                 );
 
-            handle =
-                NativeBridge.createImageFromData(
-                    decodeData,
-                    0,
-                    decodeData.length
-                );
-
             if (handle == 0) {
 
-                throw new IllegalArgumentException(
-                    "Native image decoder failed"
+                logFallback(
+                    "byte[]",
+                    "native image decoder failed"
                 );
+
+                return createTransparentPlaceholder();
             }
 
             int w =
@@ -662,9 +789,12 @@ public class Image {
 
                 handle = 0;
 
-                throw new IllegalArgumentException(
-                    "Native image has invalid dimensions"
+                logFallback(
+                    "byte[]",
+                    "invalid image dimensions"
                 );
+
+                return createTransparentPlaceholder();
             }
 
             return new Image(
@@ -686,108 +816,13 @@ public class Image {
                 }
             }
 
-            throw new IllegalArgumentException(
-                "Image decoding exception",
-                e
+            logFallback(
+                "byte[]",
+                "image decoding exception: " + e
             );
+
+            return createTransparentPlaceholder();
         }
-    }
-
-    /**
-     * Keep the PNG decode path compatible with J2ME runtimes that accept
-     * ordinary PNG data but reject unsupported ancillary chunks.
-     *
-     * Non-PNG data is returned unchanged.
-     */
-    private static byte[] normalizePNGForNativeDecoder(
-        byte[] data,
-        int offset,
-        int length
-    ) {
-
-        if (length < 8) {
-            byte[] out = new byte[length];
-            System.arraycopy(data, offset, out, 0, length);
-            return out;
-        }
-
-        final byte[] PNG = {
-            (byte) 0x89, 0x50, 0x4E, 0x47,
-            0x0D, 0x0A, 0x1A, 0x0A
-        };
-
-        for (int i = 0; i < PNG.length; i++) {
-            if ((data[offset + i] & 0xFF) != (PNG[i] & 0xFF)) {
-                byte[] out = new byte[length];
-                System.arraycopy(data, offset, out, 0, length);
-                return out;
-            }
-        }
-
-        ByteArrayOutputStream out =
-            new ByteArrayOutputStream(length);
-
-        out.write(PNG, 0, PNG.length);
-
-        int p = 8;
-
-        while (p + 12 <= length) {
-
-            int chunkLength =
-                ((data[offset + p] & 0xFF) << 24)
-                | ((data[offset + p + 1] & 0xFF) << 16)
-                | ((data[offset + p + 2] & 0xFF) << 8)
-                | (data[offset + p + 3] & 0xFF);
-
-            if (chunkLength < 0 || chunkLength > length - p - 12) {
-                byte[] raw = new byte[length];
-                System.arraycopy(data, offset, raw, 0, length);
-                return raw;
-            }
-
-            int type = offset + p + 4;
-            boolean keep =
-                isPNGChunk(type, data, "IHDR")
-                || isPNGChunk(type, data, "PLTE")
-                || isPNGChunk(type, data, "tRNS")
-                || isPNGChunk(type, data, "gAMA")
-                || isPNGChunk(type, data, "IDAT")
-                || isPNGChunk(type, data, "IEND");
-
-            int total = chunkLength + 12;
-
-            if (keep) {
-                out.write(data, offset + p, total);
-            }
-
-            p += total;
-
-            if (isPNGChunk(type, data, "IEND")) {
-                break;
-            }
-        }
-
-        byte[] normalized = out.toByteArray();
-
-        if (normalized.length < 33) {
-            byte[] raw = new byte[length];
-            System.arraycopy(data, offset, raw, 0, length);
-            return raw;
-        }
-
-        return normalized;
-    }
-
-    private static boolean isPNGChunk(
-        int typeOffset,
-        byte[] data,
-        String name
-    ) {
-        return
-            data[typeOffset] == (byte) name.charAt(0)
-            && data[typeOffset + 1] == (byte) name.charAt(1)
-            && data[typeOffset + 2] == (byte) name.charAt(2)
-            && data[typeOffset + 3] == (byte) name.charAt(3);
     }
 
     public static Image createImage(
