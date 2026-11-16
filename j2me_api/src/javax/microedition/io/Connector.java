@@ -29,7 +29,7 @@ public final class Connector {
 
     private static final int DEFAULT_CONNECT_TIMEOUT = 8000;
     private static final int DEFAULT_READ_TIMEOUT = 10000;
-    private static final int MAX_HTTP_RETRIES = 2;
+    private static final int MAX_HTTP_RETRIES = 1;
 
     private Connector() {
     }
@@ -227,11 +227,8 @@ public final class Connector {
 
             connection.setInstanceFollowRedirects(true);
             connection.setUseCaches(false);
-            // Allow the platform HTTP stack to reuse keep-alive connections.
-            // The previous forced Connection: close caused every icon request
-            // to create/tear down a new TCP/TLS connection, which becomes
-            // expensive when the game reveals hundreds of icons while scrolling.
-            connection.setRequestProperty("Connection", "keep-alive");
+            // Do not keep a broken server socket alive between icon requests.
+            connection.setRequestProperty("Connection", "close");
             connection.setRequestProperty("Cache-Control", "no-cache");
             connection.setConnectTimeout(
                 timeouts ? 0 : DEFAULT_CONNECT_TIMEOUT
@@ -513,13 +510,7 @@ public final class Connector {
         public void close() {
             if (!closed) {
                 closed = true;
-                // Do not force disconnect after a fully consumed response.
-                // HttpURLConnection can return the socket to its keep-alive
-                // pool when the response stream is closed. Calling
-                // disconnect() here defeats connection reuse for icon bursts.
-                // Explicit failures still call close(), which marks this
-                // connection closed and lets the underlying connection be
-                // collected normally.
+                connection.disconnect();
             }
         }
     }
