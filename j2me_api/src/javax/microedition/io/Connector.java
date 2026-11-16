@@ -2,8 +2,6 @@ package javax.microedition.io;
 
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
-import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -17,9 +15,8 @@ import java.net.URLConnection;
  * HTTP/HTTPS are backed by the platform Java URL connection so MIDlets can
  * download remote icons, images and other game data.
  *
- * Resources that are actually missing from a JAR are handled separately by
- * the resource/image compatibility layer. A remote URL is never treated as
- * a local JAR resource.
+ * Remote responses are streamed directly to the caller. They are NOT first
+ * copied into a second byte[] by Connector.openInputStream().
  */
 public final class Connector {
 
@@ -91,6 +88,13 @@ public final class Connector {
         return openInputStream(name, READ);
     }
 
+    /**
+     * Opens an HTTP stream without buffering the complete response.
+     *
+     * This is important for games which load thousands of remote item icons.
+     * The old implementation read the complete response into a byte[] here,
+     * then Image.createImage(InputStream) copied it into another byte[].
+     */
     public static InputStream openInputStream(String name, int mode)
         throws IOException {
 
@@ -106,17 +110,17 @@ public final class Connector {
                     throw new IOException("Connection does not support input");
                 }
 
-                // Important for J2ME games which request many remote icons:
-                // fully detach the response from HttpURLConnection before
-                // returning it. The HTTP connection is then closed even if
-                // Image.createImage() later fails while decoding the bytes.
-                InputStream source = ((InputConnection) connection).openInputStream();
+                InputStream source =
+                    ((InputConnection) connection).openInputStream();
+
                 if (source == null) {
                     throw new IOException("HTTP input stream is null");
                 }
 
-                byte[] data = readAllAndClose(source, connection);
-                return new ByteArrayInputStream(data);
+                return new ConnectionInputStream(
+                    source,
+                    (HTTPConnectionImpl) connection
+                );
 
             } catch (IOException e) {
                 lastError = e;
@@ -129,11 +133,12 @@ public final class Connector {
                     }
                 }
 
-                // Retry once with a completely new HTTP connection.
                 if (attempt < MAX_HTTP_RETRIES) {
                     continue;
                 }
+
             } catch (RuntimeException e) {
+
                 if (connection != null) {
                     try {
                         connection.close();
@@ -141,6 +146,7 @@ public final class Connector {
                     } catch (RuntimeException ignored) {
                     }
                 }
+
                 throw e;
             }
         }
@@ -148,36 +154,6 @@ public final class Connector {
         throw lastError != null
             ? lastError
             : new IOException("HTTP request failed: " + name);
-    }
-
-    private static byte[] readAllAndClose(
-        InputStream source,
-        Connection connection
-    ) throws IOException {
-
-        ByteArrayOutputStream buffer = new ByteArrayOutputStream();
-        byte[] chunk = new byte[8192];
-
-        try {
-            int count;
-            while ((count = source.read(chunk)) != -1) {
-                if (count > 0) {
-                    buffer.write(chunk, 0, count);
-                }
-            }
-            return buffer.toByteArray();
-        } finally {
-            try {
-                source.close();
-            } catch (IOException ignored) {
-            } finally {
-                try {
-                    connection.close();
-                } catch (IOException ignored) {
-                } catch (RuntimeException ignored) {
-                }
-            }
-        }
     }
 
     public static OutputStream openOutputStream(String name)
@@ -195,6 +171,7 @@ public final class Connector {
                 connection.close();
             } catch (IOException ignored) {
             }
+
             throw new IOException("Connection does not support output");
         }
 
@@ -227,12 +204,13 @@ public final class Connector {
 
             connection.setInstanceFollowRedirects(true);
             connection.setUseCaches(false);
-            // Do not keep a broken server socket alive between icon requests.
             connection.setRequestProperty("Connection", "close");
             connection.setRequestProperty("Cache-Control", "no-cache");
+
             connection.setConnectTimeout(
                 timeouts ? 0 : DEFAULT_CONNECT_TIMEOUT
             );
+
             connection.setReadTimeout(
                 timeouts ? 0 : DEFAULT_READ_TIMEOUT
             );
@@ -281,6 +259,7 @@ public final class Connector {
                     }
 
                     String message;
+
                     try {
                         message = connection.getResponseMessage();
                     } catch (IOException ignored) {
@@ -288,8 +267,7 @@ public final class Connector {
                     }
 
                     throw new IOException(
-                        "HTTP " + responseCode
-                        + " " + message
+                        "HTTP " + responseCode + " " + message
                     );
                 }
 
@@ -303,18 +281,16 @@ public final class Connector {
                     input,
                     this
                 );
+
             } catch (IOException e) {
-                // A failed request must not poison the following image
-                // requests. Disconnect immediately before propagating
-                // the error to the J2ME caller.
                 close();
                 throw e;
+
             } catch (RuntimeException e) {
                 close();
                 throw e;
             }
         }
-
 
         @Override
         public DataInputStream openDataInputStream() throws IOException {
@@ -442,6 +418,7 @@ public final class Connector {
             String key,
             String value
         ) throws IOException {
+
             ensureOpen();
 
             if (connected) {
@@ -531,7 +508,19 @@ public final class Connector {
 
         @Override
         public int read() throws IOException {
-            return delegate.read();
+            try {
+                int value = delegate.read();
+
+                if (value < 0) {
+                    close();
+                }
+
+                return value;
+
+            } catch (IOException e) {
+                closeAfterFailure();
+                throw e;
+            }
         }
 
         @Override
@@ -540,17 +529,40 @@ public final class Connector {
             int off,
             int len
         ) throws IOException {
-            return delegate.read(b, off, len);
+
+            try {
+                int count = delegate.read(b, off, len);
+
+                if (count < 0) {
+                    close();
+                }
+
+                return count;
+
+            } catch (IOException e) {
+                closeAfterFailure();
+                throw e;
+            }
         }
 
         @Override
         public long skip(long n) throws IOException {
-            return delegate.skip(n);
+            try {
+                return delegate.skip(n);
+            } catch (IOException e) {
+                closeAfterFailure();
+                throw e;
+            }
         }
 
         @Override
         public int available() throws IOException {
-            return delegate.available();
+            try {
+                return delegate.available();
+            } catch (IOException e) {
+                closeAfterFailure();
+                throw e;
+            }
         }
 
         @Override
@@ -563,6 +575,14 @@ public final class Connector {
                 } finally {
                     owner.close();
                 }
+            }
+        }
+
+        private void closeAfterFailure() {
+            try {
+                close();
+            } catch (IOException ignored) {
+            } catch (RuntimeException ignored) {
             }
         }
     }
