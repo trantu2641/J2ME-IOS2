@@ -12,8 +12,12 @@ import javax.microedition.io.Connector;
 /**
  * J2ME Image compatibility layer.
  *
- * Failed image resources are ignored without creating a fallback image.
- * No image-error logging is performed here.
+ * Failed image resources are ignored (null) so optional graphics do not
+ * allocate placeholder bitmaps or generate compatibility logs.
+ *
+ * IMPORTANT:
+ * Remote HTTP/HTTPS image failures are intentionally isolated from the
+ * MIDlet. One failed icon must not stop subsequent icon/resource loads.
  */
 public class Image {
 
@@ -32,9 +36,17 @@ public class Image {
         this.mutable = mutable;
     }
 
+    /** No-placeholder failure sentinel: non-null, no native allocation. */
+    private static Image failedImage() {
+        return new Image(0, 0, 0, false);
+    }
+
     public static Image createImage(int width, int height) {
 
         long handle = NativeBridge.createMutableImage(width, height);
+
+        if (handle == 0) {
+                    }
 
         return new Image(handle, width, height, true);
     }
@@ -68,8 +80,8 @@ public class Image {
             );
 
         } catch (RuntimeException e) {
-            // Ignore failed optional image initialization.
-        }
+
+                    }
 
         return img;
     }
@@ -77,19 +89,24 @@ public class Image {
     /**
      * Creates an image from a JAR resource name.
      *
-     * Local missing/corrupted resources are ignored.
+     * Local missing/corrupted resources are replaced with a transparent
+     * bitmap.
      *
      * HTTP/HTTPS resources are also isolated:
      *
      *     request A -> OK
-     *     request B -> FAILED -> ignored
+     *     request B -> FAILED -> null
      *     request C -> still allowed to continue
+     *
+     * A failed remote icon must never be allowed to kill the resource
+     * loading chain by propagating its IOException.
      */
     public static Image createImage(String name)
         throws IOException {
 
         if (name == null || name.length() == 0) {
-            return null;
+
+                        return failedImage();
         }
 
         /*
@@ -103,6 +120,7 @@ public class Image {
 
             try {
 
+                
                 remote =
                     Connector.openInputStream(
                         name,
@@ -110,7 +128,8 @@ public class Image {
                     );
 
                 if (remote == null) {
-                    return null;
+
+                                        return failedImage();
                 }
 
                 /*
@@ -124,10 +143,29 @@ public class Image {
                 return createImage(remote);
 
             } catch (IOException e) {
-                return null;
+
+                /*
+                 * THIS is the important compatibility behavior.
+                 *
+                 * Previously this code did:
+                 *
+                 *     throw e;
+                 *
+                 * That allowed one failed server icon to propagate
+                 * into the game and potentially terminate its loader.
+                 *
+                 * Now the failed icon is replaced by a transparent
+                 * bitmap and the Java game is allowed to continue.
+                 */
+                                return failedImage();
 
             } catch (RuntimeException e) {
-                return null;
+
+                /*
+                 * Protect the MIDlet from native/network runtime errors
+                 * caused by one optional image.
+                 */
+                                return failedImage();
 
             } finally {
 
@@ -160,16 +198,19 @@ public class Image {
                 findResource(name);
 
             if (is == null) {
-                return null;
+
+                                return failedImage();
             }
 
             return createImage(is);
 
         } catch (IOException e) {
-            return null;
+
+                        return failedImage();
 
         } catch (RuntimeException e) {
-            return null;
+
+                        return failedImage();
         }
     }
 
@@ -465,8 +506,8 @@ public class Image {
             }
 
         } catch (RuntimeException e) {
-            return null;
-        }
+
+                    }
 
         return null;
     }
@@ -474,15 +515,16 @@ public class Image {
     /**
      * Creates an image from an InputStream.
      *
-     * Failed/empty image data is simply ignored. No fallback image
-     * is created and no image error is written to a log.
+     * Any failure while reading/decoding an optional image is converted
+     * into null.
      */
     public static Image createImage(
         InputStream stream
     ) throws IOException {
 
         if (stream == null) {
-            return null;
+
+                        return failedImage();
         }
 
         try {
@@ -490,11 +532,16 @@ public class Image {
             byte[] data =
                 readAllBytes(stream);
 
+            /*
+             * Empty response body is treated as a missing/broken image,
+             * not as a fatal MIDlet error.
+             */
             if (
                 data == null
                 || data.length == 0
             ) {
-                return null;
+
+                                return failedImage();
             }
 
             return createImage(
@@ -504,10 +551,12 @@ public class Image {
             );
 
         } catch (IOException e) {
-            return null;
+
+                        return failedImage();
 
         } catch (RuntimeException e) {
-            return null;
+
+                        return failedImage();
         }
     }
 
@@ -518,7 +567,8 @@ public class Image {
     ) {
 
         if (imageData == null) {
-            return null;
+
+                        return failedImage();
         }
 
         if (
@@ -528,7 +578,8 @@ public class Image {
                 > imageData.length
                     - imageLength
         ) {
-            return null;
+
+                        return failedImage();
         }
 
         long handle = 0;
@@ -543,7 +594,8 @@ public class Image {
                 );
 
             if (handle == 0) {
-                return null;
+
+                                return failedImage();
             }
 
             int w =
@@ -569,7 +621,8 @@ public class Image {
                 }
 
                 handle = 0;
-                return null;
+
+                                return failedImage();
             }
 
             return new Image(
@@ -591,7 +644,7 @@ public class Image {
                 }
             }
 
-            return null;
+                        return failedImage();
         }
     }
 
