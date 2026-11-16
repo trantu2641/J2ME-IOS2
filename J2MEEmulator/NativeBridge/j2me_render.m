@@ -39,6 +39,7 @@ typedef struct RenderContext {
     int ownsPixels;
     _Atomic int32_t refcount;
     struct RenderContext *next_dead;
+    struct RenderContext *next_live;
 } RenderContext;
 
 typedef struct RenderImage {
@@ -52,6 +53,7 @@ typedef struct RenderImage {
     int isMutable;
     _Atomic int32_t refcount;
     struct RenderImage *next_dead;
+    struct RenderImage *next_live;
 } RenderImage;
 
 static j2me_flush_callback g_flush_callback = NULL;
@@ -68,61 +70,62 @@ static _Atomic uint64_t g_last_frame_ticks = 0;
 // check this and return NULL, so zombie threads can't touch freed resources.
 static volatile int g_render_stopped = 0;
 
-// Global tracking arrays for forced cleanup between game sessions.
-// Protected by g_track_lock. Entries are added on create, removed on release.
-#define TRACK_MAX 8192
-
-static RenderContext *g_live_rc[TRACK_MAX];
+// Global tracking lists for forced cleanup between game sessions.
+// The old implementation used a fixed 8192-entry array. That meant images
+// above that count were not tracked for cleanup and, more importantly, a raw
+// native handle could race with final release. Use linked lists protected by
+// the same lock instead: there is no artificial image-count ceiling.
+static RenderContext *g_live_rc_head = NULL;
 static int g_live_rc_count = 0;
 
-static RenderImage *g_live_img[TRACK_MAX];
+static RenderImage *g_live_img_head = NULL;
 static int g_live_img_count = 0;
 
 static spinlock_t g_track_lock = {0, 0, 0};
 
 static void track_rc(RenderContext *rc) {
     spin_lock(&g_track_lock);
-
-    if (g_live_rc_count < TRACK_MAX) {
-        g_live_rc[g_live_rc_count++] = rc;
-    }
-
+    rc->next_live = g_live_rc_head;
+    g_live_rc_head = rc;
+    g_live_rc_count++;
     spin_unlock(&g_track_lock);
 }
 
 static void untrack_rc(RenderContext *rc) {
     spin_lock(&g_track_lock);
-
-    for (int i = 0; i < g_live_rc_count; i++) {
-        if (g_live_rc[i] == rc) {
-            g_live_rc[i] = g_live_rc[--g_live_rc_count];
+    RenderContext **pp = &g_live_rc_head;
+    while (*pp) {
+        if (*pp == rc) {
+            *pp = rc->next_live;
+            rc->next_live = NULL;
+            if (g_live_rc_count > 0) g_live_rc_count--;
             break;
         }
+        pp = &(*pp)->next_live;
     }
-
     spin_unlock(&g_track_lock);
 }
 
 static void track_img(RenderImage *img) {
     spin_lock(&g_track_lock);
-
-    if (g_live_img_count < TRACK_MAX) {
-        g_live_img[g_live_img_count++] = img;
-    }
-
+    img->next_live = g_live_img_head;
+    g_live_img_head = img;
+    g_live_img_count++;
     spin_unlock(&g_track_lock);
 }
 
 static void untrack_img(RenderImage *img) {
     spin_lock(&g_track_lock);
-
-    for (int i = 0; i < g_live_img_count; i++) {
-        if (g_live_img[i] == img) {
-            g_live_img[i] = g_live_img[--g_live_img_count];
+    RenderImage **pp = &g_live_img_head;
+    while (*pp) {
+        if (*pp == img) {
+            *pp = img->next_live;
+            img->next_live = NULL;
+            if (g_live_img_count > 0) g_live_img_count--;
             break;
         }
+        pp = &(*pp)->next_live;
     }
-
     spin_unlock(&g_track_lock);
 }
 
@@ -234,32 +237,26 @@ static void process_dead_shells(void) {
 // ============================================================
 
 static inline RenderContext *rc_acquire(s64 handle) {
+    if (g_render_stopped || handle == 0) return NULL;
 
-    if (g_render_stopped || handle == 0) {
-        return NULL;
+    RenderContext *target = (RenderContext *)(intptr_t)handle;
+    spin_lock(&g_track_lock);
+
+    for (RenderContext *rc = g_live_rc_head; rc; rc = rc->next_live) {
+        if (rc == target) {
+            int32_t old = atomic_load_explicit(&rc->refcount, memory_order_relaxed);
+            if (old > 0 && atomic_compare_exchange_strong_explicit(
+                    &rc->refcount, &old, old + 1,
+                    memory_order_acquire, memory_order_relaxed)) {
+                spin_unlock(&g_track_lock);
+                return rc;
+            }
+            break;
+        }
     }
 
-    RenderContext *rc = (RenderContext *)(intptr_t)handle;
-
-    int32_t old = atomic_load_explicit(
-        &rc->refcount,
-        memory_order_relaxed
-    );
-
-    do {
-        if (old <= 0) {
-            return NULL;
-        }
-
-    } while (!atomic_compare_exchange_weak_explicit(
-        &rc->refcount,
-        &old,
-        old + 1,
-        memory_order_acquire,
-        memory_order_relaxed
-    ));
-
-    return rc;
+    spin_unlock(&g_track_lock);
+    return NULL;
 }
 
 static inline void rc_release(RenderContext *rc) {
@@ -310,32 +307,26 @@ static inline void rc_release(RenderContext *rc) {
 }
 
 static inline RenderImage *img_acquire(s64 handle) {
+    if (g_render_stopped || handle == 0) return NULL;
 
-    if (g_render_stopped || handle == 0) {
-        return NULL;
+    RenderImage *target = (RenderImage *)(intptr_t)handle;
+    spin_lock(&g_track_lock);
+
+    for (RenderImage *img = g_live_img_head; img; img = img->next_live) {
+        if (img == target) {
+            int32_t old = atomic_load_explicit(&img->refcount, memory_order_relaxed);
+            if (old > 0 && atomic_compare_exchange_strong_explicit(
+                    &img->refcount, &old, old + 1,
+                    memory_order_acquire, memory_order_relaxed)) {
+                spin_unlock(&g_track_lock);
+                return img;
+            }
+            break;
+        }
     }
 
-    RenderImage *img = (RenderImage *)(intptr_t)handle;
-
-    int32_t old = atomic_load_explicit(
-        &img->refcount,
-        memory_order_relaxed
-    );
-
-    do {
-        if (old <= 0) {
-            return NULL;
-        }
-
-    } while (!atomic_compare_exchange_weak_explicit(
-        &img->refcount,
-        &old,
-        old + 1,
-        memory_order_acquire,
-        memory_order_relaxed
-    ));
-
-    return img;
+    spin_unlock(&g_track_lock);
+    return NULL;
 }
 
 static inline void img_release(RenderImage *img) {
@@ -775,17 +766,23 @@ static RenderImage *createImageFromData(
     return img;
 }
 
+static spinlock_t g_image_decode_lock = {0, 0, 0};
+
 static int ensureImageDecoded(RenderImage *img) {
 
     if (!img) {
         return 0;
     }
 
+    spin_lock(&g_image_decode_lock);
+
     if (img->ctx) {
+        spin_unlock(&g_image_decode_lock);
         return 1;
     }
 
     if (!img->encodedData) {
+        spin_unlock(&g_image_decode_lock);
         return 0;
     }
 
@@ -795,6 +792,7 @@ static int ensureImageDecoded(RenderImage *img) {
     );
 
     if (!source) {
+        spin_unlock(&g_image_decode_lock);
         return 0;
     }
 
@@ -807,6 +805,7 @@ static int ensureImageDecoded(RenderImage *img) {
     CFRelease(source);
 
     if (!cgImage) {
+        spin_unlock(&g_image_decode_lock);
         return 0;
     }
 
@@ -833,6 +832,7 @@ static int ensureImageDecoded(RenderImage *img) {
 
     if (!img->ctx) {
         CGImageRelease(cgImage);
+        spin_unlock(&g_image_decode_lock);
         return 0;
     }
 
@@ -867,6 +867,7 @@ static int ensureImageDecoded(RenderImage *img) {
 
     native_heap_add(img->width * img->height * 4);
 
+    spin_unlock(&g_image_decode_lock);
     return 1;
 }
 
@@ -2822,9 +2823,9 @@ void j2me_render_cleanup(void) {
 
     int rc_count = g_live_rc_count;
 
-    for (int i = 0; i < g_live_rc_count; i++) {
-
-        RenderContext *rc = g_live_rc[i];
+    RenderContext *rc = g_live_rc_head;
+    while (rc) {
+        RenderContext *next = rc->next_live;
 
         if (rc->ctx) {
             CGContextRelease(rc->ctx);
@@ -2839,16 +2840,18 @@ void j2me_render_cleanup(void) {
         }
 
         free(rc);
+        rc = next;
     }
 
+    g_live_rc_head = NULL;
     g_live_rc_count = 0;
 
     // Force-release all still-live RenderImages.
     int img_count = g_live_img_count;
 
-    for (int i = 0; i < g_live_img_count; i++) {
-
-        RenderImage *img = g_live_img[i];
+    RenderImage *img = g_live_img_head;
+    while (img) {
+        RenderImage *next = img->next_live;
 
         if (img->encodedData) {
             CFRelease(img->encodedData);
@@ -2861,8 +2864,10 @@ void j2me_render_cleanup(void) {
         }
 
         free(img);
+        img = next;
     }
 
+    g_live_img_head = NULL;
     g_live_img_count = 0;
 
     spin_unlock(&g_track_lock);
