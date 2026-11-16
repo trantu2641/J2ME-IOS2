@@ -42,13 +42,11 @@ typedef struct RenderContext {
 } RenderContext;
 
 typedef struct RenderImage {
-    // Immutable JAR images are decoded lazily. The compressed source is
-    // retained only until the first draw, then released after the bitmap
-    // context has been created. This mirrors the reference runtime's
-    // visible-item loading behaviour much more closely than eagerly
-    // decoding every catalog icon.
+    // Immutable images are decoded lazily. Keep compressed bytes until the
+    // first actual draw, then release them after the bitmap is created.
     CGContextRef ctx;
     CFDataRef encodedData;
+    int encodedSize;
     int width;
     int height;
     int isMutable;
@@ -356,13 +354,20 @@ static inline void img_release(RenderImage *img) {
 
         untrack_img(img);
 
-        int pixels = img->width * img->height * 4;
+        // Only subtract memory that actually exists. Before lazy decoding,
+        // there is no bitmap allocation yet. The compressed CFData is tracked
+        // separately so a large icon catalogue is visible to MiniJVM GC.
+        int pixels = (img->ctx != NULL)
+            ? img->width * img->height * 4
+            : 0;
+        int encodedSize = img->encodedSize;
 
         CGContextRef ctx = img->ctx;
         CFDataRef encodedData = img->encodedData;
 
         img->ctx = NULL;
         img->encodedData = NULL;
+        img->encodedSize = 0;
 
         if (encodedData) {
             CFRelease(encodedData);
@@ -370,6 +375,10 @@ static inline void img_release(RenderImage *img) {
 
         if (ctx) {
             CGContextRelease(ctx);
+        }
+
+        if (encodedSize > 0) {
+            native_heap_sub(encodedSize);
         }
 
         if (pixels > 0) {
@@ -686,9 +695,9 @@ static RenderImage *createImageFromData(
         return NULL;
     }
 
-    // Keep the compressed image bytes, but do not decode the pixel buffer yet.
-    // The J2ME list can contain a very large number of Image objects; only
-    // images that actually reach drawImage/drawRegion need a decoded bitmap.
+    // Keep the compressed bytes, but do not allocate the decoded bitmap yet.
+    // This is important when a J2ME catalogue creates thousands of Image
+    // objects before they become visible on screen.
     img->encodedData = CFDataCreate(
         NULL,
         data,
@@ -700,8 +709,9 @@ static RenderImage *createImageFromData(
         return NULL;
     }
 
-    // ImageIO can obtain PNG/JPEG dimensions without materialising the full
-    // decoded bitmap. Width/height are required by LCDUI anchor calculations.
+    img->encodedSize = length;
+
+    // ImageIO can read dimensions without materialising the full bitmap.
     CGImageSourceRef source = CGImageSourceCreateWithData(
         img->encodedData,
         NULL
@@ -709,6 +719,8 @@ static RenderImage *createImageFromData(
 
     if (!source) {
         CFRelease(img->encodedData);
+        img->encodedData = NULL;
+        img->encodedSize = 0;
         free(img);
         return NULL;
     }
@@ -750,17 +762,16 @@ static RenderImage *createImageFromData(
 
     CFRelease(source);
 
-    // Some unusual codecs may not expose dimensions through ImageIO
-    // properties. Leave the object valid and let the first draw resolve them.
+    // Unusual codecs may not expose dimensions through properties. Keep the
+    // object valid and resolve the real dimensions during first decode.
     if (img->width <= 0 || img->height <= 0) {
         img->width = 1;
         img->height = 1;
     }
 
     track_img(img);
+    native_heap_add(length);
 
-    // No decoded pixel memory is allocated here, so do not charge the native
-    // heap for a bitmap that does not exist yet.
     return img;
 }
 
@@ -838,15 +849,20 @@ static int ensureImageDecoded(RenderImage *img) {
 
     CGImageRelease(cgImage);
 
-    // Once decoded, the compressed copy is no longer needed. This is the
-    // important memory property for very large remote/catalog lists:
-    // decoded images keep one bitmap, while not-yet-visible images keep only
-    // their compressed representation.
+    // Release compressed storage once the bitmap exists. The heap counter is
+    // updated at the same moment so MiniJVM sees the real native footprint.
     CFDataRef encodedData = img->encodedData;
+    int encodedSize = img->encodedSize;
+
     img->encodedData = NULL;
+    img->encodedSize = 0;
 
     if (encodedData) {
         CFRelease(encodedData);
+    }
+
+    if (encodedSize > 0) {
+        native_heap_sub(encodedSize);
     }
 
     native_heap_add(img->width * img->height * 4);
@@ -855,9 +871,8 @@ static int ensureImageDecoded(RenderImage *img) {
 }
 
 /// Returns an image ready for drawing. Immutable images are decoded on first
-/// use and then reuse the single bitmap context. A temporary CGImage is made
-/// only for the actual Core Graphics draw call, avoiding a second permanent
-/// full-size pixel copy for every icon.
+/// use and then reuse the single bitmap context. Mutable images still get a
+/// fresh snapshot so updates remain visible.
 static CGImageRef drawingImageFor(
     RenderImage *img,
     int *releaseAfterUse
@@ -871,11 +886,7 @@ static CGImageRef drawingImageFor(
         return NULL;
     }
 
-    if (!img->ctx && !ensureImageDecoded(img)) {
-        return NULL;
-    }
-
-    if (!img->ctx) {
+    if (!ensureImageDecoded(img)) {
         return NULL;
     }
 
@@ -2839,14 +2850,14 @@ void j2me_render_cleanup(void) {
 
         RenderImage *img = g_live_img[i];
 
-        if (img->ctx) {
-            CGContextRelease(img->ctx);
-            img->ctx = NULL;
-        }
-
         if (img->encodedData) {
             CFRelease(img->encodedData);
             img->encodedData = NULL;
+        }
+
+        if (img->ctx) {
+            CGContextRelease(img->ctx);
+            img->ctx = NULL;
         }
 
         free(img);
