@@ -12,12 +12,10 @@ import javax.microedition.io.Connector;
 /**
  * J2ME Image compatibility layer.
  *
- * Missing, corrupted, empty, or failed image resources are replaced with
- * a transparent 1x1 image so that optional graphics do not stop the MIDlet.
+ * Failed/missing image resources are NOT replaced with generated
+ * transparent placeholder images. A failed icon simply produces no Image.
  *
- * IMPORTANT:
- * Remote HTTP/HTTPS image failures are intentionally isolated from the
- * MIDlet. One failed icon must not stop subsequent icon/resource loads.
+ * No diagnostic logging is performed from this class.
  */
 public class Image {
 
@@ -41,10 +39,6 @@ public class Image {
         long handle = NativeBridge.createMutableImage(width, height);
 
         if (handle == 0) {
-            System.out.println(
-                "[Image] ERROR: createMutableImage returned 0 for "
-                + width + "x" + height
-            );
         }
 
         return new Image(handle, width, height, true);
@@ -79,127 +73,25 @@ public class Image {
             );
 
         } catch (RuntimeException e) {
-
-            System.out.println(
-                "[Image] Unable to initialize image: " + e
-            );
         }
 
         return img;
     }
 
-    /**
-     * Creates a transparent 1x1 fallback image.
-     *
-     * Used when an optional image/resource is missing, invalid,
-     * corrupted, empty, or cannot be downloaded.
-     */
-    private static Image createTransparentPlaceholder() {
-
-        long handle = 0;
-
-        try {
-
-            handle = NativeBridge.createMutableImage(1, 1);
-
-            if (handle == 0) {
-
-                System.out.println(
-                    "[Image] COMPAT: unable to allocate placeholder"
-                );
-
-                return new Image(0, 1, 1, false);
-            }
-
-            long context =
-                NativeBridge.getImageContext(handle);
-
-            if (context != 0) {
-
-                NativeBridge.drawRGB(
-                    context,
-                    new int[] { 0x00000000 },
-                    0,
-                    1,
-                    0,
-                    0,
-                    1,
-                    1,
-                    1
-                );
-            }
-
-            return new Image(
-                handle,
-                1,
-                1,
-                false
-            );
-
-        } catch (RuntimeException e) {
-
-            if (handle != 0) {
-
-                try {
-                    NativeBridge.destroyImage(handle);
-                } catch (RuntimeException ignored) {
-                }
-            }
-
-            System.out.println(
-                "[Image] COMPAT: placeholder creation failed: "
-                + e
-            );
-
-            return new Image(
-                0,
-                1,
-                1,
-                false
-            );
-        }
-    }
-
-    private static void logFallback(
-        String name,
-        String reason
-    ) {
-
-        System.out.println(
-            "[Image] COMPAT: "
-            + reason
-            + ": "
-            + name
-            + " (using transparent placeholder)"
-        );
-    }
-
-    /**
+/**
      * Creates an image from a JAR resource name.
      *
-     * Local missing/corrupted resources are replaced with a transparent
-     * placeholder.
-     *
-     * HTTP/HTTPS resources are also isolated:
-     *
-     *     request A -> OK
-     *     request B -> FAILED -> placeholder
-     *     request C -> still allowed to continue
-     *
-     * A failed remote icon must never be allowed to kill the resource
-     * loading chain by propagating its IOException.
+     * Failed resources are returned as null instead of allocating a
+     * transparent placeholder image.
      */
     public static Image createImage(String name)
         throws IOException {
 
         if (name == null || name.length() == 0) {
 
-            logFallback(
-                String.valueOf(name),
-                "invalid resource name"
-            );
 
-            return createTransparentPlaceholder();
+
+            return null;
         }
 
         /*
@@ -213,10 +105,6 @@ public class Image {
 
             try {
 
-                System.out.println(
-                    "[Image] REMOTE: loading " + name
-                );
-
                 remote =
                     Connector.openInputStream(
                         name,
@@ -225,58 +113,25 @@ public class Image {
 
                 if (remote == null) {
 
-                    logFallback(
-                        name,
-                        "remote connection returned null stream"
-                    );
 
-                    return createTransparentPlaceholder();
+
+                    return null;
                 }
 
                 /*
-                 * IMPORTANT:
-                 *
-                 * createImage(InputStream) already reads and closes
-                 * the stream. Do not throw the remote IOException here.
-                 *
-                 * A broken icon is treated as an optional resource.
+                 * createImage(InputStream) reads and closes the stream.
                  */
                 return createImage(remote);
 
             } catch (IOException e) {
 
-                /*
-                 * THIS is the important compatibility behavior.
-                 *
-                 * Previously this code did:
-                 *
-                 *     throw e;
-                 *
-                 * That allowed one failed server icon to propagate
-                 * into the game and potentially terminate its loader.
-                 *
-                 * Now the failed icon is replaced by a transparent
-                 * placeholder and the Java game is allowed to continue.
-                 */
-                logFallback(
-                    name,
-                    "remote image request failed: " + e
-                );
 
-                return createTransparentPlaceholder();
+                return null;
 
             } catch (RuntimeException e) {
 
-                /*
-                 * Protect the MIDlet from native/network runtime errors
-                 * caused by one optional image.
-                 */
-                logFallback(
-                    name,
-                    "remote image runtime failure: " + e
-                );
 
-                return createTransparentPlaceholder();
+                return null;
 
             } finally {
 
@@ -310,33 +165,24 @@ public class Image {
 
             if (is == null) {
 
-                logFallback(
-                    name,
-                    "local resource not found"
-                );
 
-                return createTransparentPlaceholder();
+
+                return null;
             }
 
             return createImage(is);
 
         } catch (IOException e) {
 
-            logFallback(
-                name,
-                "local resource read failed: " + e
-            );
 
-            return createTransparentPlaceholder();
+
+            return null;
 
         } catch (RuntimeException e) {
 
-            logFallback(
-                name,
-                "local resource loader failed: " + e
-            );
 
-            return createTransparentPlaceholder();
+
+            return null;
         }
     }
 
@@ -632,13 +478,6 @@ public class Image {
             }
 
         } catch (RuntimeException e) {
-
-            System.out.println(
-                "[Image] COMPAT: resource lookup failed for "
-                + name
-                + ": "
-                + e
-            );
         }
 
         return null;
@@ -647,8 +486,7 @@ public class Image {
     /**
      * Creates an image from an InputStream.
      *
-     * Any failure while reading/decoding an optional image is converted
-     * into a transparent placeholder.
+     * Failed/empty image data returns null without creating a placeholder.
      */
     public static Image createImage(
         InputStream stream
@@ -656,12 +494,9 @@ public class Image {
 
         if (stream == null) {
 
-            logFallback(
-                "InputStream",
-                "null input stream"
-            );
 
-            return createTransparentPlaceholder();
+
+            return null;
         }
 
         try {
@@ -678,12 +513,9 @@ public class Image {
                 || data.length == 0
             ) {
 
-                logFallback(
-                    "InputStream",
-                    "empty image data"
-                );
 
-                return createTransparentPlaceholder();
+
+                return null;
             }
 
             return createImage(
@@ -694,21 +526,15 @@ public class Image {
 
         } catch (IOException e) {
 
-            logFallback(
-                "InputStream",
-                "image read failed: " + e
-            );
 
-            return createTransparentPlaceholder();
+
+            return null;
 
         } catch (RuntimeException e) {
 
-            logFallback(
-                "InputStream",
-                "image decoding failed: " + e
-            );
 
-            return createTransparentPlaceholder();
+
+            return null;
         }
     }
 
@@ -720,12 +546,9 @@ public class Image {
 
         if (imageData == null) {
 
-            logFallback(
-                "byte[]",
-                "null image data"
-            );
 
-            return createTransparentPlaceholder();
+
+            return null;
         }
 
         if (
@@ -736,12 +559,9 @@ public class Image {
                     - imageLength
         ) {
 
-            logFallback(
-                "byte[]",
-                "invalid or empty image data"
-            );
 
-            return createTransparentPlaceholder();
+
+            return null;
         }
 
         long handle = 0;
@@ -757,12 +577,9 @@ public class Image {
 
             if (handle == 0) {
 
-                logFallback(
-                    "byte[]",
-                    "native image decoder failed"
-                );
 
-                return createTransparentPlaceholder();
+
+                return null;
             }
 
             int w =
@@ -789,12 +606,9 @@ public class Image {
 
                 handle = 0;
 
-                logFallback(
-                    "byte[]",
-                    "invalid image dimensions"
-                );
 
-                return createTransparentPlaceholder();
+
+                return null;
             }
 
             return new Image(
@@ -816,12 +630,9 @@ public class Image {
                 }
             }
 
-            logFallback(
-                "byte[]",
-                "image decoding exception: " + e
-            );
 
-            return createTransparentPlaceholder();
+
+            return null;
         }
     }
 
