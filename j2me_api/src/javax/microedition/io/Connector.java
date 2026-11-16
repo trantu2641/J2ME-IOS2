@@ -28,6 +28,15 @@ public final class Connector {
     private static final int DEFAULT_READ_TIMEOUT = 10000;
     private static final int MAX_HTTP_RETRIES = 1;
 
+    /*
+     * Prevent a large item list from opening hundreds of HTTP connections
+     * simultaneously. This limits only active requests; the total number
+     * of requests remains unlimited.
+     */
+    private static final int MAX_ACTIVE_HTTP_REQUESTS = 6;
+    private static final Object HTTP_REQUEST_LOCK = new Object();
+    private static int activeHttpRequests = 0;
+
     private Connector() {
     }
 
@@ -178,6 +187,30 @@ public final class Connector {
         return ((OutputConnection) connection).openOutputStream();
     }
 
+    private static void acquireHttpRequestSlot() throws IOException {
+        synchronized (HTTP_REQUEST_LOCK) {
+            while (activeHttpRequests >= MAX_ACTIVE_HTTP_REQUESTS) {
+                try {
+                    HTTP_REQUEST_LOCK.wait();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new IOException("HTTP request interrupted", e);
+                }
+            }
+
+            activeHttpRequests++;
+        }
+    }
+
+    private static void releaseHttpRequestSlot() {
+        synchronized (HTTP_REQUEST_LOCK) {
+            if (activeHttpRequests > 0) {
+                activeHttpRequests--;
+            }
+            HTTP_REQUEST_LOCK.notifyAll();
+        }
+    }
+
     private static final class HTTPConnectionImpl implements HttpConnection {
 
         private final URL url;
@@ -186,6 +219,7 @@ public final class Connector {
 
         private boolean closed;
         private boolean connected;
+        private boolean requestSlotHeld;
         private String requestMethod = GET;
 
         HTTPConnectionImpl(URL url, int mode, boolean timeouts)
@@ -229,9 +263,22 @@ public final class Connector {
             ensureOpen();
 
             if (!connected) {
-                connection.setRequestMethod(requestMethod);
-                connection.connect();
-                connected = true;
+                acquireHttpRequestSlot();
+                requestSlotHeld = true;
+
+                try {
+                    connection.setRequestMethod(requestMethod);
+                    connection.connect();
+                    connected = true;
+                } catch (IOException e) {
+                    requestSlotHeld = false;
+                    releaseHttpRequestSlot();
+                    throw e;
+                } catch (RuntimeException e) {
+                    requestSlotHeld = false;
+                    releaseHttpRequestSlot();
+                    throw e;
+                }
             }
         }
 
@@ -487,7 +534,15 @@ public final class Connector {
         public void close() {
             if (!closed) {
                 closed = true;
-                connection.disconnect();
+
+                try {
+                    connection.disconnect();
+                } finally {
+                    if (requestSlotHeld) {
+                        requestSlotHeld = false;
+                        releaseHttpRequestSlot();
+                    }
+                }
             }
         }
     }
