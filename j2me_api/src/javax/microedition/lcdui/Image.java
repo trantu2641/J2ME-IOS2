@@ -12,9 +12,9 @@ import javax.microedition.io.Connector;
 /**
  * J2ME Image compatibility layer.
  *
- * Failed optional image resources do not allocate a transparent bitmap and
- * do not emit per-image diagnostic output. A zero-handle Image object is
- * returned so callers that assume a non-null Image remain safe.
+ * Optional image/resource failures are isolated from the MIDlet.
+ * Failed resources return a non-native sentinel Image; no non-native
+ * sentinel bitmap is allocated.
  */
 public class Image {
 
@@ -75,58 +75,173 @@ public class Image {
     }
 
     /**
-     * Non-allocating failure sentinel.
-     *
-     * Do not return null: some J2ME games immediately call methods on the
-     * Image object after createImage(). Native handle 0 is treated as an
-     * unavailable image by the bridge.
+     * Non-native sentinel returned for an optional image that cannot be
+     * loaded. It is deliberately NOT a transparent bitmap and allocates
+     * no native image/context. Keeping a non-null Image object preserves
+     * J2ME applications that do not tolerate null image references.
      */
     private static Image failedImage() {
-        return new Image(0, 0, 0, false);
+        return new Image(0, 1, 1, false);
     }
 
     /**
      * Creates an image from a JAR resource name.
      *
-     * Missing/corrupt optional images return a non-allocating zero-handle
-     * Image object. No transparent fallback bitmap is created.
+     * Local missing/corrupted resources are replaced with a non-native
+     * sentinel.
+     *
+     * HTTP/HTTPS resources are also isolated:
+     *
+     *     request A -> OK
+     *     request B -> FAILED -> sentinel
+     *     request C -> still allowed to continue
+     *
+     * A failed remote icon must never be allowed to kill the resource
+     * loading chain by propagating its IOException.
      */
     public static Image createImage(String name)
         throws IOException {
 
         if (name == null || name.length() == 0) {
+
+            logFallback(
+                String.valueOf(name),
+                "invalid resource name"
+            );
+
             return failedImage();
         }
 
+        /*
+         * ------------------------------------------------------------
+         * Remote HTTP/HTTPS image
+         * ------------------------------------------------------------
+         */
         if (isRemoteURL(name)) {
+
             InputStream remote = null;
+
             try {
-                remote = Connector.openInputStream(name, Connector.READ);
+
+                remote =
+                    Connector.openInputStream(
+                        name,
+                        Connector.READ
+                    );
+
                 if (remote == null) {
+
+                    logFallback(
+                        name,
+                        "remote connection returned null stream"
+                    );
+
                     return failedImage();
                 }
+
+                /*
+                 * IMPORTANT:
+                 *
+                 * createImage(InputStream) already reads and closes
+                 * the stream. Do not throw the remote IOException here.
+                 *
+                 * A broken icon is treated as an optional resource.
+                 */
                 return createImage(remote);
+
             } catch (IOException e) {
+
+                /*
+                 * THIS is the important compatibility behavior.
+                 *
+                 * Previously this code did:
+                 *
+                 *     throw e;
+                 *
+                 * That allowed one failed server icon to propagate
+                 * into the game and potentially terminate its loader.
+                 *
+                 * Now the failed icon is replaced by a non-native
+                 * sentinel and the Java game is allowed to continue.
+                 */
+                logFallback(
+                    name,
+                    "remote image request failed: " + e
+                );
+
                 return failedImage();
+
             } catch (RuntimeException e) {
+
+                /*
+                 * Protect the MIDlet from native/network runtime errors
+                 * caused by one optional image.
+                 */
+                logFallback(
+                    name,
+                    "remote image runtime failure: " + e
+                );
+
                 return failedImage();
+
             } finally {
+
+                /*
+                 * Defensive close.
+                 *
+                 * Some InputStream implementations may already have
+                 * been closed by createImage(InputStream). Calling close()
+                 * again is intentionally ignored.
+                 */
                 if (remote != null) {
-                    try { remote.close(); } catch (IOException ignored) {}
-                    catch (RuntimeException ignored) {}
+
+                    try {
+                        remote.close();
+                    } catch (IOException ignored) {
+                    } catch (RuntimeException ignored) {
+                    }
                 }
             }
         }
 
+        /*
+         * ------------------------------------------------------------
+         * Local JAR resource
+         * ------------------------------------------------------------
+         */
         try {
-            InputStream is = findResource(name);
+
+            InputStream is =
+                findResource(name);
+
             if (is == null) {
+
+                logFallback(
+                    name,
+                    "local resource not found"
+                );
+
                 return failedImage();
             }
+
             return createImage(is);
+
         } catch (IOException e) {
+
+            logFallback(
+                name,
+                "local resource read failed: " + e
+            );
+
             return failedImage();
+
         } catch (RuntimeException e) {
+
+            logFallback(
+                name,
+                "local resource loader failed: " + e
+            );
+
             return failedImage();
         }
     }
@@ -420,38 +535,79 @@ public class Image {
                         return is;
                     }
                 }
-            }        } catch (RuntimeException e) {
-            // Missing resource: no per-image logging.
+            }
+
+        } catch (RuntimeException e) {
         }
 
         return null;
     }
 
     /**
-     * Creates an image from an InputStream without allocating a fallback
-     * bitmap when the resource is missing or corrupt.
+     * Creates an image from an InputStream.
+     *
+     * Any failure while reading/decoding an optional image is converted
+     * into a non-native sentinel Image.
      */
     public static Image createImage(
         InputStream stream
     ) throws IOException {
 
         if (stream == null) {
+
+            logFallback(
+                "InputStream",
+                "null input stream"
+            );
+
             return failedImage();
         }
 
         try {
-            byte[] data = readAllBytes(stream);
-            if (data == null || data.length == 0) {
+
+            byte[] data =
+                readAllBytes(stream);
+
+            /*
+             * Empty response body is treated as a missing/broken image,
+             * not as a fatal MIDlet error.
+             */
+            if (
+                data == null
+                || data.length == 0
+            ) {
+
+                logFallback(
+                    "InputStream",
+                    "empty image data"
+                );
+
                 return failedImage();
             }
-            return createImage(data, 0, data.length);
+
+            return createImage(
+                data,
+                0,
+                data.length
+            );
+
         } catch (IOException e) {
+
+            logFallback(
+                "InputStream",
+                "image read failed: " + e
+            );
+
             return failedImage();
+
         } catch (RuntimeException e) {
+
+            logFallback(
+                "InputStream",
+                "image decoding failed: " + e
+            );
+
             return failedImage();
-        } finally {
-            try { stream.close(); } catch (IOException ignored) {}
-            catch (RuntimeException ignored) {}
         }
     }
 
@@ -462,42 +618,108 @@ public class Image {
     ) {
 
         if (imageData == null) {
+
+            logFallback(
+                "byte[]",
+                "null image data"
+            );
+
             return failedImage();
         }
 
-        if (imageOffset < 0
+        if (
+            imageOffset < 0
             || imageLength <= 0
-            || imageOffset > imageData.length - imageLength) {
+            || imageOffset
+                > imageData.length
+                    - imageLength
+        ) {
+
+            logFallback(
+                "byte[]",
+                "invalid or empty image data"
+            );
+
             return failedImage();
         }
 
         long handle = 0;
+
         try {
-            handle = NativeBridge.createImageFromData(
-                imageData,
-                imageOffset,
-                imageLength
-            );
+
+            handle =
+                NativeBridge.createImageFromData(
+                    imageData,
+                    imageOffset,
+                    imageLength
+                );
 
             if (handle == 0) {
+
+                logFallback(
+                    "byte[]",
+                    "native image decoder failed"
+                );
+
                 return failedImage();
             }
 
-            int w = NativeBridge.getImageWidth(handle);
-            int h = NativeBridge.getImageHeight(handle);
+            int w =
+                NativeBridge.getImageWidth(
+                    handle
+                );
 
-            if (w <= 0 || h <= 0) {
-                try { NativeBridge.destroyImage(handle); }
-                catch (RuntimeException ignored) {}
+            int h =
+                NativeBridge.getImageHeight(
+                    handle
+                );
+
+            if (
+                w <= 0
+                || h <= 0
+            ) {
+
+                try {
+                    NativeBridge.destroyImage(
+                        handle
+                    );
+                } catch (RuntimeException ignored) {
+                }
+
+                handle = 0;
+
+                logFallback(
+                    "byte[]",
+                    "invalid image dimensions"
+                );
+
                 return failedImage();
             }
 
-            return new Image(handle, w, h, false);
+            return new Image(
+                handle,
+                w,
+                h,
+                false
+            );
+
         } catch (RuntimeException e) {
+
             if (handle != 0) {
-                try { NativeBridge.destroyImage(handle); }
-                catch (RuntimeException ignored) {}
+
+                try {
+                    NativeBridge.destroyImage(
+                        handle
+                    );
+                } catch (RuntimeException ignored) {
+                }
             }
+
+            logFallback(
+                "byte[]",
+                "image decoding exception: " + e
+            );
+
             return failedImage();
         }
     }
