@@ -23,7 +23,6 @@
 #include <stdio.h>
 #include <stdatomic.h>
 #include <stdint.h>
-#include <limits.h>
 
 // ============================================================
 // Internal structures
@@ -40,7 +39,6 @@ typedef struct RenderContext {
     int ownsPixels;
     _Atomic int32_t refcount;
     struct RenderContext *next_dead;
-    struct RenderContext *next_live;
 } RenderContext;
 
 typedef struct RenderImage {
@@ -53,9 +51,7 @@ typedef struct RenderImage {
     int height;
     int isMutable;
     _Atomic int32_t refcount;
-    int decodeFailed;
     struct RenderImage *next_dead;
-    struct RenderImage *next_live;
 } RenderImage;
 
 static j2me_flush_callback g_flush_callback = NULL;
@@ -72,55 +68,66 @@ static _Atomic uint64_t g_last_frame_ticks = 0;
 // check this and return NULL, so zombie threads can't touch freed resources.
 static volatile int g_render_stopped = 0;
 
-// Live-object tracking for forced cleanup and safe handle acquisition.
-// The list has no fixed item limit: large JAR catalogues are allowed to
-// create far more than 8192 Image objects without becoming untracked.
-static RenderContext *g_live_rc_head = NULL;
-static RenderImage *g_live_img_head = NULL;
+// Global tracking arrays for forced cleanup between game sessions.
+// Protected by g_track_lock. Entries are added on create, removed on release.
+#define TRACK_MAX 8192
+
+static RenderContext *g_live_rc[TRACK_MAX];
+static int g_live_rc_count = 0;
+
+static RenderImage *g_live_img[TRACK_MAX];
+static int g_live_img_count = 0;
+
 static spinlock_t g_track_lock = {0, 0, 0};
-// ImageIO/CoreGraphics decode is serialized to prevent concurrent creation
-// of bitmap contexts from the same RenderImage.
+
+// Serialize ImageIO decode/create of bitmap contexts. This prevents two VM
+// threads from decoding the same large PNG concurrently and keeps the
+// RenderImage state transition (encodedData -> ctx) atomic at this level.
 static spinlock_t g_image_decode_lock = {0, 0, 0};
 
 static void track_rc(RenderContext *rc) {
     spin_lock(&g_track_lock);
-    rc->next_live = g_live_rc_head;
-    g_live_rc_head = rc;
+
+    if (g_live_rc_count < TRACK_MAX) {
+        g_live_rc[g_live_rc_count++] = rc;
+    }
+
     spin_unlock(&g_track_lock);
 }
 
 static void untrack_rc(RenderContext *rc) {
     spin_lock(&g_track_lock);
-    RenderContext **p = &g_live_rc_head;
-    while (*p) {
-        if (*p == rc) {
-            *p = rc->next_live;
-            rc->next_live = NULL;
+
+    for (int i = 0; i < g_live_rc_count; i++) {
+        if (g_live_rc[i] == rc) {
+            g_live_rc[i] = g_live_rc[--g_live_rc_count];
             break;
         }
-        p = &(*p)->next_live;
     }
+
     spin_unlock(&g_track_lock);
 }
 
 static void track_img(RenderImage *img) {
     spin_lock(&g_track_lock);
-    img->next_live = g_live_img_head;
-    g_live_img_head = img;
+
+    if (g_live_img_count < TRACK_MAX) {
+        g_live_img[g_live_img_count++] = img;
+    }
+
     spin_unlock(&g_track_lock);
 }
 
 static void untrack_img(RenderImage *img) {
     spin_lock(&g_track_lock);
-    RenderImage **p = &g_live_img_head;
-    while (*p) {
-        if (*p == img) {
-            *p = img->next_live;
-            img->next_live = NULL;
+
+    for (int i = 0; i < g_live_img_count; i++) {
+        if (g_live_img[i] == img) {
+            g_live_img[i] = g_live_img[--g_live_img_count];
             break;
         }
-        p = &(*p)->next_live;
     }
+
     spin_unlock(&g_track_lock);
 }
 
@@ -231,115 +238,135 @@ static void process_dead_shells(void) {
 // Reference counting
 // ============================================================
 
-// A Java long is only an opaque handle. Never dereference it before checking
-// that the object is still in the live list. This closes the race where a
-// stale handle could be dereferenced after the final release had already
-// queued the native shell for reclamation.
 static inline RenderContext *rc_acquire(s64 handle) {
+
     if (g_render_stopped || handle == 0) {
         return NULL;
     }
 
-    RenderContext *target = (RenderContext *)(intptr_t)handle;
+    RenderContext *rc = (RenderContext *)(intptr_t)handle;
 
-    spin_lock(&g_track_lock);
+    int32_t old = atomic_load_explicit(
+        &rc->refcount,
+        memory_order_relaxed
+    );
 
-    RenderContext *rc = g_live_rc_head;
-    while (rc && rc != target) {
-        rc = rc->next_live;
-    }
+    do {
+        if (old <= 0) {
+            return NULL;
+        }
 
-    if (!rc) {
-        spin_unlock(&g_track_lock);
-        return NULL;
-    }
+    } while (!atomic_compare_exchange_weak_explicit(
+        &rc->refcount,
+        &old,
+        old + 1,
+        memory_order_acquire,
+        memory_order_relaxed
+    ));
 
-    int32_t old = atomic_load_explicit(&rc->refcount, memory_order_relaxed);
-    if (old <= 0 || !atomic_compare_exchange_strong_explicit(
-            &rc->refcount,
-            &old,
-            old + 1,
-            memory_order_acquire,
-            memory_order_relaxed)) {
-        spin_unlock(&g_track_lock);
-        return NULL;
-    }
-
-    spin_unlock(&g_track_lock);
     return rc;
 }
 
 static inline void rc_release(RenderContext *rc) {
-    if (!rc) return;
+
+    if (!rc) {
+        return;
+    }
 
     if (atomic_fetch_sub_explicit(
-            &rc->refcount, 1, memory_order_release) == 1) {
+        &rc->refcount,
+        1,
+        memory_order_release
+    ) == 1) {
+
         atomic_thread_fence(memory_order_acquire);
 
         untrack_rc(rc);
 
-        int pixels = rc->ownsPixels ? rc->width * rc->height * 4 : 0;
+        int pixels = rc->ownsPixels
+            ? rc->width * rc->height * 4
+            : 0;
+
         CGContextRef ctx = rc->ctx;
+
         CTFontRef font = __atomic_exchange_n(
-            &rc->font, NULL, __ATOMIC_ACQ_REL);
+            &rc->font,
+            NULL,
+            __ATOMIC_ACQ_REL
+        );
 
         rc->ctx = NULL;
         rc->ownsPixels = 0;
 
-        if (ctx) CGContextRelease(ctx);
-        if (font) CFRelease(font);
-        if (pixels > 0) native_heap_sub(pixels);
+        if (ctx) {
+            CGContextRelease(ctx);
+        }
+
+        if (font) {
+            CFRelease(font);
+        }
+
+        if (pixels > 0) {
+            native_heap_sub(pixels);
+        }
 
         enqueue_dead_rc(rc);
     }
 }
 
 static inline RenderImage *img_acquire(s64 handle) {
+
     if (g_render_stopped || handle == 0) {
         return NULL;
     }
 
-    RenderImage *target = (RenderImage *)(intptr_t)handle;
+    RenderImage *img = (RenderImage *)(intptr_t)handle;
 
-    spin_lock(&g_track_lock);
+    int32_t old = atomic_load_explicit(
+        &img->refcount,
+        memory_order_relaxed
+    );
 
-    RenderImage *img = g_live_img_head;
-    while (img && img != target) {
-        img = img->next_live;
-    }
+    do {
+        if (old <= 0) {
+            return NULL;
+        }
 
-    if (!img) {
-        spin_unlock(&g_track_lock);
-        return NULL;
-    }
+    } while (!atomic_compare_exchange_weak_explicit(
+        &img->refcount,
+        &old,
+        old + 1,
+        memory_order_acquire,
+        memory_order_relaxed
+    ));
 
-    int32_t old = atomic_load_explicit(&img->refcount, memory_order_relaxed);
-    if (old <= 0 || !atomic_compare_exchange_strong_explicit(
-            &img->refcount,
-            &old,
-            old + 1,
-            memory_order_acquire,
-            memory_order_relaxed)) {
-        spin_unlock(&g_track_lock);
-        return NULL;
-    }
-
-    spin_unlock(&g_track_lock);
     return img;
 }
 
 static inline void img_release(RenderImage *img) {
-    if (!img) return;
+
+    if (!img) {
+        return;
+    }
 
     if (atomic_fetch_sub_explicit(
-            &img->refcount, 1, memory_order_release) == 1) {
+        &img->refcount,
+        1,
+        memory_order_release
+    ) == 1) {
+
         atomic_thread_fence(memory_order_acquire);
 
         untrack_img(img);
 
+        // Only subtract memory that actually exists. Before lazy decoding,
+        // there is no bitmap allocation yet. The compressed CFData is tracked
+        // separately so a large icon catalogue is visible to MiniJVM GC.
         int pixels = (img->ctx != NULL)
-            ? img->width * img->height * 4 : 0;
+            ? img->width * img->height * 4
+            : 0;
         int encodedSize = img->encodedSize;
+
         CGContextRef ctx = img->ctx;
         CFDataRef encodedData = img->encodedData;
 
@@ -347,10 +374,21 @@ static inline void img_release(RenderImage *img) {
         img->encodedData = NULL;
         img->encodedSize = 0;
 
-        if (encodedData) CFRelease(encodedData);
-        if (ctx) CGContextRelease(ctx);
-        if (encodedSize > 0) native_heap_sub(encodedSize);
-        if (pixels > 0) native_heap_sub(pixels);
+        if (encodedData) {
+            CFRelease(encodedData);
+        }
+
+        if (ctx) {
+            CGContextRelease(ctx);
+        }
+
+        if (encodedSize > 0) {
+            native_heap_sub(encodedSize);
+        }
+
+        if (pixels > 0) {
+            native_heap_sub(pixels);
+        }
 
         enqueue_dead_img(img);
     }
@@ -743,10 +781,11 @@ static RenderImage *createImageFromData(
 }
 
 static int ensureImageDecoded(RenderImage *img) {
-    if (!img) return 0;
 
-    // The caller holds an Image reference, so img itself cannot be reclaimed
-    // while this function is running. Serialize the actual ImageIO decode.
+    if (!img) {
+        return 0;
+    }
+
     spin_lock(&g_image_decode_lock);
 
     if (img->ctx) {
@@ -754,24 +793,30 @@ static int ensureImageDecoded(RenderImage *img) {
         return 1;
     }
 
-    if (img->decodeFailed || !img->encodedData) {
+    if (!img->encodedData) {
         spin_unlock(&g_image_decode_lock);
         return 0;
     }
 
     CGImageSourceRef source = CGImageSourceCreateWithData(
-        img->encodedData, NULL);
+        img->encodedData,
+        NULL
+    );
+
     if (!source) {
-        img->decodeFailed = 1;
         spin_unlock(&g_image_decode_lock);
         return 0;
     }
 
-    CGImageRef cgImage = CGImageSourceCreateImageAtIndex(source, 0, NULL);
+    CGImageRef cgImage = CGImageSourceCreateImageAtIndex(
+        source,
+        0,
+        NULL
+    );
+
     CFRelease(source);
 
     if (!cgImage) {
-        img->decodeFailed = 1;
         spin_unlock(&g_image_decode_lock);
         return 0;
     }
@@ -779,31 +824,26 @@ static int ensureImageDecoded(RenderImage *img) {
     size_t decodedWidth = CGImageGetWidth(cgImage);
     size_t decodedHeight = CGImageGetHeight(cgImage);
 
-    // Prevent integer overflow in bytes-per-row / native heap accounting.
+    // Reject impossible bitmap sizes before converting size_t to int or
+    // calculating bytes-per-row/native heap accounting.
     if (decodedWidth == 0 || decodedHeight == 0 ||
+        decodedWidth > INT_MAX || decodedHeight > INT_MAX ||
         decodedWidth > (SIZE_MAX / 4) ||
         decodedHeight > (SIZE_MAX / (decodedWidth * 4))) {
         CGImageRelease(cgImage);
-        img->decodeFailed = 1;
         spin_unlock(&g_image_decode_lock);
         return 0;
     }
 
     size_t pixelBytes = decodedWidth * decodedHeight * 4;
     if (pixelBytes > INT_MAX) {
-        // Native heap accounting uses a signed 32-bit increment in this
-        // renderer. Reject only physically unrepresentable bitmap sizes;
-        // there is no item-count limit here.
         CGImageRelease(cgImage);
-        img->decodeFailed = 1;
         spin_unlock(&g_image_decode_lock);
         return 0;
     }
 
-    img->width = (int)decodedWidth;
-    img->height = (int)decodedHeight;
-
     CGColorSpaceRef cs = getColorSpace();
+
     CGContextRef ctx = CGBitmapContextCreate(
         NULL,
         decodedWidth,
@@ -817,7 +857,6 @@ static int ensureImageDecoded(RenderImage *img) {
 
     if (!ctx) {
         CGImageRelease(cgImage);
-        img->decodeFailed = 1;
         spin_unlock(&g_image_decode_lock);
         return 0;
     }
@@ -835,16 +874,25 @@ static int ensureImageDecoded(RenderImage *img) {
 
     CGImageRelease(cgImage);
 
+    img->width = (int)decodedWidth;
+    img->height = (int)decodedHeight;
     img->ctx = ctx;
 
     // Release compressed storage only after the decoded bitmap is valid.
     CFDataRef encodedData = img->encodedData;
     int encodedSize = img->encodedSize;
+
     img->encodedData = NULL;
     img->encodedSize = 0;
 
-    if (encodedData) CFRelease(encodedData);
-    if (encodedSize > 0) native_heap_sub(encodedSize);
+    if (encodedData) {
+        CFRelease(encodedData);
+    }
+
+    if (encodedSize > 0) {
+        native_heap_sub(encodedSize);
+    }
+
     native_heap_add((s32)pixelBytes);
 
     spin_unlock(&g_image_decode_lock);
@@ -2794,39 +2842,42 @@ void j2me_render_stop(void) {
 void j2me_render_cleanup(void) {
 
     // g_render_stopped must already be set (via j2me_render_stop).
+    // Two passes free both generations of dead shells.
     process_dead_shells();
     process_dead_shells();
 
+    // Force-release all still-live RenderContexts.
     spin_lock(&g_track_lock);
 
-    RenderContext *rc = g_live_rc_head;
-    g_live_rc_head = NULL;
-    while (rc) {
-        RenderContext *next = rc->next_live;
-        rc->next_live = NULL;
+    int rc_count = g_live_rc_count;
+
+    for (int i = 0; i < g_live_rc_count; i++) {
+
+        RenderContext *rc = g_live_rc[i];
 
         if (rc->ctx) {
             CGContextRelease(rc->ctx);
             rc->ctx = NULL;
         }
 
-        if (rc->font) {
-            CFRelease(rc->font);
-            rc->font = NULL;
+        CTFontRef font = rc->font;
+        rc->font = NULL;
+
+        if (font) {
+            CFRelease(font);
         }
 
-        int pixels = rc->ownsPixels ? rc->width * rc->height * 4 : 0;
-        if (pixels > 0) native_heap_sub(pixels);
-        rc->ownsPixels = 0;
         free(rc);
-        rc = next;
     }
 
-    RenderImage *img = g_live_img_head;
-    g_live_img_head = NULL;
-    while (img) {
-        RenderImage *next = img->next_live;
-        img->next_live = NULL;
+    g_live_rc_count = 0;
+
+    // Force-release all still-live RenderImages.
+    int img_count = g_live_img_count;
+
+    for (int i = 0; i < g_live_img_count; i++) {
+
+        RenderImage *img = g_live_img[i];
 
         if (img->encodedData) {
             CFRelease(img->encodedData);
@@ -2838,31 +2889,79 @@ void j2me_render_cleanup(void) {
             img->ctx = NULL;
         }
 
-        int encodedSize = img->encodedSize;
-        int pixels = (img->ctx != NULL)
-            ? img->width * img->height * 4
-            : 0;
-        img->encodedSize = 0;
-
-        if (encodedSize > 0) native_heap_sub(encodedSize);
-        if (pixels > 0) native_heap_sub(pixels);
         free(img);
-        img = next;
     }
+
+    g_live_img_count = 0;
 
     spin_unlock(&g_track_lock);
 
-    atomic_store_explicit(&g_dead_rc_gen0, NULL, memory_order_relaxed);
+    // Clear dead queues.
+    atomic_store_explicit(
+        &g_dead_rc_gen0,
+        NULL,
+        memory_order_relaxed
+    );
+
     g_dead_rc_gen1 = NULL;
-    atomic_store_explicit(&g_dead_img_gen0, NULL, memory_order_relaxed);
+
+    atomic_store_explicit(
+        &g_dead_img_gen0,
+        NULL,
+        memory_order_relaxed
+    );
+
     g_dead_img_gen1 = NULL;
 
-    if (g_colorSpace) {
-        CGColorSpaceRelease(g_colorSpace);
-        g_colorSpace = NULL;
-    }
+    // Reset native heap counter.
+    __atomic_store_n(
+        &g_native_extra_heap,
+        0,
+        __ATOMIC_RELAXED
+    );
 
-    g_active_render_jvm = NULL;
+    // Reset FPS timing for the next game session.
+    // The controller sets FPS to unlimited after cleanup.
+    atomic_store_explicit(
+        &g_frame_interval_ticks,
+        0,
+        memory_order_relaxed
+    );
+
+    atomic_store_explicit(
+        &g_last_frame_ticks,
+        0,
+        memory_order_relaxed
+    );
+
+    // Clear callbacks before a new session registers its callbacks.
     g_flush_callback = NULL;
     g_flush_ready_callback = NULL;
+    g_active_render_jvm = NULL;
+
+    // Stop haptic engine.
+    if (@available(iOS 13.0, *)) {
+
+        if (g_hapticPlayer) {
+
+            NSError *err = nil;
+
+            [g_hapticPlayer stopAtTime:0 error:&err];
+            g_hapticPlayer = nil;
+        }
+
+        if (g_hapticEngine) {
+
+            [g_hapticEngine stopWithCompletionHandler:nil];
+            g_hapticEngine = nil;
+        }
+    }
+
+    g_render_stopped = 0;
+
+    printf(
+        "[J2ME Render] Cleanup: %d contexts, %d images released\n",
+        rc_count,
+        img_count
+    );
 }
