@@ -23,6 +23,7 @@
 #include <stdio.h>
 #include <stdatomic.h>
 #include <stdint.h>
+#include <pthread.h>
 
 // ============================================================
 // Internal structures
@@ -52,6 +53,7 @@ typedef struct RenderImage {
     int isMutable;
     _Atomic int32_t refcount;
     struct RenderImage *next_dead;
+    struct RenderImage *next_live;
 } RenderImage;
 
 static j2me_flush_callback g_flush_callback = NULL;
@@ -68,68 +70,65 @@ static _Atomic uint64_t g_last_frame_ticks = 0;
 // check this and return NULL, so zombie threads can't touch freed resources.
 static volatile int g_render_stopped = 0;
 
-// Global tracking arrays for forced cleanup between game sessions.
-// Protected by g_track_lock. Entries are added on create, removed on release.
-#define TRACK_MAX 8192
-
-static RenderContext *g_live_rc[TRACK_MAX];
-static int g_live_rc_count = 0;
-
-static RenderImage *g_live_img[TRACK_MAX];
-static int g_live_img_count = 0;
+// Dynamic tracking lists for forced cleanup between game sessions.
+// Protected by g_track_lock. There is deliberately no fixed image-count cap.
+static RenderContext *g_live_rc_head = NULL;
+static RenderImage *g_live_img_head = NULL;
 
 static spinlock_t g_track_lock = {0, 0, 0};
 
-// Serialize ImageIO decode/create of bitmap contexts. This prevents two VM
-// threads from decoding the same large PNG concurrently and keeps the
-// RenderImage state transition (encodedData -> ctx) atomic at this level.
-static spinlock_t g_image_decode_lock = {0, 0, 0};
-
 static void track_rc(RenderContext *rc) {
+    if (!rc) return;
+
     spin_lock(&g_track_lock);
-
-    if (g_live_rc_count < TRACK_MAX) {
-        g_live_rc[g_live_rc_count++] = rc;
-    }
-
+    rc->next_dead = g_live_rc_head;
+    g_live_rc_head = rc;
     spin_unlock(&g_track_lock);
 }
 
 static void untrack_rc(RenderContext *rc) {
-    spin_lock(&g_track_lock);
+    if (!rc) return;
 
-    for (int i = 0; i < g_live_rc_count; i++) {
-        if (g_live_rc[i] == rc) {
-            g_live_rc[i] = g_live_rc[--g_live_rc_count];
+    spin_lock(&g_track_lock);
+    RenderContext **p = &g_live_rc_head;
+    while (*p) {
+        if (*p == rc) {
+            *p = rc->next_dead;
             break;
         }
+        p = &(*p)->next_dead;
     }
-
     spin_unlock(&g_track_lock);
 }
 
 static void track_img(RenderImage *img) {
+    if (!img) return;
+
     spin_lock(&g_track_lock);
-
-    if (g_live_img_count < TRACK_MAX) {
-        g_live_img[g_live_img_count++] = img;
-    }
-
+    img->next_live = g_live_img_head;
+    g_live_img_head = img;
     spin_unlock(&g_track_lock);
 }
 
 static void untrack_img(RenderImage *img) {
-    spin_lock(&g_track_lock);
+    if (!img) return;
 
-    for (int i = 0; i < g_live_img_count; i++) {
-        if (g_live_img[i] == img) {
-            g_live_img[i] = g_live_img[--g_live_img_count];
+    spin_lock(&g_track_lock);
+    RenderImage **p = &g_live_img_head;
+    while (*p) {
+        if (*p == img) {
+            *p = img->next_live;
             break;
         }
+        p = &(*p)->next_live;
     }
-
     spin_unlock(&g_track_lock);
 }
+
+// ImageIO/CGContext image creation is not allowed to race on the same
+// RenderImage. Serializing the decode path also prevents duplicate bitmap
+// allocation when several VM/render threads request the same icon together.
+static pthread_mutex_t g_image_decode_lock = PTHREAD_MUTEX_INITIALIZER;
 
 // ============================================================
 // Native memory counter — visible to MiniJVM GC via gc_sum_heap()
@@ -322,25 +321,44 @@ static inline RenderImage *img_acquire(s64 handle) {
 
     RenderImage *img = (RenderImage *)(intptr_t)handle;
 
+    // Hold the live-image lock while taking the reference. A release that
+    // reaches refcount==0 must take the same lock before freeing the object,
+    // so there is no window where this acquire can touch freed memory.
+    spin_lock(&g_track_lock);
+
+    int live = 0;
+    for (RenderImage *p = g_live_img_head; p; p = p->next_live) {
+        if (p == img) {
+            live = 1;
+            break;
+        }
+    }
+
+    if (!live) {
+        spin_unlock(&g_track_lock);
+        return NULL;
+    }
+
     int32_t old = atomic_load_explicit(
         &img->refcount,
         memory_order_relaxed
     );
 
-    do {
-        if (old <= 0) {
-            return NULL;
+    while (old > 0) {
+        if (atomic_compare_exchange_weak_explicit(
+            &img->refcount,
+            &old,
+            old + 1,
+            memory_order_acquire,
+            memory_order_relaxed
+        )) {
+            spin_unlock(&g_track_lock);
+            return img;
         }
+    }
 
-    } while (!atomic_compare_exchange_weak_explicit(
-        &img->refcount,
-        &old,
-        old + 1,
-        memory_order_acquire,
-        memory_order_relaxed
-    ));
-
-    return img;
+    spin_unlock(&g_track_lock);
+    return NULL;
 }
 
 static inline void img_release(RenderImage *img) {
@@ -786,15 +804,15 @@ static int ensureImageDecoded(RenderImage *img) {
         return 0;
     }
 
-    spin_lock(&g_image_decode_lock);
+    pthread_mutex_lock(&g_image_decode_lock);
 
     if (img->ctx) {
-        spin_unlock(&g_image_decode_lock);
+        pthread_mutex_unlock(&g_image_decode_lock);
         return 1;
     }
 
     if (!img->encodedData) {
-        spin_unlock(&g_image_decode_lock);
+        pthread_mutex_unlock(&g_image_decode_lock);
         return 0;
     }
 
@@ -804,7 +822,7 @@ static int ensureImageDecoded(RenderImage *img) {
     );
 
     if (!source) {
-        spin_unlock(&g_image_decode_lock);
+        pthread_mutex_unlock(&g_image_decode_lock);
         return 0;
     }
 
@@ -817,68 +835,52 @@ static int ensureImageDecoded(RenderImage *img) {
     CFRelease(source);
 
     if (!cgImage) {
-        spin_unlock(&g_image_decode_lock);
+        pthread_mutex_unlock(&g_image_decode_lock);
         return 0;
     }
 
-    size_t decodedWidth = CGImageGetWidth(cgImage);
-    size_t decodedHeight = CGImageGetHeight(cgImage);
+    int decodedWidth = (int)CGImageGetWidth(cgImage);
+    int decodedHeight = (int)CGImageGetHeight(cgImage);
 
-    // Reject impossible bitmap sizes before converting size_t to int or
-    // calculating bytes-per-row/native heap accounting.
-    if (decodedWidth == 0 || decodedHeight == 0 ||
-        decodedWidth > INT_MAX || decodedHeight > INT_MAX ||
-        decodedWidth > (SIZE_MAX / 4) ||
-        decodedHeight > (SIZE_MAX / (decodedWidth * 4))) {
-        CGImageRelease(cgImage);
-        spin_unlock(&g_image_decode_lock);
-        return 0;
-    }
-
-    size_t pixelBytes = decodedWidth * decodedHeight * 4;
-    if (pixelBytes > INT_MAX) {
-        CGImageRelease(cgImage);
-        spin_unlock(&g_image_decode_lock);
-        return 0;
+    if (decodedWidth > 0 && decodedHeight > 0) {
+        img->width = decodedWidth;
+        img->height = decodedHeight;
     }
 
     CGColorSpaceRef cs = getColorSpace();
 
-    CGContextRef ctx = CGBitmapContextCreate(
+    img->ctx = CGBitmapContextCreate(
         NULL,
-        decodedWidth,
-        decodedHeight,
+        img->width,
+        img->height,
         8,
-        decodedWidth * 4,
+        img->width * 4,
         cs,
         kCGImageAlphaPremultipliedFirst |
         kCGBitmapByteOrder32Little
     );
 
-    if (!ctx) {
+    if (!img->ctx) {
         CGImageRelease(cgImage);
-        spin_unlock(&g_image_decode_lock);
+        pthread_mutex_unlock(&g_image_decode_lock);
         return 0;
     }
 
     CGContextClearRect(
-        ctx,
-        CGRectMake(0, 0, (CGFloat)decodedWidth, (CGFloat)decodedHeight)
+        img->ctx,
+        CGRectMake(0, 0, img->width, img->height)
     );
 
     CGContextDrawImage(
-        ctx,
-        CGRectMake(0, 0, (CGFloat)decodedWidth, (CGFloat)decodedHeight),
+        img->ctx,
+        CGRectMake(0, 0, img->width, img->height),
         cgImage
     );
 
     CGImageRelease(cgImage);
 
-    img->width = (int)decodedWidth;
-    img->height = (int)decodedHeight;
-    img->ctx = ctx;
-
-    // Release compressed storage only after the decoded bitmap is valid.
+    // Release compressed storage once the bitmap exists. The heap counter is
+    // updated at the same moment so MiniJVM sees the real native footprint.
     CFDataRef encodedData = img->encodedData;
     int encodedSize = img->encodedSize;
 
@@ -893,9 +895,9 @@ static int ensureImageDecoded(RenderImage *img) {
         native_heap_sub(encodedSize);
     }
 
-    native_heap_add((s32)pixelBytes);
+    native_heap_add(img->width * img->height * 4);
 
-    spin_unlock(&g_image_decode_lock);
+    pthread_mutex_unlock(&g_image_decode_lock);
     return 1;
 }
 
@@ -2849,11 +2851,11 @@ void j2me_render_cleanup(void) {
     // Force-release all still-live RenderContexts.
     spin_lock(&g_track_lock);
 
-    int rc_count = g_live_rc_count;
+    RenderContext *rc = g_live_rc_head;
+    g_live_rc_head = NULL;
 
-    for (int i = 0; i < g_live_rc_count; i++) {
-
-        RenderContext *rc = g_live_rc[i];
+    while (rc) {
+        RenderContext *next = rc->next_dead;
 
         if (rc->ctx) {
             CGContextRelease(rc->ctx);
@@ -2868,16 +2870,16 @@ void j2me_render_cleanup(void) {
         }
 
         free(rc);
+        rc = next;
     }
 
-    g_live_rc_count = 0;
+    // Force-release all still-live RenderImages. There is no 8192-image
+    // ceiling, so a large item catalogue is fully represented here.
+    RenderImage *img = g_live_img_head;
+    g_live_img_head = NULL;
 
-    // Force-release all still-live RenderImages.
-    int img_count = g_live_img_count;
-
-    for (int i = 0; i < g_live_img_count; i++) {
-
-        RenderImage *img = g_live_img[i];
+    while (img) {
+        RenderImage *next = img->next_live;
 
         if (img->encodedData) {
             CFRelease(img->encodedData);
@@ -2890,9 +2892,8 @@ void j2me_render_cleanup(void) {
         }
 
         free(img);
+        img = next;
     }
-
-    g_live_img_count = 0;
 
     spin_unlock(&g_track_lock);
 
