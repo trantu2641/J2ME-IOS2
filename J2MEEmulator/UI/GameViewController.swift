@@ -1629,7 +1629,12 @@ final class GameViewController: UIViewController {
     // MARK: - Keypad
 
     @objc private func toggleKeypad() {
-        guard !keyboardIsVisible else { return }
+        if keyboardInput.isFirstResponder || keyboardIsVisible {
+            hideSystemKeyboard()
+            keyboardIsVisible = false
+            setKeypadVisible(true)
+            return
+        }
         setKeypadVisible(keypadView.isHidden)
     }
 
@@ -1713,10 +1718,15 @@ final class GameViewController: UIViewController {
         duration: TimeInterval = 0.18,
         animationOptions: UIView.AnimationOptions = [.beginFromCurrentState]
     ) {
-        let shouldShow = visible && !keyboardIsVisible && !userRequestedExit
+        let shouldShow = visible && !keyboardIsVisible && !userRequestedExit && isCanvasScreenVisible
         keypadView.isHidden = !shouldShow
-        keypadHeightConstraint.isActive = shouldShow
-        keypadCollapsedConstraint.isActive = !shouldShow
+        if shouldShow {
+            keypadCollapsedConstraint.isActive = false
+            keypadHeightConstraint.isActive = true
+        } else {
+            keypadHeightConstraint.isActive = false
+            keypadCollapsedConstraint.isActive = true
+        }
         toggleKeypadButton.tintColor = uiPrimaryTextColor
 
         let changes = { self.view.layoutIfNeeded() }
@@ -1774,23 +1784,23 @@ final class GameViewController: UIViewController {
     }
 
     func showFormView() {
+        hideSystemKeyboard()
+        keyboardIsVisible = false
         formView.buildFromNativeData()
         formView.isHidden = false
         emulatorView.isHidden = true
-        keypadView.isHidden = true
-        keypadHeightConstraint.isActive = false
-        keypadCollapsedConstraint.isActive = true
         listView.isHidden = true
+        setKeypadVisible(false, duration: 0)
     }
 
     func showListView() {
+        hideSystemKeyboard()
+        keyboardIsVisible = false
         listView.buildFromNativeData()
         listView.isHidden = false
         emulatorView.isHidden = true
-        keypadView.isHidden = true
-        keypadHeightConstraint.isActive = false
-        keypadCollapsedConstraint.isActive = true
         formView.isHidden = true
+        setKeypadVisible(false, duration: 0)
     }
 
     // MARK: - Alert
@@ -1965,7 +1975,8 @@ let gameUICallback: @convention(c) (Int32, UnsafePointer<CChar>?) -> Void = { ac
         guard let controller = activeGameViewController else { return }
         switch action {
         case Int32(J2ME_UI_ACTION_SHOW_CANVAS): controller.showCanvasView()
-        case Int32(J2ME_UI_ACTION_SHOW_FORM): controller.showFormView()
+        case Int32(J2ME_UI_ACTION_SHOW_FORM),
+             Int32(J2ME_UI_ACTION_SHOW_TEXTBOX): controller.showFormView()
         case Int32(J2ME_UI_ACTION_SHOW_LIST): controller.showListView()
         case Int32(J2ME_UI_ACTION_SHOW_ALERT): controller.showAlert()
         default: break
