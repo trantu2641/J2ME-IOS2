@@ -23,7 +23,6 @@
 #include <stdio.h>
 #include <stdatomic.h>
 #include <stdint.h>
-#include <pthread.h>
 
 // ============================================================
 // Internal structures
@@ -53,7 +52,6 @@ typedef struct RenderImage {
     int isMutable;
     _Atomic int32_t refcount;
     struct RenderImage *next_dead;
-    struct RenderImage *next_live;
 } RenderImage;
 
 static j2me_flush_callback g_flush_callback = NULL;
@@ -70,16 +68,22 @@ static _Atomic uint64_t g_last_frame_ticks = 0;
 // check this and return NULL, so zombie threads can't touch freed resources.
 static volatile int g_render_stopped = 0;
 
-// Dynamic tracking lists for forced cleanup between game sessions.
-// Protected by g_track_lock. There is deliberately no fixed image-count cap.
+// Global live-object tracking for forced cleanup between game sessions.
+// Linked lists remove the artificial 8192-object ceiling.
 static RenderContext *g_live_rc_head = NULL;
 static RenderImage *g_live_img_head = NULL;
 
 static spinlock_t g_track_lock = {0, 0, 0};
 
-static void track_rc(RenderContext *rc) {
-    if (!rc) return;
+// ImageIO/CoreGraphics decoding changes RenderImage state. Serialize it so
+// two concurrent draw paths cannot decode/release the same native image.
+static spinlock_t g_image_decode_lock = {0, 0, 0};
 
+// ImageIO/CoreGraphics decoding changes RenderImage state. Serialize it so
+// two concurrent draw paths cannot decode/release the same native image.
+static spinlock_t g_image_decode_lock = {0, 0, 0};
+
+static void track_rc(RenderContext *rc) {
     spin_lock(&g_track_lock);
     rc->next_dead = g_live_rc_head;
     g_live_rc_head = rc;
@@ -87,9 +91,8 @@ static void track_rc(RenderContext *rc) {
 }
 
 static void untrack_rc(RenderContext *rc) {
-    if (!rc) return;
-
     spin_lock(&g_track_lock);
+
     RenderContext **p = &g_live_rc_head;
     while (*p) {
         if (*p == rc) {
@@ -98,37 +101,31 @@ static void untrack_rc(RenderContext *rc) {
         }
         p = &(*p)->next_dead;
     }
+
     spin_unlock(&g_track_lock);
 }
 
 static void track_img(RenderImage *img) {
-    if (!img) return;
-
     spin_lock(&g_track_lock);
-    img->next_live = g_live_img_head;
+    img->next_dead = g_live_img_head;
     g_live_img_head = img;
     spin_unlock(&g_track_lock);
 }
 
 static void untrack_img(RenderImage *img) {
-    if (!img) return;
-
     spin_lock(&g_track_lock);
+
     RenderImage **p = &g_live_img_head;
     while (*p) {
         if (*p == img) {
-            *p = img->next_live;
+            *p = img->next_dead;
             break;
         }
-        p = &(*p)->next_live;
+        p = &(*p)->next_dead;
     }
+
     spin_unlock(&g_track_lock);
 }
-
-// ImageIO/CGContext image creation is not allowed to race on the same
-// RenderImage. Serializing the decode path also prevents duplicate bitmap
-// allocation when several VM/render threads request the same icon together.
-static pthread_mutex_t g_image_decode_lock = PTHREAD_MUTEX_INITIALIZER;
 
 // ============================================================
 // Native memory counter — visible to MiniJVM GC via gc_sum_heap()
@@ -245,25 +242,41 @@ static inline RenderContext *rc_acquire(s64 handle) {
 
     RenderContext *rc = (RenderContext *)(intptr_t)handle;
 
+    spin_lock(&g_track_lock);
+
+    int found = 0;
+    for (RenderContext *p = g_live_rc_head; p; p = p->next_dead) {
+        if (p == rc) {
+            found = 1;
+            break;
+        }
+    }
+
+    if (!found) {
+        spin_unlock(&g_track_lock);
+        return NULL;
+    }
+
     int32_t old = atomic_load_explicit(
         &rc->refcount,
         memory_order_relaxed
     );
 
-    do {
-        if (old <= 0) {
-            return NULL;
+    while (old > 0) {
+        if (atomic_compare_exchange_weak_explicit(
+            &rc->refcount,
+            &old,
+            old + 1,
+            memory_order_acquire,
+            memory_order_relaxed
+        )) {
+            spin_unlock(&g_track_lock);
+            return rc;
         }
+    }
 
-    } while (!atomic_compare_exchange_weak_explicit(
-        &rc->refcount,
-        &old,
-        old + 1,
-        memory_order_acquire,
-        memory_order_relaxed
-    ));
-
-    return rc;
+    spin_unlock(&g_track_lock);
+    return NULL;
 }
 
 static inline void rc_release(RenderContext *rc) {
@@ -321,20 +334,17 @@ static inline RenderImage *img_acquire(s64 handle) {
 
     RenderImage *img = (RenderImage *)(intptr_t)handle;
 
-    // Hold the live-image lock while taking the reference. A release that
-    // reaches refcount==0 must take the same lock before freeing the object,
-    // so there is no window where this acquire can touch freed memory.
     spin_lock(&g_track_lock);
 
-    int live = 0;
-    for (RenderImage *p = g_live_img_head; p; p = p->next_live) {
+    int found = 0;
+    for (RenderImage *p = g_live_img_head; p; p = p->next_dead) {
         if (p == img) {
-            live = 1;
+            found = 1;
             break;
         }
     }
 
-    if (!live) {
+    if (!found) {
         spin_unlock(&g_track_lock);
         return NULL;
     }
@@ -804,15 +814,15 @@ static int ensureImageDecoded(RenderImage *img) {
         return 0;
     }
 
-    pthread_mutex_lock(&g_image_decode_lock);
+    spin_lock(&g_image_decode_lock);
 
     if (img->ctx) {
-        pthread_mutex_unlock(&g_image_decode_lock);
+        spin_unlock(&g_image_decode_lock);
         return 1;
     }
 
     if (!img->encodedData) {
-        pthread_mutex_unlock(&g_image_decode_lock);
+        spin_unlock(&g_image_decode_lock);
         return 0;
     }
 
@@ -822,7 +832,7 @@ static int ensureImageDecoded(RenderImage *img) {
     );
 
     if (!source) {
-        pthread_mutex_unlock(&g_image_decode_lock);
+        spin_unlock(&g_image_decode_lock);
         return 0;
     }
 
@@ -835,7 +845,7 @@ static int ensureImageDecoded(RenderImage *img) {
     CFRelease(source);
 
     if (!cgImage) {
-        pthread_mutex_unlock(&g_image_decode_lock);
+        spin_unlock(&g_image_decode_lock);
         return 0;
     }
 
@@ -862,7 +872,6 @@ static int ensureImageDecoded(RenderImage *img) {
 
     if (!img->ctx) {
         CGImageRelease(cgImage);
-        pthread_mutex_unlock(&g_image_decode_lock);
         return 0;
     }
 
@@ -897,7 +906,7 @@ static int ensureImageDecoded(RenderImage *img) {
 
     native_heap_add(img->width * img->height * 4);
 
-    pthread_mutex_unlock(&g_image_decode_lock);
+    spin_unlock(&g_image_decode_lock);
     return 1;
 }
 
@@ -2852,7 +2861,6 @@ void j2me_render_cleanup(void) {
     spin_lock(&g_track_lock);
 
     RenderContext *rc = g_live_rc_head;
-    g_live_rc_head = NULL;
 
     while (rc) {
         RenderContext *next = rc->next_dead;
@@ -2873,13 +2881,13 @@ void j2me_render_cleanup(void) {
         rc = next;
     }
 
-    // Force-release all still-live RenderImages. There is no 8192-image
-    // ceiling, so a large item catalogue is fully represented here.
+    g_live_rc_head = NULL;
+
+    // Force-release all still-live RenderImages.
     RenderImage *img = g_live_img_head;
-    g_live_img_head = NULL;
 
     while (img) {
-        RenderImage *next = img->next_live;
+        RenderImage *next = img->next_dead;
 
         if (img->encodedData) {
             CFRelease(img->encodedData);
@@ -2894,6 +2902,8 @@ void j2me_render_cleanup(void) {
         free(img);
         img = next;
     }
+
+    g_live_img_head = NULL;
 
     spin_unlock(&g_track_lock);
 
