@@ -486,6 +486,61 @@ static s32 proxy_handshake_http(mbedtls_net_context *ctx,
     return -1;
 }
 
+s32 org_mini_net_SocketNative_open0(Runtime *runtime, JClass *clazz) {
+    Instance *vmarr = jarray_create_by_type_index(runtime, sizeof(VmSock), DATATYPE_BYTE);
+    if (vmarr) {
+        VmSock *vmsock = (VmSock *) vmarr->arr_body;
+        memset(vmsock, 0, sizeof(VmSock));
+        mbedtls_net_init(&vmsock->contex);
+    }
+    push_ref(runtime->stack, vmarr);
+#if _JVM_DEBUG_LOG_LEVEL > 5
+    invoke_deepth(runtime);
+    jvm_printf("org_mini_net_SocketNative_open0  \n");
+#endif
+    return 0;
+}
+
+s32 org_mini_net_SocketNative_bind0(Runtime *runtime, JClass *clazz) {
+    RuntimeStack *stack = runtime->stack;
+    Instance *vmarr = localvar_getRefer(runtime->localvar, 0);
+    Instance *host = localvar_getRefer(runtime->localvar, 1);
+    Instance *port = localvar_getRefer(runtime->localvar, 2);
+    s32 proto = localvar_getInt(runtime->localvar, 3);
+
+    s32 ret = -1;
+    if (vmarr && port) {
+        VmSock *vmsock = (VmSock *) vmarr->arr_body;
+        mbedtls_net_context *ctx = &vmsock->contex;
+
+        const char *bind_ip = NULL;
+        if (host && host->arr_length > 0 && ((const char *) host->arr_body)[0] != '\0') {
+            s32 hostlen = host->arr_length;
+            if (hostlen >= (s32) sizeof(vmsock->hostname)) {
+                hostlen = (s32) sizeof(vmsock->hostname) - 1;
+            }
+            memset(vmsock->hostname, 0, sizeof(vmsock->hostname));
+            memcpy(vmsock->hostname, host->arr_body, hostlen);
+            bind_ip = vmsock->hostname;
+        }
+
+        s32 portlen = port->arr_length;
+        if (portlen >= (s32) sizeof(vmsock->hostport)) {
+            portlen = (s32) sizeof(vmsock->hostport) - 1;
+        }
+        memset(vmsock->hostport, 0, sizeof(vmsock->hostport));
+        memcpy(vmsock->hostport, port->arr_body, portlen);
+
+        ret = mbedtls_net_bind(ctx, bind_ip, vmsock->hostport, proto);
+    }
+    push_int(stack, ret < 0 ? -1 : 0);
+#if _JVM_DEBUG_LOG_LEVEL > 5
+    invoke_deepth(runtime);
+    jvm_printf("org_mini_net_SocketNative_bind0  \n");
+#endif
+    return 0;
+}
+
 s32 org_mini_net_SocketNative_connect0(Runtime *runtime, JClass *clazz) {
     RuntimeStack *stack = runtime->stack;
     Instance *vmarr = localvar_getRefer(runtime->localvar, 0);
@@ -607,55 +662,6 @@ s32 org_mini_net_SocketNative_accept0(Runtime *runtime, JClass *clazz) {
     invoke_deepth(runtime);
     jvm_printf("org_mini_net_SocketNative_accept0  \n");
 #endif
-    return 0;
-}
-
-
-s32 org_mini_net_SocketNative_connect0(Runtime *runtime, JClass *clazz) {
-    RuntimeStack *stack = runtime->stack;
-    Instance *vmarr = localvar_getRefer(runtime->localvar, 0);
-    Instance *host = localvar_getRefer(runtime->localvar, 1);
-    Instance *port = localvar_getRefer(runtime->localvar, 2);
-    s32 proto = localvar_getInt(runtime->localvar, 3);
-
-    s32 ret = -1;
-    if (vmarr && host && port) {
-        VmSock *vmsock = (VmSock *) vmarr->arr_body;
-        mbedtls_net_context *ctx = &vmsock->contex;
-
-        s32 hostlen = host->arr_length;
-        if (hostlen > sizeof(vmsock->hostname)) {
-            hostlen = sizeof(vmsock->hostname);
-        }
-        memcpy(&vmsock->hostname, host->arr_body, hostlen);//copy with 0
-        memcpy(&vmsock->hostport, port->arr_body, port->arr_length);
-        jthread_block_enter(runtime);
-        ret = mbedtls_net_connect(ctx, host->arr_body, port->arr_body, proto);
-
-        /*
-         * Keep TCP reads interruptible and avoid mbedTLS/net_sockets.c
-         * blocking inside select().  Java's InputStream.read() still gets
-         * blocking semantics because sock_recv() below polls WANT_READ.
-         *
-         * This is especially important for J2ME games which keep one socket
-         * alive for gameplay while issuing additional HTTP/icon requests.
-         */
-        if (ret >= 0) {
-            s32 nb_ret = mbedtls_net_set_nonblock(ctx);
-            if (nb_ret < 0) {
-                ret = nb_ret;
-            } else {
-                vmsock->non_block = 1;
-            }
-        }
-
-        jthread_block_exit(runtime);
-#if _JVM_DEBUG_LOG_LEVEL > 5
-        invoke_deepth(runtime);
-        jvm_printf("org_mini_net_SocketNative_open0  \n");
-#endif
-    }
-    push_int(stack, ret < 0 ? -1 : 0);
     return 0;
 }
 
