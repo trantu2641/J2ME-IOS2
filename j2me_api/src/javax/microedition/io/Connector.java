@@ -300,7 +300,8 @@ public final class Connector {
 
                 return new ConnectionInputStream(
                     input,
-                    this
+                    this,
+                    HTTP_REQUEST_SLOTS
                 );
 
             } catch (IOException e) {
