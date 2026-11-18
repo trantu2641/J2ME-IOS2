@@ -21,6 +21,12 @@ import javax.microedition.io.Connector;
  */
 public class Image {
 
+    // Icon fallback logging intentionally disabled.
+    // Failed optional icons must not generate file/console I/O.
+    private static void logFallback(String name, String reason) {
+        // no-op
+    }
+
     public long nativeHandle;
 
     private int width;
