@@ -224,10 +224,7 @@ class FormView: UIView, UIGestureRecognizerDelegate {
 
     private func setKeyboardInset(_ inset: CGFloat, animated: Bool) {
         keyboardBottomInset = inset
-        let duration =
-            (animated
-             ? (UIView.animationDuration(for: UIResponder.keyboardWillChangeFrameNotification) ?? 0.25)
-             : 0)
+        let duration: TimeInterval = animated ? 0.25 : 0
 
         let changes = {
             self.scrollView.contentInset.bottom = self.keyboardBottomInset + 12

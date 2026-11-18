@@ -1912,9 +1912,9 @@ final class GameViewController:
         }
 
         alert.addAction(UIAlertAction(title: "Tắt Proxy", style: .destructive) { _ in
-            defaults.set(false, forKey: currentJARProxyEnabledKey)
-            defaults.removeObject(forKey: currentJARProxyHostKey)
-            defaults.removeObject(forKey: currentJARProxyPortKey)
+            defaults.set(false, forKey: self.currentJARProxyEnabledKey)
+            defaults.removeObject(forKey: self.currentJARProxyHostKey)
+            defaults.removeObject(forKey: self.currentJARProxyPortKey)
             unsetenv("HTTP_PROXY")
             unsetenv("HTTPS_PROXY")
             unsetenv("ALL_PROXY")
@@ -1928,9 +1928,9 @@ final class GameViewController:
             guard !h.isEmpty, p > 0, p <= 65535 else { return }
 
             let value = "http://\(h):\(p)"
-            defaults.set(true, forKey: currentJARProxyEnabledKey)
-            defaults.set(h, forKey: currentJARProxyHostKey)
-            defaults.set(p, forKey: currentJARProxyPortKey)
+            defaults.set(true, forKey: self.currentJARProxyEnabledKey)
+            defaults.set(h, forKey: self.currentJARProxyHostKey)
+            defaults.set(p, forKey: self.currentJARProxyPortKey)
 
             // Export the conventional proxy variables so networking layers
             // that honor process proxy environment variables use the same
