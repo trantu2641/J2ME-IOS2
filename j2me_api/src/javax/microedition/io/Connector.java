@@ -113,7 +113,7 @@ public final class Connector {
             boolean slotAcquired = false;
 
             try {
-                HTTP_REQUEST_SLOTS.acquire();
+                HTTP_REQUEST_SLOTS.acquireUninterruptibly();
                 slotAcquired = true;
 
                 connection = open(name, mode, false);
