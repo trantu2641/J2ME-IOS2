@@ -9,6 +9,119 @@
 
 import UIKit
 import UniformTypeIdentifiers
+import AVFoundation
+
+private final class J2MEBackgroundKeeper {
+    static let shared = J2MEBackgroundKeeper()
+
+    private var audioPlayer: AVAudioPlayer?
+    private var isKeepingAlive = false
+
+    private init() {}
+
+    func setEnabled(_ enabled: Bool) {
+        if enabled {
+            start()
+        } else {
+            stop()
+        }
+    }
+
+    func start() {
+        guard !isKeepingAlive else {
+            if audioPlayer?.isPlaying == false {
+                audioPlayer?.play()
+            }
+            return
+        }
+
+        do {
+            let session = AVAudioSession.sharedInstance()
+            try session.setCategory(
+                .playback,
+                mode: .default,
+                options: [.mixWithOthers]
+            )
+            try session.setActive(true)
+
+            let wavData = Self.makeSilentWavData()
+            let player = try AVAudioPlayer(data: wavData)
+            player.numberOfLoops = -1
+            player.volume = 0.0
+            player.prepareToPlay()
+            player.play()
+
+            audioPlayer = player
+            isKeepingAlive = true
+
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(handleAudioInterruption(_:)),
+                name: AVAudioSession.interruptionNotification,
+                object: nil
+            )
+        } catch {
+            print("[BackgroundKeeper] Failed to start background audio session: \(error)")
+        }
+    }
+
+    func stop() {
+        NotificationCenter.default.removeObserver(
+            self,
+            name: AVAudioSession.interruptionNotification,
+            object: nil
+        )
+        audioPlayer?.stop()
+        audioPlayer = nil
+        isKeepingAlive = false
+        try? AVAudioSession.sharedInstance().setActive(
+            false,
+            options: [.notifyOthersOnDeactivation]
+        )
+    }
+
+    @objc private func handleAudioInterruption(_ notification: Notification) {
+        guard isKeepingAlive,
+              let info = notification.userInfo,
+              let typeValue = info[AVAudioSessionInterruptionTypeKey] as? UInt,
+              let type = AVAudioSession.InterruptionType(rawValue: typeValue) else {
+            return
+        }
+
+        if type == .ended {
+            try? AVAudioSession.sharedInstance().setActive(true)
+            audioPlayer?.play()
+        }
+    }
+
+    private static func makeSilentWavData() -> Data {
+        let sampleRate: UInt32 = 8000
+        let numChannels: UInt16 = 1
+        let bitsPerSample: UInt16 = 16
+        let numSamples: UInt32 = sampleRate
+        let dataSize: UInt32 = numSamples * UInt32(numChannels) * UInt32(bitsPerSample / 8)
+        let chunkSize: UInt32 = 36 + dataSize
+        let byteRate: UInt32 = sampleRate * UInt32(numChannels) * UInt32(bitsPerSample / 8)
+        let blockAlign: UInt16 = numChannels * (bitsPerSample / 8)
+
+        var data = Data()
+        data.append(contentsOf: "RIFF".utf8)
+        data.append(contentsOf: withUnsafeBytes(of: chunkSize.littleEndian) { Array($0) })
+        data.append(contentsOf: "WAVE".utf8)
+        data.append(contentsOf: "fmt ".utf8)
+        data.append(contentsOf: withUnsafeBytes(of: UInt32(16).littleEndian) { Array($0) })
+        data.append(contentsOf: withUnsafeBytes(of: UInt16(1).littleEndian) { Array($0) })
+        data.append(contentsOf: withUnsafeBytes(of: numChannels.littleEndian) { Array($0) })
+        data.append(contentsOf: withUnsafeBytes(of: sampleRate.littleEndian) { Array($0) })
+        data.append(contentsOf: withUnsafeBytes(of: byteRate.littleEndian) { Array($0) })
+        data.append(contentsOf: withUnsafeBytes(of: blockAlign.littleEndian) { Array($0) })
+        data.append(contentsOf: withUnsafeBytes(of: bitsPerSample.littleEndian) { Array($0) })
+        data.append(contentsOf: "data".utf8)
+        data.append(contentsOf: withUnsafeBytes(of: dataSize.littleEndian) { Array($0) })
+        data.append(Data(count: Int(dataSize)))
+        return data
+    }
+}
 
 private struct J2MERunningSession {
     let id: Int32
@@ -122,6 +235,7 @@ final class GameViewController:
     private var activeSessionIndex = 0
     private var jarPickerOverlay: UIView?
     private var jarPickerPanel: UIView?
+    private var jarPickerTitleLabel: UILabel?
     private var jarPickerTableView: UITableView?
     private var jarPickerItems: [(name: String, path: String, icon: UIImage)] = []
     private var jarPickerMessageLabel: UILabel?
@@ -242,30 +356,16 @@ final class GameViewController:
         )
     }
 
-    private var currentJAROpenStateKey: String {
-        "J2MEJarOpen_\(gameID(forPath: jarPath))"
-    }
-
-    private var currentJARProxyHostKey: String {
-        "J2MEProxyHost_\(gameID(forPath: jarPath))"
-    }
-
-    private var currentJARProxyPortKey: String {
-        "J2MEProxyPort_\(gameID(forPath: jarPath))"
-    }
-
-    private var currentJARProxyEnabledKey: String {
-        "J2MEProxyEnabled_\(gameID(forPath: jarPath))"
-    }
-
     deinit {
-        UserDefaults.standard.set(false, forKey: currentJAROpenStateKey)
 
         alertTimeoutWork?.cancel()
         startupWatchdog?.cancel()
 
         NotificationCenter.default
             .removeObserver(self)
+
+        J2MEBackgroundKeeper.shared.stop()
+        UIApplication.shared.isIdleTimerDisabled = false
 
         setGlobalEmulatorView(nil)
         jvm_bridge_session_destroy_all()
@@ -288,13 +388,6 @@ final class GameViewController:
 
         super.viewDidLoad()
 
-        // Per-JAR open state. The launcher can now show "Đang mở"
-        // without changing the JAR name itself.
-        UserDefaults.standard.set(true, forKey: currentJAROpenStateKey)
-
-        // Apply the proxy saved for this JAR only when this game session starts.
-        applyCurrentJARProxy()
-
         // Only the surrounding emulator UI follows Light/Dark.
         // The JAR framebuffer itself is never recolored.
         view.backgroundColor = UIColor { trait in
@@ -303,9 +396,9 @@ final class GameViewController:
                 : .systemBackground
         }
 
-        if UserDefaults.standard.bool(forKey: "J2MEKeepScreenOn") {
-            UIApplication.shared.isIdleTimerDisabled = true
-        }
+        let keepAlive = UserDefaults.standard.bool(forKey: "J2MEKeepScreenOn")
+        UIApplication.shared.isIdleTimerDisabled = keepAlive
+        J2MEBackgroundKeeper.shared.setEnabled(keepAlive)
 
         emulatorView.canvasWidth =
             canvasWidth
@@ -426,6 +519,33 @@ final class GameViewController:
                 UIResponder.keyboardWillHideNotification,
             object: nil
         )
+
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleAppDidEnterBackground),
+            name: UIApplication.didEnterBackgroundNotification,
+            object: nil
+        )
+
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleAppWillEnterForeground),
+            name: UIApplication.willEnterForegroundNotification,
+            object: nil
+        )
+    }
+
+    @objc private func handleAppDidEnterBackground() {
+        if UserDefaults.standard.bool(forKey: "J2MEKeepScreenOn") {
+            J2MEBackgroundKeeper.shared.start()
+            emulatorView.isHidden = true
+        }
+    }
+
+    @objc private func handleAppWillEnterForeground() {
+        if formView.isHidden && listView.isHidden {
+            emulatorView.isHidden = false
+        }
     }
 
     override func viewDidAppear(
@@ -845,53 +965,32 @@ final class GameViewController:
     private func showJarPickerMessage(_ text: String) {
         jarPickerMessageWork?.cancel()
         jarPickerMessageLabel?.removeFromSuperview()
+        jarPickerMessageLabel = nil
 
-        guard let panel = jarPickerPanel else { return }
+        guard let titleLabel = jarPickerTitleLabel else { return }
 
-        let label = UILabel()
-        label.text = text
-        label.textColor = uiPrimaryTextColor
-        label.font = .systemFont(ofSize: 15, weight: .medium)
-        label.textAlignment = .center
-        label.backgroundColor = uiControlBackgroundColor
-        label.layer.cornerRadius = 10
-        label.layer.masksToBounds = true
-        label.alpha = 0
-        label.translatesAutoresizingMaskIntoConstraints = false
-
-        // Put the "already open" notice just below the tab/header area
-        // instead of at the bottom of the JAR picker.
-        view.addSubview(label)
-
-        NSLayoutConstraint.activate([
-            label.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-            label.topAnchor.constraint(equalTo: headerStack.bottomAnchor, constant: 20),
-            label.leadingAnchor.constraint(greaterThanOrEqualTo: view.leadingAnchor, constant: 20),
-            label.trailingAnchor.constraint(lessThanOrEqualTo: view.trailingAnchor, constant: -20),
-            label.heightAnchor.constraint(equalToConstant: 38)
-        ])
-
-        jarPickerMessageLabel = label
-
-        UIView.animate(withDuration: 0.12) {
-            label.alpha = 1
+        UIView.transition(
+            with: titleLabel,
+            duration: 0.15,
+            options: .transitionCrossDissolve
+        ) {
+            titleLabel.text = text
+            titleLabel.textColor = .systemOrange
         }
 
-        let work = DispatchWorkItem { [weak self, weak label] in
-            guard let self, let label else { return }
+        let work = DispatchWorkItem { [weak self, weak titleLabel] in
+            guard let self,
+                  let titleLabel,
+                  self.jarPickerTitleLabel === titleLabel else { return }
 
-            UIView.animate(
-                withDuration: 0.15,
-                animations: {
-                    label.alpha = 0
-                },
-                completion: { _ in
-                    label.removeFromSuperview()
-                    if self.jarPickerMessageLabel === label {
-                        self.jarPickerMessageLabel = nil
-                    }
-                }
-            )
+            UIView.transition(
+                with: titleLabel,
+                duration: 0.18,
+                options: .transitionCrossDissolve
+            ) {
+                titleLabel.text = "DANH SÁCH JAR"
+                titleLabel.textColor = self.uiPrimaryTextColor
+            }
         }
 
         jarPickerMessageWork = work
@@ -996,6 +1095,7 @@ final class GameViewController:
 
         jarPickerOverlay = overlay
         jarPickerPanel = panel
+        jarPickerTitleLabel = title
         jarPickerTableView = table
         jarPickerItems.removeAll(keepingCapacity: false)
         table.reloadData()
@@ -1415,20 +1515,11 @@ final class GameViewController:
     }
 
     private func refreshUnderlyingHomeList() {
-        // Notify the live Home controller immediately. viewDidAppear on the
-        // Home controller does not run again while this game screen is shown.
         NotificationCenter.default.post(
             name: Notification.Name("J2MEExternalJARChange"),
             object: nil
         )
 
-        // Keep the existing controller lookup as a fallback.
-        // GameViewController is normally presented directly by
-        // AppsListViewController, but keep this lookup robust in case the
-        // presentation is wrapped by a navigation/tab/presentation
-        // controller.  The JAR picker and the Home list must use the same
-        // files and UserDefaults keys, so every external change made here
-        // must refresh the real Home controller instance.
         var current: UIViewController? = self
 
         while let controller = current {
@@ -1585,20 +1676,16 @@ final class GameViewController:
     }
 
     @objc private func closeJarPicker() {
-        // Closing is intentionally idempotent. This prevents a stale picker
-        // overlay/table from surviving a HỦY tap after a selection.
         guard jarPickerOverlay != nil || jarPickerPanel != nil || jarPickerTableView != nil else {
             return
         }
 
-        // Cancel any temporary duplicate-JAR message.
         jarPickerMessageWork?.cancel()
         jarPickerMessageWork = nil
         jarPickerMessageLabel?.removeFromSuperview()
         jarPickerMessageLabel = nil
+        jarPickerTitleLabel = nil
 
-        // Detach the table before removing the panel so there is no stale
-        // delegate/data-source interaction after the picker is dismissed.
         if let table = jarPickerTableView {
             table.delegate = nil
             table.dataSource = nil
@@ -1640,6 +1727,8 @@ final class GameViewController:
 
             if self.runningSessions.isEmpty {
                 self.userRequestedExit = true
+                J2MEBackgroundKeeper.shared.stop()
+                UIApplication.shared.isIdleTimerDisabled = false
                 self.dismiss(animated: true)
                 return
             }
@@ -1787,6 +1876,10 @@ final class GameViewController:
     @objc private func hideApplicationFromMenu() {
         closeMoreMenu()
 
+        if UserDefaults.standard.bool(forKey: "J2MEKeepScreenOn") {
+            J2MEBackgroundKeeper.shared.start()
+        }
+
         // Same behavior as the IPA: request iOS to suspend the current app.
         // This selector is private and is intentionally used only on the
         // jailbreak/emulator build where the reference IPA uses this behavior.
@@ -1803,6 +1896,7 @@ final class GameViewController:
         let newValue = !UIApplication.shared.isIdleTimerDisabled
         UIApplication.shared.isIdleTimerDisabled = newValue
         UserDefaults.standard.set(newValue, forKey: "J2MEKeepScreenOn")
+        J2MEBackgroundKeeper.shared.setEnabled(newValue)
         closeMoreMenu()
     }
 
@@ -1858,38 +1952,13 @@ final class GameViewController:
         present(alert, animated: true)
     }
 
-
-    private func applyCurrentJARProxy() {
-        let defaults = UserDefaults.standard
-        let enabled = defaults.bool(forKey: currentJARProxyEnabledKey)
-
-        guard enabled else {
-            unsetenv("HTTP_PROXY")
-            unsetenv("HTTPS_PROXY")
-            unsetenv("ALL_PROXY")
-            return
-        }
-
-        let host = defaults.string(forKey: currentJARProxyHostKey) ?? ""
-        let port = defaults.object(forKey: currentJARProxyPortKey) as? Int ?? 0
-
-        guard !host.isEmpty, port > 0, port <= 65535 else {
-            return
-        }
-
-        let value = "http://\(host):\(port)"
-        setenv("HTTP_PROXY", value, 1)
-        setenv("HTTPS_PROXY", value, 1)
-        setenv("ALL_PROXY", value, 1)
-    }
-
     @objc private func showProxyMenu() {
         closeMoreMenu()
 
         let defaults = UserDefaults.standard
-        let host = defaults.string(forKey: currentJARProxyHostKey) ?? ""
-        let port = defaults.object(forKey: currentJARProxyPortKey) as? Int ?? 0
-        let enabled = defaults.bool(forKey: currentJARProxyEnabledKey)
+        let host = defaults.string(forKey: "J2MEProxyHost") ?? ""
+        let port = defaults.object(forKey: "J2MEProxyPort") as? Int ?? 0
+        let enabled = defaults.bool(forKey: "J2MEProxyEnabled")
 
         let alert = UIAlertController(
             title: "Proxy",
@@ -1912,9 +1981,9 @@ final class GameViewController:
         }
 
         alert.addAction(UIAlertAction(title: "Tắt Proxy", style: .destructive) { _ in
-            defaults.set(false, forKey: self.currentJARProxyEnabledKey)
-            defaults.removeObject(forKey: self.currentJARProxyHostKey)
-            defaults.removeObject(forKey: self.currentJARProxyPortKey)
+            defaults.set(false, forKey: "J2MEProxyEnabled")
+            defaults.removeObject(forKey: "J2MEProxyHost")
+            defaults.removeObject(forKey: "J2MEProxyPort")
             unsetenv("HTTP_PROXY")
             unsetenv("HTTPS_PROXY")
             unsetenv("ALL_PROXY")
@@ -1928,9 +1997,9 @@ final class GameViewController:
             guard !h.isEmpty, p > 0, p <= 65535 else { return }
 
             let value = "http://\(h):\(p)"
-            defaults.set(true, forKey: self.currentJARProxyEnabledKey)
-            defaults.set(h, forKey: self.currentJARProxyHostKey)
-            defaults.set(p, forKey: self.currentJARProxyPortKey)
+            defaults.set(true, forKey: "J2MEProxyEnabled")
+            defaults.set(h, forKey: "J2MEProxyHost")
+            defaults.set(p, forKey: "J2MEProxyPort")
 
             // Export the conventional proxy variables so networking layers
             // that honor process proxy environment variables use the same
@@ -2710,16 +2779,6 @@ final class GameViewController:
             "[JVM] Display FPS: \(fpsDescription)"
         )
 
-        //
-        // IMPORTANT:
-        //
-        // Pass 0 for the MiniJVM FPS parameter.
-        //
-        // The Java runtime must NOT be throttled.
-        //
-        // This is what prevents animated GIF / Canvas
-        // code from becoming stuck when 30 FPS is selected.
-        //
         let initResult =
             jvm_bridge_init(
                 resourceRoot,
@@ -2893,6 +2952,9 @@ final class GameViewController:
 
         keypadBottomConstraint.constant =
             -7
+
+        J2MEBackgroundKeeper.shared.stop()
+        UIApplication.shared.isIdleTimerDisabled = false
 
         jvm_bridge_session_destroy_all()
 
@@ -3181,8 +3243,8 @@ extension GameViewController: UITableViewDataSource, UITableViewDelegate, UIDocu
                 .standardizedFileURL
                 .path
 
-        // If this JAR is already running, keep the picker OPEN and only
-        // show a temporary message. This is intentional.
+        // If this JAR is already running, keep the picker OPEN and overwrite
+        // the "DANH SÁCH JAR" header with the temporary message.
         if runningSessions.contains(where: {
             URL(fileURLWithPath: $0.path)
                 .standardizedFileURL
