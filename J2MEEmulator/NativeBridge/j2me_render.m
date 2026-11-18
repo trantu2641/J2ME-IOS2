@@ -81,7 +81,6 @@ static spinlock_t g_image_decode_lock = {0, 0, 0};
 
 // ImageIO/CoreGraphics decoding changes RenderImage state. Serialize it so
 // two concurrent draw paths cannot decode/release the same native image.
-static spinlock_t g_image_decode_lock = {0, 0, 0};
 
 static void track_rc(RenderContext *rc) {
     spin_lock(&g_track_lock);
@@ -2858,6 +2857,9 @@ void j2me_render_cleanup(void) {
     process_dead_shells();
 
     // Force-release all still-live RenderContexts.
+    int rc_count = 0;
+    int img_count = 0;
+
     spin_lock(&g_track_lock);
 
     RenderContext *rc = g_live_rc_head;
@@ -2877,6 +2879,7 @@ void j2me_render_cleanup(void) {
             CFRelease(font);
         }
 
+        rc_count++;
         free(rc);
         rc = next;
     }
@@ -2899,6 +2902,7 @@ void j2me_render_cleanup(void) {
             img->ctx = NULL;
         }
 
+        img_count++;
         free(img);
         img = next;
     }
