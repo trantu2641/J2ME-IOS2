@@ -365,11 +365,12 @@ static void cpu_profiler_copy_java_stack(JavaThreadInfo *thread_info, CPUThreadS
     }
 }
 
-static void cpu_profiler_attach_vm_context(pthread_t native_thread, CPUThreadSample *sample) {
-    if (!g_jvm || !g_jvm->thread_list || !sample) return;
-    spin_lock(&g_jvm->thread_list->spinlock);
-    for (int i = 0; i < g_jvm->thread_list->length; i++) {
-        Runtime *runtime = (Runtime *)arraylist_get_value_unsafe(g_jvm->thread_list, i);
+static int cpu_profiler_attach_from_jvm(MiniJVM *jvm, pthread_t native_thread, CPUThreadSample *sample) {
+    if (!jvm || !jvm->thread_list || !sample) return 0;
+    int found = 0;
+    spin_lock(&jvm->thread_list->spinlock);
+    for (int i = 0; i < jvm->thread_list->length; i++) {
+        Runtime *runtime = (Runtime *)arraylist_get_value_unsafe(jvm->thread_list, i);
         if (!runtime || !runtime->thrd_info) continue;
         JavaThreadInfo *thread_info = runtime->thrd_info;
         int matched = 0;
@@ -389,9 +390,32 @@ static void cpu_profiler_attach_vm_context(pthread_t native_thread, CPUThreadSam
         sample->vm_status = thread_info->thread_status;
         sample->vm_blocking = thread_info->is_blocking;
         cpu_profiler_copy_java_stack(thread_info, sample);
+        found = 1;
         break;
     }
-    spin_unlock(&g_jvm->thread_list->spinlock);
+    spin_unlock(&jvm->thread_list->spinlock);
+    return found;
+}
+
+static void cpu_profiler_attach_vm_context(pthread_t native_thread, CPUThreadSample *sample) {
+    if (!sample) return;
+    if (g_jvm && cpu_profiler_attach_from_jvm(g_jvm, native_thread, sample)) {
+        return;
+    }
+    MiniJVM *session_jvms[J2ME_MAX_SESSIONS] = {0};
+    int count = 0;
+    pthread_mutex_lock(&g_sessions_lock);
+    for (int i = 0; i < J2ME_MAX_SESSIONS; i++) {
+        if (g_sessions[i].used && g_sessions[i].jvm) {
+            session_jvms[count++] = g_sessions[i].jvm;
+        }
+    }
+    pthread_mutex_unlock(&g_sessions_lock);
+    for (int i = 0; i < count; i++) {
+        if (cpu_profiler_attach_from_jvm(session_jvms[i], native_thread, sample)) {
+            return;
+        }
+    }
 }
 
 static void cpu_profiler_resolve_symbol(uint64_t address, char *destination, size_t capacity) {

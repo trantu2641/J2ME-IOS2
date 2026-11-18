@@ -57,6 +57,7 @@ static CGColorSpaceRef g_colorSpace = NULL;
 static _Atomic uint64_t g_frame_interval_ticks = 0;
 static _Atomic uint64_t g_last_frame_ticks = 0;
 static volatile int g_render_stopped = 0;
+static _Atomic int g_background_mode = 0;
 
 static RenderContext *g_live_rc_head = NULL;
 static RenderImage *g_live_img_head = NULL;
@@ -290,6 +291,10 @@ static CGColorSpaceRef getColorSpace(void) {
 
 void j2me_render_set_active_jvm(MiniJVM *jvm) {
     g_active_render_jvm = jvm;
+}
+
+void j2me_render_set_background_mode(int isBackground) {
+    atomic_store_explicit(&g_background_mode, isBackground ? 1 : 0, memory_order_relaxed);
 }
 
 void j2me_render_set_flush_callback(j2me_flush_callback callback) {
@@ -600,6 +605,9 @@ static s32 n_destroyContext(Runtime *runtime, JClass *clazz) {
 static s32 n_flushToScreen(Runtime *runtime, JClass *clazz) {
     process_dead_shells();
 
+    if (atomic_load_explicit(&g_background_mode, memory_order_relaxed)) {
+        return RUNTIME_STATUS_NORMAL;
+    }
     if (g_active_render_jvm && runtime->jvm != g_active_render_jvm) {
         return RUNTIME_STATUS_NORMAL;
     }
@@ -1652,6 +1660,7 @@ void j2me_render_cleanup(void) {
         }
     }
 
+    atomic_store_explicit(&g_background_mode, 0, memory_order_relaxed);
     g_render_stopped = 0;
     printf("[J2ME Render] Cleanup: %d contexts, %d images released\n", rc_count, img_count);
 }
