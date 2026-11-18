@@ -8,6 +8,7 @@ import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.net.URLConnection;
+import java.util.concurrent.Semaphore;
 
 /**
  * J2ME Connector implementation for JarBox.
@@ -28,14 +29,12 @@ public final class Connector {
     private static final int DEFAULT_READ_TIMEOUT = 10000;
     private static final int MAX_HTTP_RETRIES = 1;
 
-    /*
-     * Prevent a large item list from opening hundreds of HTTP connections
-     * simultaneously. This limits only active requests; the total number
-     * of requests remains unlimited.
-     */
-    private static final int MAX_ACTIVE_HTTP_REQUESTS = 6;
-    private static final Object HTTP_REQUEST_LOCK = new Object();
-    private static int activeHttpRequests = 0;
+    // Large item lists can trigger hundreds/thousands of icon requests.
+    // Queue excess requests instead of exhausting sockets/threads.
+    // This limits concurrency, NOT the total number of item IDs.
+    private static final int MAX_ACTIVE_HTTP_REQUESTS = 4;
+    private static final Semaphore HTTP_REQUEST_SLOTS =
+        new Semaphore(MAX_ACTIVE_HTTP_REQUESTS, true);
 
     private Connector() {
     }
@@ -111,8 +110,12 @@ public final class Connector {
 
         for (int attempt = 0; attempt <= MAX_HTTP_RETRIES; attempt++) {
             Connection connection = null;
+            boolean slotAcquired = false;
 
             try {
+                HTTP_REQUEST_SLOTS.acquire();
+                slotAcquired = true;
+
                 connection = open(name, mode, false);
 
                 if (!(connection instanceof InputConnection)) {
@@ -128,7 +131,8 @@ public final class Connector {
 
                 return new ConnectionInputStream(
                     source,
-                    (HTTPConnectionImpl) connection
+                    (HTTPConnectionImpl) connection,
+                    HTTP_REQUEST_SLOTS
                 );
 
             } catch (IOException e) {
@@ -140,6 +144,10 @@ public final class Connector {
                     } catch (IOException ignored) {
                     } catch (RuntimeException ignored) {
                     }
+                }
+
+                if (slotAcquired) {
+                    HTTP_REQUEST_SLOTS.release();
                 }
 
                 if (attempt < MAX_HTTP_RETRIES) {
@@ -154,6 +162,10 @@ public final class Connector {
                     } catch (IOException ignored) {
                     } catch (RuntimeException ignored) {
                     }
+                }
+
+                if (slotAcquired) {
+                    HTTP_REQUEST_SLOTS.release();
                 }
 
                 throw e;
@@ -187,30 +199,6 @@ public final class Connector {
         return ((OutputConnection) connection).openOutputStream();
     }
 
-    private static void acquireHttpRequestSlot() throws IOException {
-        synchronized (HTTP_REQUEST_LOCK) {
-            while (activeHttpRequests >= MAX_ACTIVE_HTTP_REQUESTS) {
-                try {
-                    HTTP_REQUEST_LOCK.wait();
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    throw new IOException("HTTP request interrupted", e);
-                }
-            }
-
-            activeHttpRequests++;
-        }
-    }
-
-    private static void releaseHttpRequestSlot() {
-        synchronized (HTTP_REQUEST_LOCK) {
-            if (activeHttpRequests > 0) {
-                activeHttpRequests--;
-            }
-            HTTP_REQUEST_LOCK.notifyAll();
-        }
-    }
-
     private static final class HTTPConnectionImpl implements HttpConnection {
 
         private final URL url;
@@ -219,7 +207,6 @@ public final class Connector {
 
         private boolean closed;
         private boolean connected;
-        private boolean requestSlotHeld;
         private String requestMethod = GET;
 
         HTTPConnectionImpl(URL url, int mode, boolean timeouts)
@@ -263,22 +250,9 @@ public final class Connector {
             ensureOpen();
 
             if (!connected) {
-                acquireHttpRequestSlot();
-                requestSlotHeld = true;
-
-                try {
-                    connection.setRequestMethod(requestMethod);
-                    connection.connect();
-                    connected = true;
-                } catch (IOException e) {
-                    requestSlotHeld = false;
-                    releaseHttpRequestSlot();
-                    throw e;
-                } catch (RuntimeException e) {
-                    requestSlotHeld = false;
-                    releaseHttpRequestSlot();
-                    throw e;
-                }
+                connection.setRequestMethod(requestMethod);
+                connection.connect();
+                connected = true;
             }
         }
 
@@ -534,15 +508,7 @@ public final class Connector {
         public void close() {
             if (!closed) {
                 closed = true;
-
-                try {
-                    connection.disconnect();
-                } finally {
-                    if (requestSlotHeld) {
-                        requestSlotHeld = false;
-                        releaseHttpRequestSlot();
-                    }
-                }
+                connection.disconnect();
             }
         }
     }
@@ -551,14 +517,17 @@ public final class Connector {
 
         private final InputStream delegate;
         private final HTTPConnectionImpl owner;
+        private final Semaphore requestSlots;
         private boolean closed;
 
         ConnectionInputStream(
             InputStream delegate,
-            HTTPConnectionImpl owner
+            HTTPConnectionImpl owner,
+            Semaphore requestSlots
         ) {
             this.delegate = delegate;
             this.owner = owner;
+            this.requestSlots = requestSlots;
         }
 
         @Override
@@ -628,7 +597,11 @@ public final class Connector {
                 try {
                     delegate.close();
                 } finally {
-                    owner.close();
+                    try {
+                        owner.close();
+                    } finally {
+                        requestSlots.release();
+                    }
                 }
             }
         }
