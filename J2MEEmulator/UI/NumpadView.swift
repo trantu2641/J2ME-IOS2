@@ -1,5 +1,26 @@
 import UIKit
 
+private let J2ME_KEY_UP: Int32         = -1
+private let J2ME_KEY_DOWN: Int32       = -2
+private let J2ME_KEY_LEFT: Int32       = -3
+private let J2ME_KEY_RIGHT: Int32      = -4
+private let J2ME_KEY_FIRE: Int32       = -5
+private let J2ME_KEY_SOFT_LEFT: Int32  = -6
+private let J2ME_KEY_SOFT_RIGHT: Int32 = -7
+
+private let J2ME_KEY_NUM0: Int32       = 48
+private let J2ME_KEY_NUM1: Int32       = 49
+private let J2ME_KEY_NUM2: Int32       = 50
+private let J2ME_KEY_NUM3: Int32       = 51
+private let J2ME_KEY_NUM4: Int32       = 52
+private let J2ME_KEY_NUM5: Int32       = 53
+private let J2ME_KEY_NUM6: Int32       = 54
+private let J2ME_KEY_NUM7: Int32       = 55
+private let J2ME_KEY_NUM8: Int32       = 56
+private let J2ME_KEY_NUM9: Int32       = 57
+private let J2ME_KEY_STAR: Int32       = 42
+private let J2ME_KEY_POUND: Int32      = 35
+
 final class PadView: UIView {
 
     var onKeyDown: ((Int32) -> Void)?
