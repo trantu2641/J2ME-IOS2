@@ -33,6 +33,9 @@ class FormView: UIView, UIGestureRecognizerDelegate {
     private var choiceControls: [ChoiceControl] = []
     private var textControls: [TextControl] = []
 
+    private var keyboardObserverTokens: [NSObjectProtocol] = []
+    private var keyboardBottomInset: CGFloat = 0
+
     override init(frame: CGRect) {
         super.init(frame: frame)
         setup()
@@ -77,6 +80,26 @@ class FormView: UIView, UIGestureRecognizerDelegate {
         commandBar.distribution = .fillEqually
         commandBar.translatesAutoresizingMaskIntoConstraints = false
         addSubview(commandBar)
+
+        keyboardObserverTokens.append(
+            NotificationCenter.default.addObserver(
+                forName: UIResponder.keyboardWillChangeFrameNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] note in
+                self?.updateForKeyboard(note)
+            }
+        )
+
+        keyboardObserverTokens.append(
+            NotificationCenter.default.addObserver(
+                forName: UIResponder.keyboardWillHideNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                self?.setKeyboardInset(0, animated: true)
+            }
+        )
 
         NSLayoutConstraint.activate([
             titleLabel.topAnchor.constraint(
@@ -179,6 +202,52 @@ class FormView: UIView, UIGestureRecognizerDelegate {
 
         // Hide the iOS keyboard.
         endEditing(true)
+    }
+
+    deinit {
+        for token in keyboardObserverTokens {
+            NotificationCenter.default.removeObserver(token)
+        }
+    }
+
+    private func updateForKeyboard(_ note: Notification) {
+        guard
+            let frame = note.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect
+        else {
+            return
+        }
+
+        let converted = convert(frame, from: nil)
+        let overlap = max(0, bounds.maxY - converted.minY)
+        setKeyboardInset(overlap, animated: true)
+    }
+
+    private func setKeyboardInset(_ inset: CGFloat, animated: Bool) {
+        keyboardBottomInset = inset
+        let duration =
+            (animated
+             ? (UIView.animationDuration(for: UIResponder.keyboardWillChangeFrameNotification) ?? 0.25)
+             : 0)
+
+        let changes = {
+            self.scrollView.contentInset.bottom = self.keyboardBottomInset + 12
+            self.scrollView.verticalScrollIndicatorInsets.bottom =
+                self.keyboardBottomInset + 12
+            self.scrollView.scrollIndicatorInsets.bottom =
+                self.keyboardBottomInset + 12
+            self.layoutIfNeeded()
+        }
+
+        if animated {
+            UIView.animate(
+                withDuration: duration,
+                delay: 0,
+                options: [.beginFromCurrentState, .curveEaseInOut],
+                animations: changes
+            )
+        } else {
+            changes()
+        }
     }
 
     // MARK: - Build form

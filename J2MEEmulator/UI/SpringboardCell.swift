@@ -13,6 +13,7 @@ class SpringboardCell: UICollectionViewCell {
 
     let iconView = UIImageView()
     let nameLabel = UILabel()
+    let statusLabel = UILabel()
 
     // Pre-built attributes with dynamic Light/Dark colors.
     // The icon image itself is never recolored.
@@ -53,6 +54,13 @@ class SpringboardCell: UICollectionViewCell {
         nameLabel.translatesAutoresizingMaskIntoConstraints = false
         contentView.addSubview(nameLabel)
 
+        statusLabel.font = UIFont.systemFont(ofSize: 9.5, weight: .semibold)
+        statusLabel.textAlignment = .center
+        statusLabel.textColor = .systemGreen
+        statusLabel.text = nil
+        statusLabel.translatesAutoresizingMaskIntoConstraints = false
+        contentView.addSubview(statusLabel)
+
         NSLayoutConstraint.activate([
             iconView.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 2),
             iconView.centerXAnchor.constraint(equalTo: contentView.centerXAnchor),
@@ -62,6 +70,11 @@ class SpringboardCell: UICollectionViewCell {
             nameLabel.topAnchor.constraint(equalTo: iconView.bottomAnchor, constant: 5),
             nameLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: -2),
             nameLabel.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: 2),
+
+            statusLabel.topAnchor.constraint(equalTo: nameLabel.bottomAnchor, constant: 1),
+            statusLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
+            statusLabel.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
+            statusLabel.heightAnchor.constraint(equalToConstant: 13),
         ])
     }
 
@@ -89,6 +102,7 @@ class SpringboardCell: UICollectionViewCell {
         super.prepareForReuse()
         iconView.image = nil
         nameLabel.attributedText = nil
+        statusLabel.text = nil
     }
 
     // Springboard-style press animation
@@ -102,11 +116,12 @@ class SpringboardCell: UICollectionViewCell {
         }
     }
 
-    func configure(name: String, icon: UIImage) {
+    func configure(name: String, icon: UIImage, isOpen: Bool = false) {
         iconView.image = icon
         nameLabel.attributedText = NSAttributedString(
             string: name,
             attributes: Self.labelAttributes
         )
+        statusLabel.text = isOpen ? "Đang mở" : nil
     }
 }

@@ -242,7 +242,24 @@ final class GameViewController:
         )
     }
 
+    private var currentJAROpenStateKey: String {
+        "J2MEJarOpen_\(gameID(forPath: jarPath))"
+    }
+
+    private var currentJARProxyHostKey: String {
+        "J2MEProxyHost_\(gameID(forPath: jarPath))"
+    }
+
+    private var currentJARProxyPortKey: String {
+        "J2MEProxyPort_\(gameID(forPath: jarPath))"
+    }
+
+    private var currentJARProxyEnabledKey: String {
+        "J2MEProxyEnabled_\(gameID(forPath: jarPath))"
+    }
+
     deinit {
+        UserDefaults.standard.set(false, forKey: currentJAROpenStateKey)
 
         alertTimeoutWork?.cancel()
         startupWatchdog?.cancel()
@@ -270,6 +287,13 @@ final class GameViewController:
     override func viewDidLoad() {
 
         super.viewDidLoad()
+
+        // Per-JAR open state. The launcher can now show "Đang mở"
+        // without changing the JAR name itself.
+        UserDefaults.standard.set(true, forKey: currentJAROpenStateKey)
+
+        // Apply the proxy saved for this JAR only when this game session starts.
+        applyCurrentJARProxy()
 
         // Only the surrounding emulator UI follows Light/Dark.
         // The JAR framebuffer itself is never recolored.
@@ -1834,13 +1858,38 @@ final class GameViewController:
         present(alert, animated: true)
     }
 
+
+    private func applyCurrentJARProxy() {
+        let defaults = UserDefaults.standard
+        let enabled = defaults.bool(forKey: currentJARProxyEnabledKey)
+
+        guard enabled else {
+            unsetenv("HTTP_PROXY")
+            unsetenv("HTTPS_PROXY")
+            unsetenv("ALL_PROXY")
+            return
+        }
+
+        let host = defaults.string(forKey: currentJARProxyHostKey) ?? ""
+        let port = defaults.object(forKey: currentJARProxyPortKey) as? Int ?? 0
+
+        guard !host.isEmpty, port > 0, port <= 65535 else {
+            return
+        }
+
+        let value = "http://\(host):\(port)"
+        setenv("HTTP_PROXY", value, 1)
+        setenv("HTTPS_PROXY", value, 1)
+        setenv("ALL_PROXY", value, 1)
+    }
+
     @objc private func showProxyMenu() {
         closeMoreMenu()
 
         let defaults = UserDefaults.standard
-        let host = defaults.string(forKey: "J2MEProxyHost") ?? ""
-        let port = defaults.object(forKey: "J2MEProxyPort") as? Int ?? 0
-        let enabled = defaults.bool(forKey: "J2MEProxyEnabled")
+        let host = defaults.string(forKey: currentJARProxyHostKey) ?? ""
+        let port = defaults.object(forKey: currentJARProxyPortKey) as? Int ?? 0
+        let enabled = defaults.bool(forKey: currentJARProxyEnabledKey)
 
         let alert = UIAlertController(
             title: "Proxy",
@@ -1863,9 +1912,9 @@ final class GameViewController:
         }
 
         alert.addAction(UIAlertAction(title: "Tắt Proxy", style: .destructive) { _ in
-            defaults.set(false, forKey: "J2MEProxyEnabled")
-            defaults.removeObject(forKey: "J2MEProxyHost")
-            defaults.removeObject(forKey: "J2MEProxyPort")
+            defaults.set(false, forKey: currentJARProxyEnabledKey)
+            defaults.removeObject(forKey: currentJARProxyHostKey)
+            defaults.removeObject(forKey: currentJARProxyPortKey)
             unsetenv("HTTP_PROXY")
             unsetenv("HTTPS_PROXY")
             unsetenv("ALL_PROXY")
@@ -1879,9 +1928,9 @@ final class GameViewController:
             guard !h.isEmpty, p > 0, p <= 65535 else { return }
 
             let value = "http://\(h):\(p)"
-            defaults.set(true, forKey: "J2MEProxyEnabled")
-            defaults.set(h, forKey: "J2MEProxyHost")
-            defaults.set(p, forKey: "J2MEProxyPort")
+            defaults.set(true, forKey: currentJARProxyEnabledKey)
+            defaults.set(h, forKey: currentJARProxyHostKey)
+            defaults.set(p, forKey: currentJARProxyPortKey)
 
             // Export the conventional proxy variables so networking layers
             // that honor process proxy environment variables use the same

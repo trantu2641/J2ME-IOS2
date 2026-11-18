@@ -1383,9 +1383,13 @@ class AppsListViewController: UIViewController,
 
         let app = apps[indexPath.item]
 
+        let openKey = "J2MEJarOpen_\(Self.gameId(for: app))"
+        let isOpen = UserDefaults.standard.bool(forKey: openKey)
+
         cell.configure(
             name: app.name,
-            icon: app.icon
+            icon: app.icon,
+            isOpen: isOpen
         )
 
         return cell
