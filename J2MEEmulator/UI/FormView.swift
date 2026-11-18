@@ -32,9 +32,7 @@ class FormView: UIView, UIGestureRecognizerDelegate {
 
     private var choiceControls: [ChoiceControl] = []
     private var textControls: [TextControl] = []
-
-    private var keyboardObserverTokens: [NSObjectProtocol] = []
-    private var keyboardBottomInset: CGFloat = 0
+    private var activeTextField: UITextField?
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -44,6 +42,10 @@ class FormView: UIView, UIGestureRecognizerDelegate {
     required init?(coder: NSCoder) {
         super.init(coder: coder)
         setup()
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
     }
 
     private func setup() {
@@ -80,26 +82,6 @@ class FormView: UIView, UIGestureRecognizerDelegate {
         commandBar.distribution = .fillEqually
         commandBar.translatesAutoresizingMaskIntoConstraints = false
         addSubview(commandBar)
-
-        keyboardObserverTokens.append(
-            NotificationCenter.default.addObserver(
-                forName: UIResponder.keyboardWillChangeFrameNotification,
-                object: nil,
-                queue: .main
-            ) { [weak self] note in
-                self?.updateForKeyboard(note)
-            }
-        )
-
-        keyboardObserverTokens.append(
-            NotificationCenter.default.addObserver(
-                forName: UIResponder.keyboardWillHideNotification,
-                object: nil,
-                queue: .main
-            ) { [weak self] _ in
-                self?.setKeyboardInset(0, animated: true)
-            }
-        )
 
         NSLayoutConstraint.activate([
             titleLabel.topAnchor.constraint(
@@ -170,6 +152,62 @@ class FormView: UIView, UIGestureRecognizerDelegate {
         outsideTap.delegate = self
 
         addGestureRecognizer(outsideTap)
+
+        // Push scrollView up when keyboard appears
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(formKeyboardWillChangeFrame(_:)),
+            name: UIResponder.keyboardWillChangeFrameNotification,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(formKeyboardWillHide(_:)),
+            name: UIResponder.keyboardWillHideNotification,
+            object: nil
+        )
+    }
+
+    // MARK: - Keyboard avoidance
+
+    @objc private func formKeyboardWillChangeFrame(_ notification: Notification) {
+        guard !isHidden,
+              let userInfo = notification.userInfo,
+              let screenFrame = userInfo[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect else {
+            return
+        }
+
+        let keyboardFrame = convert(screenFrame, from: nil)
+        let intersection = bounds.intersection(keyboardFrame)
+        let keyboardHeight = intersection.isNull ? 0 : intersection.height
+
+        let bottomChrome = bounds.maxY - scrollView.frame.maxY
+        let bottomInset = max(0, keyboardHeight - bottomChrome + 8)
+
+        let duration = userInfo[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double ?? 0.25
+        let curve = userInfo[UIResponder.keyboardAnimationCurveUserInfoKey] as? UInt ?? 7
+        let options = UIView.AnimationOptions(rawValue: curve << 16).union(.beginFromCurrentState)
+
+        UIView.animate(withDuration: duration, delay: 0, options: options) {
+            self.scrollView.contentInset.bottom = bottomInset
+            self.scrollView.verticalScrollIndicatorInsets.bottom = bottomInset
+        }
+
+        if let active = activeTextField {
+            let rectInScroll = active.convert(active.bounds, to: scrollView)
+            scrollView.scrollRectToVisible(rectInScroll.insetBy(dx: 0, dy: -16), animated: true)
+        }
+    }
+
+    @objc private func formKeyboardWillHide(_ notification: Notification) {
+        let duration = notification.userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double ?? 0.25
+        let curve = notification.userInfo?[UIResponder.keyboardAnimationCurveUserInfoKey] as? UInt ?? 7
+        let options = UIView.AnimationOptions(rawValue: curve << 16).union(.beginFromCurrentState)
+
+        UIView.animate(withDuration: duration, delay: 0, options: options) {
+            self.scrollView.contentInset.bottom = 0
+            self.scrollView.verticalScrollIndicatorInsets.bottom = 0
+        }
     }
 
     // MARK: - Dismiss keyboard on outside tap
@@ -204,49 +242,6 @@ class FormView: UIView, UIGestureRecognizerDelegate {
         endEditing(true)
     }
 
-    deinit {
-        for token in keyboardObserverTokens {
-            NotificationCenter.default.removeObserver(token)
-        }
-    }
-
-    private func updateForKeyboard(_ note: Notification) {
-        guard
-            let frame = note.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect
-        else {
-            return
-        }
-
-        let converted = convert(frame, from: nil)
-        let overlap = max(0, bounds.maxY - converted.minY)
-        setKeyboardInset(overlap, animated: true)
-    }
-
-    private func setKeyboardInset(_ inset: CGFloat, animated: Bool) {
-        keyboardBottomInset = inset
-        let duration: TimeInterval = animated ? 0.25 : 0
-
-        let changes = {
-            self.scrollView.contentInset.bottom = self.keyboardBottomInset + 12
-            self.scrollView.verticalScrollIndicatorInsets.bottom =
-                self.keyboardBottomInset + 12
-            self.scrollView.scrollIndicatorInsets.bottom =
-                self.keyboardBottomInset + 12
-            self.layoutIfNeeded()
-        }
-
-        if animated {
-            UIView.animate(
-                withDuration: duration,
-                delay: 0,
-                options: [.beginFromCurrentState, .curveEaseInOut],
-                animations: changes
-            )
-        } else {
-            changes()
-        }
-    }
-
     // MARK: - Build form
 
     func buildFromNativeData() {
@@ -264,6 +259,9 @@ class FormView: UIView, UIGestureRecognizerDelegate {
         commandButtons.removeAll()
         choiceControls.removeAll()
         textControls.removeAll()
+        activeTextField = nil
+        scrollView.contentInset.bottom = 0
+        scrollView.verticalScrollIndicatorInsets.bottom = 0
 
         // Title
         titleLabel.text = String(
@@ -655,6 +653,16 @@ class FormView: UIView, UIGestureRecognizerDelegate {
             action: #selector(textFieldChanged(_:)),
             for: .editingChanged
         )
+        tf.addTarget(
+            self,
+            action: #selector(textFieldDidBegin(_:)),
+            for: .editingDidBegin
+        )
+        tf.addTarget(
+            self,
+            action: #selector(textFieldDidEnd(_:)),
+            for: .editingDidEnd
+        )
 
         container.addArrangedSubview(tf)
         stackView.addArrangedSubview(container)
@@ -750,6 +758,22 @@ class FormView: UIView, UIGestureRecognizerDelegate {
         // The actual Java TextField update happens
         // atomically on command commit, preserving
         // the value seen by the MIDlet command handler.
+    }
+
+    @objc private func textFieldDidBegin(
+        _ sender: UITextField
+    ) {
+        activeTextField = sender
+        let rectInScroll = sender.convert(sender.bounds, to: scrollView)
+        scrollView.scrollRectToVisible(rectInScroll.insetBy(dx: 0, dy: -16), animated: true)
+    }
+
+    @objc private func textFieldDidEnd(
+        _ sender: UITextField
+    ) {
+        if activeTextField === sender {
+            activeTextField = nil
+        }
     }
 }
 
