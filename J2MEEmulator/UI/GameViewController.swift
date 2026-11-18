@@ -103,7 +103,7 @@ private final class J2MEKeyboardInputView: UIView, UIKeyInput {
     var autocorrectionType: UITextAutocorrectionType = .no
     var spellCheckingType: UITextSpellCheckingType = .no
     var smartQuotesType: UITextSmartQuotesType = .no
-    var smartDashesType: UITextDashesType = .no
+    var smartDashesType: UITextSmartDashesType = .no
     var autocapitalizationType: UITextAutocapitalizationType = .none
     var returnKeyType: UIReturnKeyType = .done
     var enablesReturnKeyAutomatically: Bool = false
