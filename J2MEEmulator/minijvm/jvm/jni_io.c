@@ -273,44 +273,303 @@ s32 host_2_ip(c8 *hostname, c8 *buf, s32 buflen) {
 extern s32 os_mkdir(const c8 *path);
 //=================================  native  ====================================
 
+// ============================================================
+// Per-VM SOCKS5 & HTTP CONNECT Proxy Helpers
+// ============================================================
 
-s32 org_mini_net_SocketNative_open0(Runtime *runtime, JClass *clazz) {
-    RuntimeStack *stack = runtime->stack;
-    jthread_block_enter(runtime);
-    Instance *vmarr = jarray_create_by_type_index(runtime, sizeof(VmSock), DATATYPE_BYTE);
-    mbedtls_net_context *ctx = &((VmSock *) vmarr->arr_body)->contex;
-    mbedtls_net_init(ctx);
-    jthread_block_exit(runtime);
-#if _JVM_DEBUG_LOG_LEVEL > 5
-    invoke_deepth(runtime);
-    jvm_printf("org_mini_net_SocketNative_open0  \n");
-#endif
-    push_ref(stack, vmarr);
+extern int jvm_bridge_get_proxy_for_vm(MiniJVM *jvm,
+                                       int *out_type,
+                                       char *out_host,
+                                       int host_cap,
+                                       int *out_port,
+                                       char *out_user,
+                                       int user_cap,
+                                       char *out_pass,
+                                       int pass_cap);
+
+static s32 proxy_send_all(mbedtls_net_context *ctx, const u8 *buf, size_t len) {
+    size_t sent = 0;
+    while (sent < len) {
+        int ret = mbedtls_net_send(ctx, buf + sent, len - sent);
+        if (ret == MBEDTLS_ERR_SSL_WANT_WRITE) {
+            mbedtls_net_usleep(5000);
+            continue;
+        }
+        if (ret <= 0) return -1;
+        sent += (size_t)ret;
+    }
     return 0;
 }
 
-s32 org_mini_net_SocketNative_bind0(Runtime *runtime, JClass *clazz) {
+static s32 proxy_recv_exact(mbedtls_net_context *ctx, u8 *buf, size_t len, int timeout_ms) {
+    size_t got = 0;
+    int elapsed = 0;
+    while (got < len) {
+        int ret = mbedtls_net_recv(ctx, buf + got, len - got);
+        if (ret > 0) {
+            got += (size_t)ret;
+            continue;
+        }
+        if (ret == MBEDTLS_ERR_SSL_WANT_READ) {
+            if (elapsed >= timeout_ms) return -1;
+            mbedtls_net_usleep(10000);
+            elapsed += 10;
+            continue;
+        }
+        return -1;
+    }
+    return 0;
+}
+
+static void base64_encode_bytes(const u8 *src, size_t len, char *dst, size_t dst_cap) {
+    static const char tbl[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    size_t o = 0;
+    for (size_t i = 0; i < len && o + 4 < dst_cap; i += 3) {
+        u32 v = ((u32)src[i]) << 16;
+        if (i + 1 < len) v |= ((u32)src[i + 1]) << 8;
+        if (i + 2 < len) v |= (u32)src[i + 2];
+        dst[o++] = tbl[(v >> 18) & 0x3F];
+        dst[o++] = tbl[(v >> 12) & 0x3F];
+        dst[o++] = (i + 1 < len) ? tbl[(v >> 6) & 0x3F] : '=';
+        dst[o++] = (i + 2 < len) ? tbl[v & 0x3F] : '=';
+    }
+    if (dst_cap > 0) dst[o < dst_cap ? o : dst_cap - 1] = '\0';
+}
+
+static s32 proxy_handshake_socks5(mbedtls_net_context *ctx,
+                                  const char *target_host,
+                                  int target_port,
+                                  const char *user,
+                                  const char *pass) {
+    int has_auth = (user && user[0] != '\0');
+    u8 greeting[4];
+    size_t greeting_len = 0;
+    greeting[0] = 0x05; // SOCKS5
+    if (has_auth) {
+        greeting[1] = 0x02; // 2 methods
+        greeting[2] = 0x00; // No auth
+        greeting[3] = 0x02; // Username/Password
+        greeting_len = 4;
+    } else {
+        greeting[1] = 0x01; // 1 method
+        greeting[2] = 0x00; // No auth
+        greeting_len = 3;
+    }
+
+    if (proxy_send_all(ctx, greeting, greeting_len) < 0) return -1;
+
+    u8 method_resp[2] = {0};
+    if (proxy_recv_exact(ctx, method_resp, 2, 10000) < 0) return -1;
+    if (method_resp[0] != 0x05 || method_resp[1] == 0xFF) return -1;
+
+    if (method_resp[1] == 0x02) {
+        if (!has_auth) return -1;
+        size_t ulen = strlen(user);
+        size_t plen = pass ? strlen(pass) : 0;
+        if (ulen > 255) ulen = 255;
+        if (plen > 255) plen = 255;
+
+        u8 auth_req[520];
+        size_t idx = 0;
+        auth_req[idx++] = 0x01; // subnegotiation version
+        auth_req[idx++] = (u8)ulen;
+        memcpy(auth_req + idx, user, ulen);
+        idx += ulen;
+        auth_req[idx++] = (u8)plen;
+        if (plen > 0) {
+            memcpy(auth_req + idx, pass, plen);
+            idx += plen;
+        }
+        if (proxy_send_all(ctx, auth_req, idx) < 0) return -1;
+
+        u8 auth_resp[2] = {0};
+        if (proxy_recv_exact(ctx, auth_resp, 2, 10000) < 0) return -1;
+        if (auth_resp[1] != 0x00) return -1;
+    } else if (method_resp[1] != 0x00) {
+        return -1;
+    }
+
+    size_t hlen = strlen(target_host);
+    if (hlen == 0 || hlen > 253) return -1;
+
+    u8 req[270];
+    size_t ridx = 0;
+    req[ridx++] = 0x05; // VER
+    req[ridx++] = 0x01; // CONNECT
+    req[ridx++] = 0x00; // RSV
+    req[ridx++] = 0x03; // ATYP: DOMAINNAME
+    req[ridx++] = (u8)hlen;
+    memcpy(req + ridx, target_host, hlen);
+    ridx += hlen;
+    req[ridx++] = (u8)((target_port >> 8) & 0xFF);
+    req[ridx++] = (u8)(target_port & 0xFF);
+
+    if (proxy_send_all(ctx, req, ridx) < 0) return -1;
+
+    u8 hdr[4] = {0};
+    if (proxy_recv_exact(ctx, hdr, 4, 10000) < 0) return -1;
+    if (hdr[0] != 0x05 || hdr[1] != 0x00) return -1;
+
+    size_t remain = 0;
+    if (hdr[3] == 0x01) {
+        remain = 4 + 2; // IPv4 + port
+    } else if (hdr[3] == 0x04) {
+        remain = 16 + 2; // IPv6 + port
+    } else if (hdr[3] == 0x03) {
+        u8 dlen = 0;
+        if (proxy_recv_exact(ctx, &dlen, 1, 10000) < 0) return -1;
+        remain = (size_t)dlen + 2;
+    } else {
+        return -1;
+    }
+
+    u8 discard[260];
+    if (remain > sizeof(discard)) return -1;
+    if (proxy_recv_exact(ctx, discard, remain, 10000) < 0) return -1;
+
+    return 0;
+}
+
+static s32 proxy_handshake_http(mbedtls_net_context *ctx,
+                                const char *target_host,
+                                int target_port,
+                                const char *user,
+                                const char *pass) {
+    char req[1024];
+    if (user && user[0] != '\0') {
+        char raw_cred[260];
+        char b64_cred[400];
+        snprintf(raw_cred, sizeof(raw_cred), "%s:%s", user, pass ? pass : "");
+        base64_encode_bytes((const u8 *)raw_cred, strlen(raw_cred), b64_cred, sizeof(b64_cred));
+        snprintf(req, sizeof(req),
+                 "CONNECT %s:%d HTTP/1.1\r\n"
+                 "Host: %s:%d\r\n"
+                 "Proxy-Authorization: Basic %s\r\n"
+                 "Proxy-Connection: Keep-Alive\r\n\r\n",
+                 target_host, target_port, target_host, target_port, b64_cred);
+    } else {
+        snprintf(req, sizeof(req),
+                 "CONNECT %s:%d HTTP/1.1\r\n"
+                 "Host: %s:%d\r\n"
+                 "Proxy-Connection: Keep-Alive\r\n\r\n",
+                 target_host, target_port, target_host, target_port);
+    }
+
+    if (proxy_send_all(ctx, (const u8 *)req, strlen(req)) < 0) return -1;
+
+    char resp[1024];
+    size_t rlen = 0;
+    int elapsed = 0;
+    while (rlen + 1 < sizeof(resp)) {
+        u8 ch = 0;
+        int ret = mbedtls_net_recv(ctx, &ch, 1);
+        if (ret == 1) {
+            resp[rlen++] = (char)ch;
+            resp[rlen] = '\0';
+            if (rlen >= 4 && strcmp(resp + rlen - 4, "\r\n\r\n") == 0) {
+                break;
+            }
+            continue;
+        }
+        if (ret == MBEDTLS_ERR_SSL_WANT_READ) {
+            if (elapsed >= 10000) return -1;
+            mbedtls_net_usleep(10000);
+            elapsed += 10;
+            continue;
+        }
+        return -1;
+    }
+
+    if (strncmp(resp, "HTTP/1.1 200", 12) == 0 || strncmp(resp, "HTTP/1.0 200", 12) == 0) {
+        return 0;
+    }
+    return -1;
+}
+
+s32 org_mini_net_SocketNative_connect0(Runtime *runtime, JClass *clazz) {
     RuntimeStack *stack = runtime->stack;
     Instance *vmarr = localvar_getRefer(runtime->localvar, 0);
     Instance *host = localvar_getRefer(runtime->localvar, 1);
     Instance *port = localvar_getRefer(runtime->localvar, 2);
     s32 proto = localvar_getInt(runtime->localvar, 3);
+
     s32 ret = -1;
     if (vmarr && host && port) {
         VmSock *vmsock = (VmSock *) vmarr->arr_body;
         mbedtls_net_context *ctx = &vmsock->contex;
+
+        s32 hostlen = host->arr_length;
+        if (hostlen >= (s32)sizeof(vmsock->hostname)) {
+            hostlen = (s32)sizeof(vmsock->hostname) - 1;
+        }
+        memset(vmsock->hostname, 0, sizeof(vmsock->hostname));
+        memcpy(vmsock->hostname, host->arr_body, hostlen);
+
+        s32 portlen = port->arr_length;
+        if (portlen >= (s32)sizeof(vmsock->hostport)) {
+            portlen = (s32)sizeof(vmsock->hostport) - 1;
+        }
+        memset(vmsock->hostport, 0, sizeof(vmsock->hostport));
+        memcpy(vmsock->hostport, port->arr_body, portlen);
+
+        int proxy_type = 0;
+        char proxy_host[256] = {0};
+        int proxy_port = 0;
+        char proxy_user[128] = {0};
+        char proxy_pass[128] = {0};
+
+        int use_proxy = (proto == MBEDTLS_NET_PROTO_TCP) &&
+                        jvm_bridge_get_proxy_for_vm(runtime->jvm,
+                                                    &proxy_type,
+                                                    proxy_host, sizeof(proxy_host),
+                                                    &proxy_port,
+                                                    proxy_user, sizeof(proxy_user),
+                                                    proxy_pass, sizeof(proxy_pass));
+
         jthread_block_enter(runtime);
-        ret = mbedtls_net_bind(ctx, strlen(host->arr_body) == 0 ? NULL : host->arr_body, port->arr_body, proto);
-        if (ret >= 0)ret = mbedtls_net_set_nonblock(ctx);//set as non_block , for vm destroy
+
+        if (use_proxy) {
+            char proxy_port_str[16];
+            snprintf(proxy_port_str, sizeof(proxy_port_str), "%d", proxy_port);
+            ret = mbedtls_net_connect(ctx, proxy_host, proxy_port_str, proto);
+            if (ret >= 0) {
+                s32 nb_ret = mbedtls_net_set_nonblock(ctx);
+                if (nb_ret < 0) {
+                    ret = nb_ret;
+                } else {
+                    vmsock->non_block = 1;
+                    int target_port = atoi(vmsock->hostport);
+                    if (proxy_type == 2) {
+                        ret = proxy_handshake_socks5(ctx, vmsock->hostname, target_port, proxy_user, proxy_pass);
+                    } else if (proxy_type == 1) {
+                        ret = proxy_handshake_http(ctx, vmsock->hostname, target_port, proxy_user, proxy_pass);
+                    } else {
+                        ret = -1;
+                    }
+                }
+            }
+            if (ret < 0) {
+                mbedtls_net_free(ctx);
+                mbedtls_net_init(ctx);
+            }
+        } else {
+            ret = mbedtls_net_connect(ctx, vmsock->hostname, vmsock->hostport, proto);
+            if (ret >= 0) {
+                s32 nb_ret = mbedtls_net_set_nonblock(ctx);
+                if (nb_ret < 0) {
+                    ret = nb_ret;
+                } else {
+                    vmsock->non_block = 1;
+                }
+            }
+        }
+
         jthread_block_exit(runtime);
-#if _JVM_DEBUG_LOG_LEVEL > 5
-        invoke_deepth(runtime);
-        jvm_printf("org_mini_net_SocketNative_open0  \n");
-#endif
     }
     push_int(stack, ret < 0 ? -1 : 0);
     return 0;
 }
+
 
 s32 org_mini_net_SocketNative_accept0(Runtime *runtime, JClass *clazz) {
     Instance *vmarr = localvar_getRefer(runtime->localvar, 0);
