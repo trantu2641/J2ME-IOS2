@@ -154,7 +154,6 @@ final class GameViewController: UIViewController {
     private var jarPickerItems: [(name: String, path: String, icon: UIImage)] = []
     private var jarPickerMessageLabel: UILabel?
     private var jarPickerMessageWork: DispatchWorkItem?
-    private var activeJarPickerContextMenu: UIMenu?
 
     private enum JarPickerDocumentPurpose {
         case importJAR
@@ -501,6 +500,7 @@ final class GameViewController: UIViewController {
         let session = runningSessions[index]
 
         jvm_bridge_session_set_active(session.id)
+        j2me_render_set_fps_limit(Int32(session.fpsLimit))
 
         emulatorView.canvasWidth = session.canvasWidth
         emulatorView.canvasHeight = session.canvasHeight
@@ -560,6 +560,8 @@ final class GameViewController: UIViewController {
                 print("[JVM] Cannot create multi-session runtime: \(sessionID)")
                 return
             }
+
+            self.applySavedProxy(toSession: sessionID)
 
             let startResult = jvm_bridge_session_start(sessionID)
             guard startResult == 0 else {
@@ -1396,17 +1398,58 @@ final class GameViewController: UIViewController {
         present(alert, animated: true)
     }
 
+    private func applySavedProxy(toSession sessionID: Int32) {
+        let defaults = UserDefaults.standard
+        let enabled = defaults.bool(forKey: "J2MEProxyEnabled")
+        let type = Int32(defaults.integer(forKey: "J2MEProxyType"))
+        let host = defaults.string(forKey: "J2MEProxyHost") ?? ""
+        let port = Int32(defaults.integer(forKey: "J2MEProxyPort"))
+        let user = defaults.string(forKey: "J2MEProxyUser") ?? ""
+        let pass = defaults.string(forKey: "J2MEProxyPass") ?? ""
+
+        if enabled, (type == 1 || type == 2), !host.isEmpty, port > 0, port <= 65535 {
+            host.withCString { hPtr in
+                user.withCString { uPtr in
+                    pass.withCString { pPtr in
+                        jvm_bridge_session_set_proxy(sessionID, type, hPtr, port, uPtr, pPtr)
+                    }
+                }
+            }
+        } else {
+            "".withCString { emptyPtr in
+                jvm_bridge_session_set_proxy(sessionID, 0, emptyPtr, 0, emptyPtr, emptyPtr)
+            }
+        }
+    }
+
+    private func applySavedProxyToAllRunningSessions() {
+        for session in runningSessions {
+            applySavedProxy(toSession: session.id)
+        }
+    }
+
     @objc private func showProxyMenu() {
         closeMoreMenu()
         let defaults = UserDefaults.standard
         let host = defaults.string(forKey: "J2MEProxyHost") ?? ""
         let port = defaults.object(forKey: "J2MEProxyPort") as? Int ?? 0
+        let savedType = defaults.object(forKey: "J2MEProxyType") as? Int ?? 1
+        let user = defaults.string(forKey: "J2MEProxyUser") ?? ""
+        let pass = defaults.string(forKey: "J2MEProxyPass") ?? ""
         let enabled = defaults.bool(forKey: "J2MEProxyEnabled")
 
-        let alert = UIAlertController(title: "Proxy", message: enabled ? "Proxy đang bật." : "Proxy đang tắt.", preferredStyle: .alert)
+        let typeLabel = savedType == 2 ? "SOCKS5" : "HTTP"
+        let statusMsg = enabled ? "Đang bật (\(typeLabel) - \(host):\(port))" : "Proxy đang tắt. Chọn loại: 1 = HTTP, 2 = SOCKS5"
+        let alert = UIAlertController(title: "Cấu hình Proxy", message: statusMsg, preferredStyle: .alert)
 
         alert.addTextField { field in
-            field.placeholder = "Địa chỉ proxy"
+            field.placeholder = "Loại (1 = HTTP, 2 = SOCKS5)"
+            field.text = "\(savedType == 2 ? 2 : 1)"
+            field.keyboardType = .numberPad
+        }
+
+        alert.addTextField { field in
+            field.placeholder = "Địa chỉ proxy (IP / Domain)"
             field.text = host
             field.keyboardType = .URL
             field.autocapitalizationType = .none
@@ -1414,33 +1457,59 @@ final class GameViewController: UIViewController {
         }
 
         alert.addTextField { field in
-            field.placeholder = "Cổng"
+            field.placeholder = "Cổng (Port)"
             field.text = port > 0 ? "\(port)" : ""
             field.keyboardType = .numberPad
         }
 
-        alert.addAction(UIAlertAction(title: "Tắt Proxy", style: .destructive) { _ in
+        alert.addTextField { field in
+            field.placeholder = "Username (tùy chọn)"
+            field.text = user
+            field.autocapitalizationType = .none
+            field.autocorrectionType = .no
+        }
+
+        alert.addTextField { field in
+            field.placeholder = "Password (tùy chọn)"
+            field.text = pass
+            field.isSecureTextEntry = true
+        }
+
+        alert.addAction(UIAlertAction(title: "Tắt Proxy", style: .destructive) { [weak self] _ in
             defaults.set(false, forKey: "J2MEProxyEnabled")
+            defaults.removeObject(forKey: "J2MEProxyType")
             defaults.removeObject(forKey: "J2MEProxyHost")
             defaults.removeObject(forKey: "J2MEProxyPort")
+            defaults.removeObject(forKey: "J2MEProxyUser")
+            defaults.removeObject(forKey: "J2MEProxyPass")
             unsetenv("HTTP_PROXY")
             unsetenv("HTTPS_PROXY")
             unsetenv("ALL_PROXY")
+            self?.applySavedProxyToAllRunningSessions()
         })
 
         alert.addAction(UIAlertAction(title: "Hủy", style: .cancel))
-        alert.addAction(UIAlertAction(title: "Lưu", style: .default) { [weak alert] _ in
-            let h = alert?.textFields?[0].text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            let p = Int(alert?.textFields?[1].text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "") ?? 0
+        alert.addAction(UIAlertAction(title: "Lưu", style: .default) { [weak self, weak alert] _ in
+            let rawType = Int(alert?.textFields?[0].text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "") ?? 1
+            let pType = (rawType == 2) ? 2 : 1
+            let h = alert?.textFields?[1].text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let p = Int(alert?.textFields?[2].text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "") ?? 0
+            let u = alert?.textFields?[3].text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let pw = alert?.textFields?[4].text ?? ""
             guard !h.isEmpty, p > 0, p <= 65535 else { return }
 
-            let value = "http://\(h):\(p)"
+            let scheme = (pType == 2) ? "socks5" : "http"
+            let value = "\(scheme)://\(h):\(p)"
             defaults.set(true, forKey: "J2MEProxyEnabled")
+            defaults.set(pType, forKey: "J2MEProxyType")
             defaults.set(h, forKey: "J2MEProxyHost")
             defaults.set(p, forKey: "J2MEProxyPort")
+            defaults.set(u, forKey: "J2MEProxyUser")
+            defaults.set(pw, forKey: "J2MEProxyPass")
             setenv("HTTP_PROXY", value, 1)
             setenv("HTTPS_PROXY", value, 1)
             setenv("ALL_PROXY", value, 1)
+            self?.applySavedProxyToAllRunningSessions()
         })
 
         present(alert, animated: true)
@@ -1824,9 +1893,7 @@ extension GameViewController: UITableViewDataSource, UITableViewDelegate, UIDocu
             previewProvider: nil,
             actionProvider: { [weak self] _ in
                 guard let self else { return nil }
-                let menu = self.makeJarPickerContextMenu(for: item)
-                self.activeJarPickerContextMenu = menu
-                return menu
+                return self.makeJarPickerContextMenu(for: item)
             }
         )
     }
