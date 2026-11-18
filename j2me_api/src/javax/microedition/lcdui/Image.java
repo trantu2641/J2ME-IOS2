@@ -12,8 +12,8 @@ import javax.microedition.io.Connector;
 /**
  * J2ME Image compatibility layer.
  *
- * Missing, corrupted, empty, or failed image resources use a non-allocating
- * zero-handle Image sentinel so optional graphics do not stop the MIDlet.
+ * Missing, corrupted, empty, or failed image resources are replaced with
+ * a transparent 1x1 image so that optional graphics do not stop the MIDlet.
  *
  * IMPORTANT:
  * Remote HTTP/HTTPS image failures are intentionally isolated from the
@@ -41,7 +41,11 @@ public class Image {
         long handle = NativeBridge.createMutableImage(width, height);
 
         if (handle == 0) {
-            }
+            System.out.println(
+                "[Image] ERROR: createMutableImage returned 0 for "
+                + width + "x" + height
+            );
+        }
 
         return new Image(handle, width, height, true);
     }
@@ -76,28 +80,34 @@ public class Image {
 
         } catch (RuntimeException e) {
 
-            }
+            System.out.println(
+                "[Image] Unable to initialize image: " + e
+            );
+        }
 
         return img;
     }
 
     /**
-     * Creates a non-allocating zero-handle fallback image.
+     * Creates a transparent 1x1 fallback image.
      *
      * Used when an optional image/resource is missing, invalid,
      * corrupted, empty, or cannot be downloaded.
      */
-    /**
-     * Non-allocating failure sentinel. No native bitmap is created.
-     */
-    private static Image failedImage() {
+    private static Image createTransparentPlaceholder() {
+
+        // Do not allocate a 1x1 native image for every failed icon.
+        // A zero native handle is treated as an unavailable optional image
+        // by the native bridge and avoids turning a large icon failure into
+        // another native allocation.
         return new Image(0, 1, 1, false);
     }
 
     /**
      * Creates an image from a JAR resource name.
      *
-     * Local missing/corrupted resources are replaced with a non-allocating zero-handle Image sentinel.
+     * Local missing/corrupted resources are replaced with a transparent
+     * placeholder.
      *
      * HTTP/HTTPS resources are also isolated:
      *
@@ -112,8 +122,8 @@ public class Image {
         throws IOException {
 
         if (name == null || name.length() == 0) {
-
-            return failedImage();
+            // Invalid optional image: return a zero-handle sentinel.
+            return createTransparentPlaceholder();
         }
 
         /*
@@ -126,16 +136,15 @@ public class Image {
             InputStream remote = null;
 
             try {
-
-                remote =
+remote =
                     Connector.openInputStream(
                         name,
                         Connector.READ
                     );
 
                 if (remote == null) {
-
-                    return failedImage();
+                    // Optional remote image failed.
+                    return createTransparentPlaceholder();
                 }
 
                 /*
@@ -163,7 +172,12 @@ public class Image {
                  * Now the failed icon is replaced by a transparent
                  * placeholder and the Java game is allowed to continue.
                  */
-                return failedImage();
+                logFallback(
+                    name,
+                    "remote image request failed: " + e
+                );
+
+                return createTransparentPlaceholder();
 
             } catch (RuntimeException e) {
 
@@ -171,7 +185,12 @@ public class Image {
                  * Protect the MIDlet from native/network runtime errors
                  * caused by one optional image.
                  */
-                return failedImage();
+                logFallback(
+                    name,
+                    "remote image runtime failure: " + e
+                );
+
+                return createTransparentPlaceholder();
 
             } finally {
 
@@ -204,19 +223,29 @@ public class Image {
                 findResource(name);
 
             if (is == null) {
-
-                return failedImage();
+                // Optional image failed; continue without allocating a placeholder.
+                return createTransparentPlaceholder();
             }
 
             return createImage(is);
 
         } catch (IOException e) {
 
-            return failedImage();
+            logFallback(
+                name,
+                "local resource read failed: " + e
+            );
+
+            return createTransparentPlaceholder();
 
         } catch (RuntimeException e) {
 
-            return failedImage();
+            logFallback(
+                name,
+                "local resource loader failed: " + e
+            );
+
+            return createTransparentPlaceholder();
         }
     }
 
@@ -513,7 +542,13 @@ public class Image {
 
         } catch (RuntimeException e) {
 
-            }
+            System.out.println(
+                "[Image] COMPAT: resource lookup failed for "
+                + name
+                + ": "
+                + e
+            );
+        }
 
         return null;
     }
@@ -522,7 +557,7 @@ public class Image {
      * Creates an image from an InputStream.
      *
      * Any failure while reading/decoding an optional image is converted
-     * into a non-allocating Image sentinel.
+     * into a transparent placeholder.
      */
     public static Image createImage(
         InputStream stream
@@ -530,7 +565,12 @@ public class Image {
 
         if (stream == null) {
 
-            return failedImage();
+            logFallback(
+                "InputStream",
+                "null input stream"
+            );
+
+            return createTransparentPlaceholder();
         }
 
         try {
@@ -547,7 +587,12 @@ public class Image {
                 || data.length == 0
             ) {
 
-                return failedImage();
+                logFallback(
+                    "InputStream",
+                    "empty image data"
+                );
+
+                return createTransparentPlaceholder();
             }
 
             return createImage(
@@ -558,11 +603,21 @@ public class Image {
 
         } catch (IOException e) {
 
-            return failedImage();
+            logFallback(
+                "InputStream",
+                "image read failed: " + e
+            );
+
+            return createTransparentPlaceholder();
 
         } catch (RuntimeException e) {
 
-            return failedImage();
+            logFallback(
+                "InputStream",
+                "image decoding failed: " + e
+            );
+
+            return createTransparentPlaceholder();
         }
     }
 
@@ -574,7 +629,12 @@ public class Image {
 
         if (imageData == null) {
 
-            return failedImage();
+            logFallback(
+                "byte[]",
+                "null image data"
+            );
+
+            return createTransparentPlaceholder();
         }
 
         if (
@@ -585,7 +645,12 @@ public class Image {
                     - imageLength
         ) {
 
-            return failedImage();
+            logFallback(
+                "byte[]",
+                "invalid or empty image data"
+            );
+
+            return createTransparentPlaceholder();
         }
 
         long handle = 0;
@@ -601,7 +666,12 @@ public class Image {
 
             if (handle == 0) {
 
-                return failedImage();
+                logFallback(
+                    "byte[]",
+                    "native image decoder failed"
+                );
+
+                return createTransparentPlaceholder();
             }
 
             int w =
@@ -628,7 +698,12 @@ public class Image {
 
                 handle = 0;
 
-                return failedImage();
+                logFallback(
+                    "byte[]",
+                    "invalid image dimensions"
+                );
+
+                return createTransparentPlaceholder();
             }
 
             return new Image(
@@ -650,7 +725,12 @@ public class Image {
                 }
             }
 
-            return failedImage();
+            logFallback(
+                "byte[]",
+                "image decoding exception: " + e
+            );
+
+            return createTransparentPlaceholder();
         }
     }
 
