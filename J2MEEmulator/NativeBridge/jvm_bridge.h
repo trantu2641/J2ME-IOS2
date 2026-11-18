@@ -7,35 +7,12 @@
 extern "C" {
 #endif
 
-/*
- * Forward declaration.
- *
- * jvm_bridge.h chỉ dùng MiniJVM dưới dạng con trỏ nên không cần
- * include jvm.h ở đây.
- *
- * jvm.h cũng khai báo MiniJVM bằng:
- *
- * typedef struct _MiniJVM MiniJVM;
- */
 typedef struct _MiniJVM MiniJVM;
 
-/**
- * 3D supersampling scale factor.
- *
- * Shared by M3G and MascotCapsule.
- * Set by jvm_bridge_init(), read by j2me_m3g_jni.c
- * and MC3D via system property.
- */
 extern int g_render_3d_scale;
 
-/*
- * Register the current thread as the JVM main thread.
- */
 void jvm_bridge_register_main_thread(void);
 
-/*
- * Initialize the JVM bridge.
- */
 int jvm_bridge_init(const char *res_root,
                     const char *save_root,
                     const char *midlet_jar,
@@ -44,14 +21,8 @@ int jvm_bridge_init(const char *res_root,
                     int render_3d_scale,
                     int fps_limit);
 
-/*
- * Run a MIDlet from a JAR path.
- */
 int jvm_bridge_run_midlet(const char *midlet_jar_path);
 
-/*
- * Create a new JVM/MIDlet session.
- */
 int jvm_bridge_session_create(const char *res_root,
                               const char *save_root,
                               const char *midlet_jar,
@@ -60,64 +31,45 @@ int jvm_bridge_session_create(const char *res_root,
                               int render_3d_scale,
                               int fps_limit);
 
-/*
- * Start an existing session.
- */
 int jvm_bridge_session_start(int session_id);
-
-/*
- * Set which session is currently active.
- */
 void jvm_bridge_session_set_active(int session_id);
-
-/*
- * Check whether a session is still running.
- */
 int jvm_bridge_session_is_running(int session_id);
-
-/*
- * Request a session to stop.
- */
 void jvm_bridge_session_request_stop(int session_id);
-
-/*
- * Destroy a session.
- */
 void jvm_bridge_session_destroy(int session_id);
-
-/*
- * Destroy all sessions.
- */
 void jvm_bridge_session_destroy_all(void);
-
-/*
- * Check whether stop has been requested for a specific MiniJVM.
- *
- * MiniJVM is forward-declared above because this header only needs
- * the pointer type.
- */
 int jvm_bridge_is_stop_requested_for_vm(MiniJVM *jvm);
 
 /*
- * Destroy the JVM bridge.
+ * Per-session network proxy configuration.
+ * type: 0 = none, 1 = HTTP CONNECT, 2 = SOCKS5
  */
+void jvm_bridge_session_set_proxy(int session_id,
+                                  int proxy_type,
+                                  const char *host,
+                                  int port,
+                                  const char *username,
+                                  const char *password);
+
+int jvm_bridge_get_proxy_for_vm(MiniJVM *jvm,
+                                int *out_type,
+                                char *out_host,
+                                int host_cap,
+                                int *out_port,
+                                char *out_user,
+                                int user_cap,
+                                char *out_pass,
+                                int pass_cap);
+
+/*
+ * Callback invoked when a MIDlet session exits naturally (e.g. notifyDestroyed()).
+ */
+typedef void (*j2me_session_exit_callback)(int session_id, int exit_code);
+void jvm_bridge_set_session_exit_callback(j2me_session_exit_callback callback);
+
 void jvm_bridge_destroy(void);
-
-/*
- * Request global JVM stop.
- */
 void jvm_bridge_request_stop(void);
-
-/*
- * Check whether global JVM stop has been requested.
- */
 int jvm_bridge_is_stop_requested(void);
 
-/*
- * Read one file from a JAR using the native Miniz ZIP reader.
- * The returned buffer is owned by the caller and must be released with
- * jvm_bridge_release_jar_entry(). Returns 0 on success.
- */
 int jvm_bridge_extract_jar_entry(const char *jar_path,
                                  const char *entry_name,
                                  void **out_data,
