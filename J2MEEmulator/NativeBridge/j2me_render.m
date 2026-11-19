@@ -57,6 +57,8 @@ static CGColorSpaceRef g_colorSpace = NULL;
 static _Atomic uint64_t g_frame_interval_ticks = 0;
 static _Atomic uint64_t g_last_frame_ticks = 0;
 static volatile int g_render_stopped = 0;
+static _Atomic int g_render_background_mode = 0;
+
 
 static RenderContext *g_live_rc_head = NULL;
 static RenderImage *g_live_img_head = NULL;
@@ -322,6 +324,11 @@ void j2me_render_set_fps_limit(int fps) {
     atomic_store_explicit(&g_frame_interval_ticks, interval, memory_order_relaxed);
     atomic_store_explicit(&g_last_frame_ticks, 0, memory_order_relaxed);
 }
+
+void j2me_render_set_background_mode(int is_background) {
+    atomic_store_explicit(&g_render_background_mode, is_background ? 1 : 0, memory_order_relaxed);
+}
+
 
 static int j2me_render_frame_due(void) {
     uint64_t interval = atomic_load_explicit(&g_frame_interval_ticks, memory_order_relaxed);
