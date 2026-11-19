@@ -18,6 +18,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <pthread.h>
+#include <signal.h>
 #include <time.h>
 #include <dlfcn.h>
 #include <limits.h>
@@ -67,6 +68,36 @@ static MiniJVM *g_active_session_jvm = NULL;
 static j2me_session_exit_callback g_session_exit_callback = NULL;
 
 static char *load_midlet_manifest(const char *jar_path);
+
+static void session_force_interrupt_threads(MiniJVM *jvm) {
+    if (!jvm) return;
+
+    if (jvm->collector) {
+        jvm->collector->exit_flag = 1;
+    }
+
+    thread_stop_all(jvm);
+
+    if (jvm->thread_list) {
+        spin_lock(&jvm->thread_list->spinlock);
+        for (int i = 0; i < jvm->thread_list->length; i++) {
+            Runtime *runtime = (Runtime *)arraylist_get_value_unsafe(jvm->thread_list, i);
+            if (!runtime || !runtime->thrd_info) continue;
+            JavaThreadInfo *thrd = runtime->thrd_info;
+            thrd->is_blocking = 0;
+            thrd->thread_status = THREAD_STATUS_ZOMBIE;
+            if (thrd->pthread) {
+                pthread_t zero_tid;
+                memset(&zero_tid, 0, sizeof(zero_tid));
+                if (memcmp(&thrd->pthread, &zero_tid, sizeof(pthread_t)) != 0 &&
+                    !pthread_equal(thrd->pthread, pthread_self())) {
+                    pthread_kill(thrd->pthread, SIGURG);
+                }
+            }
+        }
+        spin_unlock(&jvm->thread_list->spinlock);
+    }
+}
 
 void jvm_bridge_set_session_exit_callback(j2me_session_exit_callback callback) {
     g_session_exit_callback = callback;
@@ -231,11 +262,14 @@ static void *session_runner_main(void *arg) {
     arraylist_push_back(java_para, (void *)s->jar_path);
     arraylist_push_back(java_para, (void *)manifest);
 
-    s32 ret = call_main(
-        s->jvm,
-        (c8 *)"javax/microedition/shell/MIDletRunner",
-        java_para
-    );
+    s32 ret = 0;
+    if (!atomic_load(&s->stop_requested)) {
+        ret = call_main(
+            s->jvm,
+            (c8 *)"javax/microedition/shell/MIDletRunner",
+            java_para
+        );
+    }
 
     arraylist_destroy(java_para);
     free(manifest);
@@ -245,7 +279,6 @@ static void *session_runner_main(void *arg) {
     int was_manually_stopped = atomic_load(&s->stop_requested);
     atomic_store(&s->running, 0);
 
-    // Notify Swift UI when the MIDlet exits on its own (e.g. in-game Exit button)
     if (!was_manually_stopped && g_session_exit_callback) {
         g_session_exit_callback(session_id, (int)ret);
     }
@@ -812,17 +845,16 @@ int jvm_bridge_session_is_running(int session_id) {
 void jvm_bridge_session_request_stop(int session_id) {
     pthread_mutex_lock(&g_sessions_lock);
     J2MESession *s = session_find_locked(session_id);
+    MiniJVM *target_jvm = NULL;
     if (s) {
         atomic_store(&s->stop_requested, 1);
-        if (s->jvm) {
-            if (s->jvm->collector) {
-                s->jvm->collector->exit_flag = 1;
-            }
-            thread_stop_all(s->jvm);
-        }
+        target_jvm = s->jvm;
     }
     pthread_mutex_unlock(&g_sessions_lock);
-    j2me_audio_stop_all();
+
+    if (target_jvm) {
+        session_force_interrupt_threads(target_jvm);
+    }
 }
 
 void jvm_bridge_session_destroy(int session_id) {
@@ -833,32 +865,26 @@ void jvm_bridge_session_destroy(int session_id) {
         return;
     }
 
-    if (s->jvm == g_active_session_jvm) {
+    atomic_store(&s->stop_requested, 1);
+    MiniJVM *jvm = s->jvm;
+    pthread_t runner = s->runner;
+    int runner_valid = s->runner_valid;
+
+    if (jvm == g_active_session_jvm) {
         g_active_session_jvm = NULL;
         j2me_render_set_active_jvm(NULL);
         j2me_input_set_active_jvm(NULL);
     }
     pthread_mutex_unlock(&g_sessions_lock);
 
-    jvm_bridge_session_request_stop(session_id);
-
-    pthread_mutex_lock(&g_sessions_lock);
-    s = session_find_locked(session_id);
-    if (!s) {
-        pthread_mutex_unlock(&g_sessions_lock);
-        return;
+    if (jvm) {
+        session_force_interrupt_threads(jvm);
     }
-
-    MiniJVM *jvm = s->jvm;
-    pthread_t runner = s->runner;
-    int runner_valid = s->runner_valid;
-    pthread_mutex_unlock(&g_sessions_lock);
 
     if (runner_valid && !pthread_equal(pthread_self(), runner)) {
         pthread_join(runner, NULL);
     }
 
-    j2me_audio_stop_all();
     j2me_input_remove_jvm(jvm);
 
     if (jvm) {
@@ -897,8 +923,7 @@ void jvm_bridge_destroy(void) {
     cpu_profiler_stop();
     if (g_jvm) {
         j2me_render_stop();
-        g_jvm->collector->exit_flag = 1;
-        thread_stop_all(g_jvm);
+        session_force_interrupt_threads(g_jvm);
         jvm_destroy(g_jvm);
         g_jvm = NULL;
 
