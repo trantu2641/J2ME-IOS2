@@ -5,13 +5,12 @@ final class TextBoxOverlayView: UIView, UITextViewDelegate {
     var onConfirm: ((String) -> Void)?
     var onCancel: (() -> Void)?
 
-    private let titleLabel = UILabel()
+    private let barView = UIView()
     private let textView = UITextView()
-    private let counterLabel = UILabel()
     private let confirmButton = UIButton(type: .system)
     private let cancelButton = UIButton(type: .system)
-    private let cardView = UIView()
     private var maxLength: Int = 256
+    private var barBottomConstraint: NSLayoutConstraint!
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -23,32 +22,33 @@ final class TextBoxOverlayView: UIView, UITextViewDelegate {
         setupUI()
     }
 
+    // Cho phép chạm vào màn hình game phía trên khung nhập mà không bị chặn
+    override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
+        let hit = super.hitTest(point, with: event)
+        return hit === self ? nil : hit
+    }
+
     private func setupUI() {
-        backgroundColor = UIColor.black.withAlphaComponent(0.6)
+        backgroundColor = .clear
 
-        cardView.backgroundColor = UIColor.secondarySystemBackground
-        cardView.layer.cornerRadius = 16
-        cardView.layer.masksToBounds = true
-        cardView.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(cardView)
+        barView.backgroundColor = UIColor.secondarySystemBackground.withAlphaComponent(0.97)
+        barView.layer.cornerRadius = 12
+        barView.layer.maskedCorners = [.layerMinXMinYCorner, .layerMaxXMinYCorner]
+        barView.layer.borderWidth = 0.5
+        barView.layer.borderColor = UIColor.separator.cgColor
+        barView.layer.masksToBounds = true
+        barView.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(barView)
 
-        titleLabel.font = UIFont.boldSystemFont(ofSize: 16)
-        titleLabel.textColor = .label
-        titleLabel.translatesAutoresizingMaskIntoConstraints = false
-        cardView.addSubview(titleLabel)
-
-        counterLabel.font = UIFont.monospacedDigitSystemFont(ofSize: 12, weight: .regular)
-        counterLabel.textColor = .secondaryLabel
-        counterLabel.textAlignment = .right
-        counterLabel.translatesAutoresizingMaskIntoConstraints = false
-        cardView.addSubview(counterLabel)
-
-        textView.font = UIFont.systemFont(ofSize: 16)
+        textView.font = UIFont.systemFont(ofSize: 15)
         textView.textColor = .label
         textView.backgroundColor = UIColor.systemBackground
-        textView.layer.cornerRadius = 10
-        textView.layer.borderWidth = 1
+        textView.layer.cornerRadius = 8
+        textView.layer.borderWidth = 0.8
         textView.layer.borderColor = UIColor.separator.cgColor
+        textView.textContainerInset = UIEdgeInsets(top: 6, left: 8, bottom: 6, right: 8)
+        textView.isScrollEnabled = true
+        textView.showsVerticalScrollIndicator = true
         textView.autocorrectionType = .no
         textView.autocapitalizationType = .none
         textView.spellCheckingType = .no
@@ -56,60 +56,63 @@ final class TextBoxOverlayView: UIView, UITextViewDelegate {
         textView.smartDashesType = .no
         textView.delegate = self
         textView.translatesAutoresizingMaskIntoConstraints = false
-        cardView.addSubview(textView)
+        barView.addSubview(textView)
 
         cancelButton.setTitle("Hủy", for: .normal)
-        cancelButton.titleLabel?.font = UIFont.systemFont(ofSize: 16)
+        cancelButton.titleLabel?.font = UIFont.systemFont(ofSize: 14, weight: .medium)
         cancelButton.setTitleColor(.systemRed, for: .normal)
+        cancelButton.backgroundColor = UIColor.tertiarySystemFill
+        cancelButton.layer.cornerRadius = 8
         cancelButton.addTarget(self, action: #selector(cancelTapped), for: .touchUpInside)
         cancelButton.translatesAutoresizingMaskIntoConstraints = false
-        cardView.addSubview(cancelButton)
+        barView.addSubview(cancelButton)
 
         confirmButton.setTitle("Lưu", for: .normal)
-        confirmButton.titleLabel?.font = UIFont.boldSystemFont(ofSize: 16)
+        confirmButton.titleLabel?.font = UIFont.boldSystemFont(ofSize: 14)
         confirmButton.backgroundColor = .systemBlue
         confirmButton.setTitleColor(.white, for: .normal)
-        confirmButton.layer.cornerRadius = 10
-        confirmButton.contentEdgeInsets = UIEdgeInsets(top: 8, left: 20, bottom: 8, right: 20)
+        confirmButton.layer.cornerRadius = 8
         confirmButton.addTarget(self, action: #selector(confirmTapped), for: .touchUpInside)
         confirmButton.translatesAutoresizingMaskIntoConstraints = false
-        cardView.addSubview(confirmButton)
+        barView.addSubview(confirmButton)
 
+        barBottomConstraint = barView.bottomAnchor.constraint(equalTo: bottomAnchor, constant: 0)
+
+        // Chiều cao vừa đủ 2 dòng văn bản (~46pt)
         NSLayoutConstraint.activate([
-            cardView.leadingAnchor.constraint(equalTo: safeAreaLayoutGuide.leadingAnchor, constant: 16),
-            cardView.trailingAnchor.constraint(equalTo: safeAreaLayoutGuide.trailingAnchor, constant: -16),
-            cardView.topAnchor.constraint(equalTo: safeAreaLayoutGuide.topAnchor, constant: 40),
+            barView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            barView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            barBottomConstraint,
 
-            titleLabel.topAnchor.constraint(equalTo: cardView.topAnchor, constant: 14),
-            titleLabel.leadingAnchor.constraint(equalTo: cardView.leadingAnchor, constant: 16),
-            titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: counterLabel.leadingAnchor, constant: -8),
+            textView.topAnchor.constraint(equalTo: barView.topAnchor, constant: 6),
+            textView.bottomAnchor.constraint(equalTo: barView.bottomAnchor, constant: -6),
+            textView.leadingAnchor.constraint(equalTo: barView.leadingAnchor, constant: 8),
+            textView.heightAnchor.constraint(equalToConstant: 46),
 
-            counterLabel.centerYAnchor.constraint(equalTo: titleLabel.centerYAnchor),
-            counterLabel.trailingAnchor.constraint(equalTo: cardView.trailingAnchor, constant: -16),
+            cancelButton.leadingAnchor.constraint(equalTo: textView.trailingAnchor, constant: 6),
+            cancelButton.centerYAnchor.constraint(equalTo: textView.centerYAnchor),
+            cancelButton.widthAnchor.constraint(equalToConstant: 48),
+            cancelButton.heightAnchor.constraint(equalToConstant: 36),
 
-            textView.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 10),
-            textView.leadingAnchor.constraint(equalTo: cardView.leadingAnchor, constant: 14),
-            textView.trailingAnchor.constraint(equalTo: cardView.trailingAnchor, constant: -14),
-            textView.heightAnchor.constraint(equalToConstant: 100),
-
-            cancelButton.topAnchor.constraint(equalTo: textView.bottomAnchor, constant: 12),
-            cancelButton.leadingAnchor.constraint(equalTo: cardView.leadingAnchor, constant: 16),
-            cancelButton.bottomAnchor.constraint(equalTo: cardView.bottomAnchor, constant: -14),
-
-            confirmButton.centerYAnchor.constraint(equalTo: cancelButton.centerYAnchor),
-            confirmButton.trailingAnchor.constraint(equalTo: cardView.trailingAnchor, constant: -16),
+            confirmButton.leadingAnchor.constraint(equalTo: cancelButton.trailingAnchor, constant: 6),
+            confirmButton.trailingAnchor.constraint(equalTo: barView.trailingAnchor, constant: -8),
+            confirmButton.centerYAnchor.constraint(equalTo: textView.centerYAnchor),
+            confirmButton.widthAnchor.constraint(equalToConstant: 52),
+            confirmButton.heightAnchor.constraint(equalToConstant: 36)
         ])
     }
 
+    func updateKeyboardBottomOffset(_ bottomOffset: CGFloat) {
+        barBottomConstraint.constant = -max(0, bottomOffset)
+    }
+
     func configure(title: String, initialText: String, maxSize: Int, constraints: Int) {
-        titleLabel.text = title.isEmpty ? "Nhập văn bản" : title
         maxLength = maxSize > 0 ? maxSize : 256
 
         let safeInitial = initialText.count > maxLength
             ? String(initialText.prefix(maxLength))
             : initialText
         textView.text = safeInitial
-        updateCounter()
 
         let baseType = constraints & 0xFFFF
         switch baseType {
@@ -131,17 +134,10 @@ final class TextBoxOverlayView: UIView, UITextViewDelegate {
         textView.becomeFirstResponder()
     }
 
-    private func updateCounter() {
-        let len = textView.text?.count ?? 0
-        counterLabel.text = "\(len)/\(maxLength)"
-    }
-
-    // Use textViewDidChange instead of shouldChangeTextIn so Vietnamese Telex/VNI IME composition never breaks
     func textViewDidChange(_ textView: UITextView) {
         if textView.markedTextRange == nil, let text = textView.text, text.count > maxLength {
             textView.text = String(text.prefix(maxLength))
         }
-        updateCounter()
     }
 
     @objc private func confirmTapped() {

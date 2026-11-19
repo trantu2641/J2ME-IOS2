@@ -178,7 +178,7 @@ final class GameViewController: UIViewController {
     private var keyboardIsVisible = false
 
     private var isCanvasScreenVisible: Bool {
-        !emulatorView.isHidden && formView.isHidden && listView.isHidden && textBoxOverlay.isHidden
+        !emulatorView.isHidden && formView.isHidden && listView.isHidden
     }
 
     private var gameStarted = false
@@ -1271,6 +1271,12 @@ final class GameViewController: UIViewController {
             color: .systemBlue,
             action: #selector(toggleKeepScreenOnFromMenu)
         ))
+        let tapPopupEnabled = isTapTextPopupEnabledForCurrentSession()
+        stack.addArrangedSubview(makeMoreMenuButton(
+            title: tapPopupEnabled ? "✓ Bảng nhập khi chạm" : "Bảng nhập khi chạm",
+            color: .systemBlue,
+            action: #selector(toggleTapTextPopupFromMenu)
+        ))
         stack.addArrangedSubview(makeMoreMenuButton(title: "Cỡ màn hình", color: .systemBlue, action: #selector(showScreenSizeMenu)))
         stack.addArrangedSubview(makeMoreMenuButton(title: "Proxy", color: .systemBlue, action: #selector(showProxyMenu)))
         stack.addArrangedSubview(makeMoreMenuButton(title: "Thoát", color: .systemRed, action: #selector(exitFromMoreMenu)))
@@ -1357,6 +1363,26 @@ final class GameViewController: UIViewController {
         let newValue = !UIApplication.shared.isIdleTimerDisabled
         UIApplication.shared.isIdleTimerDisabled = newValue
         UserDefaults.standard.set(newValue, forKey: "J2MEKeepScreenOn")
+        closeMoreMenu()
+    }
+
+    private func isTapTextPopupEnabledForCurrentSession() -> Bool {
+        guard !runningSessions.isEmpty else { return true }
+        let id = gameID(forPath: runningSessions[activeSessionIndex].path)
+        let key = "J2METapTextPopup_\(id)"
+        if UserDefaults.standard.object(forKey: key) == nil {
+            return true
+        }
+        return UserDefaults.standard.bool(forKey: key)
+    }
+
+    @objc private func toggleTapTextPopupFromMenu() {
+        if !runningSessions.isEmpty {
+            let id = gameID(forPath: runningSessions[activeSessionIndex].path)
+            let key = "J2METapTextPopup_\(id)"
+            let next = !isTapTextPopupEnabledForCurrentSession()
+            UserDefaults.standard.set(next, forKey: key)
+        }
         closeMoreMenu()
     }
 
@@ -1601,7 +1627,6 @@ final class GameViewController: UIViewController {
     }
 
     private func sendTextStringToGame(_ text: String) {
-        // Xóa ký tự cũ nếu có bằng chuỗi phím Backspace (-8) rồi bơm từng ký tự vào ô nhập hiện tại của game
         for _ in 0..<48 {
             sendKeyPulse(-8)
         }
@@ -1614,7 +1639,7 @@ final class GameViewController: UIViewController {
 
     func presentTextInputPopup(title: String = "Nhập văn bản", initialText: String = "", maxSize: Int = 256, constraints: Int = 0) {
         hideSystemKeyboard()
-        keyboardIsVisible = false
+        keyboardIsVisible = true
         setKeypadVisible(false, duration: 0.12)
         view.bringSubviewToFront(textBoxOverlay)
         textBoxOverlay.configure(title: title, initialText: initialText, maxSize: maxSize, constraints: constraints)
@@ -1664,16 +1689,26 @@ final class GameViewController: UIViewController {
             keyboardInput.heightAnchor.constraint(equalToConstant: 2)
         ])
 
-        let doubleTapInput = UITapGestureRecognizer(target: self, action: #selector(handleCanvasDoubleTapForTextInput))
-        doubleTapInput.numberOfTapsRequired = 2
-        doubleTapInput.cancelsTouchesInView = false
-        doubleTapInput.delaysTouchesBegan = false
-        emulatorView.addGestureRecognizer(doubleTapInput)
+        let singleTapInput = UITapGestureRecognizer(target: self, action: #selector(handleCanvasSingleTapForInput))
+        singleTapInput.numberOfTapsRequired = 1
+        singleTapInput.cancelsTouchesInView = false
+        singleTapInput.delaysTouchesBegan = false
+        emulatorView.addGestureRecognizer(singleTapInput)
     }
 
-    @objc private func handleCanvasDoubleTapForTextInput() {
+    @objc private func handleCanvasSingleTapForInput() {
         guard isCanvasScreenVisible, textBoxOverlay.isHidden else { return }
-        presentTextInputPopup(title: "Nhập văn bản", initialText: "", maxSize: 256, constraints: 0)
+
+        if isTapTextPopupEnabledForCurrentSession() && !keyboardInput.isFirstResponder {
+            presentTextInputPopup(title: "Nhập văn bản", initialText: "", maxSize: 256, constraints: 0)
+        } else {
+            if !keyboardInput.isFirstResponder {
+                _ = keyboardInput.becomeFirstResponder()
+                keyboardIsVisible = true
+                keypadBottomConstraint.constant = -7
+                setKeypadVisible(false, duration: 0.18)
+            }
+        }
     }
 
     // MARK: - Keypad
@@ -1684,14 +1719,15 @@ final class GameViewController: UIViewController {
     }
 
     @objc private func toggleSystemKeyboard() {
-        if !textBoxOverlay.isHidden {
-            textBoxOverlay.isHidden = true
-            if isCanvasScreenVisible && !userRequestedExit {
-                setKeypadVisible(true, duration: 0.18)
-            }
+        if keyboardInput.isFirstResponder || keyboardIsVisible {
+            keyboardInput.resignFirstResponder()
             return
         }
-        presentTextInputPopup(title: "Nhập văn bản", initialText: "", maxSize: 256, constraints: 0)
+
+        guard keyboardInput.becomeFirstResponder() else { return }
+        keyboardIsVisible = true
+        keypadBottomConstraint.constant = -7
+        setKeypadVisible(false, duration: 0.18)
     }
 
     private func hideSystemKeyboard() {
@@ -1716,14 +1752,18 @@ final class GameViewController: UIViewController {
         let animationOptions = UIView.AnimationOptions(rawValue: curve << 16).union(.beginFromCurrentState)
 
         let keyboardInset: CGFloat
+        let rawKeyboardTopOffset: CGFloat
         if systemKeyboardVisible {
             let safeBottom = view.safeAreaLayoutGuide.layoutFrame.maxY
             keyboardInset = max(0, safeBottom - keyboardFrame.minY)
+            rawKeyboardTopOffset = max(0, view.bounds.height - keyboardFrame.minY)
         } else {
             keyboardInset = 0
+            rawKeyboardTopOffset = 0
         }
 
         keypadBottomConstraint.constant = -(keyboardInset + 7)
+        textBoxOverlay.updateKeyboardBottomOffset(rawKeyboardTopOffset)
 
         if systemKeyboardVisible {
             keyboardIsVisible = true
@@ -1743,6 +1783,7 @@ final class GameViewController: UIViewController {
     @objc private func handleKeyboardWillHide(_ notification: Notification) {
         keyboardIsVisible = false
         keypadBottomConstraint.constant = -7
+        textBoxOverlay.updateKeyboardBottomOffset(0)
 
         let duration = notification.userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double ?? 0.25
         let curve = notification.userInfo?[UIResponder.keyboardAnimationCurveUserInfoKey] as? UInt ?? 7
@@ -1802,6 +1843,7 @@ final class GameViewController: UIViewController {
         startupWatchdog?.cancel()
         startupWatchdog = nil
 
+        textBoxOverlay.isHidden = true
         keyboardInput.resignFirstResponder()
         keyboardIsVisible = false
         keypadBottomConstraint.constant = -7
