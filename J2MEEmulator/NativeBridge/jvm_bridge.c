@@ -69,6 +69,11 @@ static j2me_session_exit_callback g_session_exit_callback = NULL;
 
 static char *load_midlet_manifest(const char *jar_path);
 
+#define BRIDGE_LOG(fmt, ...) do { \
+    printf(fmt, ##__VA_ARGS__); \
+    fflush(stdout); \
+} while (0)
+
 void jvm_bridge_set_session_exit_callback(j2me_session_exit_callback callback) {
     g_session_exit_callback = callback;
 }
@@ -99,10 +104,39 @@ static int session_active_count_locked(void) {
     return count;
 }
 
+static int count_live_jvm_threads(MiniJVM *jvm) {
+    if (!jvm || !jvm->thread_list) return 0;
+    int live = 0;
+    spin_lock(&jvm->thread_list->spinlock);
+    for (int i = 0; i < jvm->thread_list->length; i++) {
+        Runtime *rt = (Runtime *)arraylist_get_value_unsafe(jvm->thread_list, i);
+        if (rt && rt->thrd_info) {
+            int st = rt->thrd_info->thread_status;
+            if (st != THREAD_STATUS_ZOMBIE && st != THREAD_STATUS_DEAD) {
+                live++;
+            }
+        }
+    }
+    spin_unlock(&jvm->thread_list->spinlock);
+    return live;
+}
+
 static void signal_jvm_threads_stop(MiniJVM *jvm) {
     if (!jvm) return;
     if (jvm->collector) {
         jvm->collector->exit_flag = 1;
+    }
+    if (jvm->thread_list) {
+        spin_lock(&jvm->thread_list->spinlock);
+        for (int i = 0; i < jvm->thread_list->length; i++) {
+            Runtime *rt = (Runtime *)arraylist_get_value_unsafe(jvm->thread_list, i);
+            if (rt && rt->thrd_info) {
+                rt->thrd_info->is_blocking = 0;
+                rt->thrd_info->thread_status = THREAD_STATUS_ZOMBIE;
+                jthread_stop(rt);
+            }
+        }
+        spin_unlock(&jvm->thread_list->spinlock);
     }
     thread_stop_all(jvm);
 }
@@ -234,11 +268,11 @@ static void *session_runner_main(void *arg) {
     pthread_setname_np("J2ME-MIDlet");
     atomic_store(&s->running, 1);
 
-    printf("[JVM Session %d] Starting MIDlet: %s\n", session_id, s->jar_path);
+    BRIDGE_LOG("[JVM Session %d] Starting MIDlet: %s\n", session_id, s->jar_path);
 
     char *manifest = load_midlet_manifest(s->jar_path);
     if (!manifest) {
-        printf("[JVM Session %d] ERROR: Manifest extraction failed\n", session_id);
+        BRIDGE_LOG("[JVM Session %d] ERROR: Manifest extraction failed\n", session_id);
         atomic_store(&s->running, 0);
         if (g_session_exit_callback && !atomic_load(&s->stop_requested) && !atomic_load(&s->destroying)) {
             g_session_exit_callback(session_id, -1);
@@ -268,7 +302,7 @@ static void *session_runner_main(void *arg) {
     arraylist_destroy(java_para);
     free(manifest);
 
-    printf("[JVM Session %d] MIDlet finished with code %d\n", session_id, ret);
+    BRIDGE_LOG("[JVM Session %d] MIDlet finished with code %d\n", session_id, ret);
 
     int was_manually_stopped = atomic_load(&s->stop_requested) || atomic_load(&s->destroying);
     atomic_store(&s->running, 0);
@@ -793,7 +827,7 @@ int jvm_bridge_session_create(
         fps_limit
     );
 
-    printf("[JVM Session %d] JVM initialized: %dx%d\n", s->id, screen_width, screen_height);
+    BRIDGE_LOG("[JVM Session %d] JVM initialized: %dx%d\n", s->id, screen_width, screen_height);
     return s->id;
 }
 
@@ -846,7 +880,7 @@ void jvm_bridge_session_request_stop(int session_id) {
     }
     pthread_mutex_unlock(&g_sessions_lock);
 
-    printf("[JVM Session %d] Request stop (jvm=%p)\n", session_id, (void *)jvm);
+    BRIDGE_LOG("[JVM Session %d] Request stop (jvm=%p)\n", session_id, (void *)jvm);
     signal_jvm_threads_stop(jvm);
 }
 
@@ -855,14 +889,14 @@ void jvm_bridge_session_destroy(int session_id) {
     J2MESession *s = session_find_locked(session_id);
     if (!s) {
         pthread_mutex_unlock(&g_sessions_lock);
-        printf("[JVM Session %d] Destroy skipped: not found\n", session_id);
+        BRIDGE_LOG("[JVM Session %d] Destroy skipped: not found\n", session_id);
         return;
     }
 
     int expected = 0;
     if (!atomic_compare_exchange_strong(&s->destroying, &expected, 1)) {
         pthread_mutex_unlock(&g_sessions_lock);
-        printf("[JVM Session %d] Destroy skipped: already destroying\n", session_id);
+        BRIDGE_LOG("[JVM Session %d] Destroy skipped: already destroying\n", session_id);
         return;
     }
 
@@ -879,30 +913,32 @@ void jvm_bridge_session_destroy(int session_id) {
     int runner_valid = s->runner_valid;
     pthread_mutex_unlock(&g_sessions_lock);
 
-    printf("[JVM Session %d] Destroying begin (jvm=%p, runner_valid=%d)\n", session_id, (void *)jvm, runner_valid);
+    BRIDGE_LOG("[JVM Session %d] Destroying begin (jvm=%p, runner_valid=%d)\n", session_id, (void *)jvm, runner_valid);
     signal_jvm_threads_stop(jvm);
 
     if (runner_valid && !pthread_equal(pthread_self(), runner)) {
         struct timespec step = {0, 25000000L}; // 25ms
         int waited = 0;
         for (int i = 0; i < 80; i++) {
-            if (!atomic_load(&s->running)) break;
+            if (!atomic_load(&s->running) && count_live_jvm_threads(jvm) == 0) break;
             signal_jvm_threads_stop(jvm);
             nanosleep(&step, NULL);
             waited += 25;
         }
-        printf("[JVM Session %d] Waiting runner join after %dms (still running=%d)\n",
-               session_id, waited, atomic_load(&s->running));
+        int live_after_wait = count_live_jvm_threads(jvm);
+        BRIDGE_LOG("[JVM Session %d] Waiting runner join after %dms (running=%d, live_threads=%d)\n",
+                   session_id, waited, atomic_load(&s->running), live_after_wait);
+        signal_jvm_threads_stop(jvm);
         pthread_join(runner, NULL);
-        printf("[JVM Session %d] Runner joined\n", session_id);
+        BRIDGE_LOG("[JVM Session %d] Runner joined\n", session_id);
     }
 
     j2me_input_remove_jvm(jvm);
 
     if (jvm) {
-        printf("[JVM Session %d] Calling jvm_destroy\n", session_id);
+        BRIDGE_LOG("[JVM Session %d] Calling jvm_destroy\n", session_id);
         jvm_destroy(jvm);
-        printf("[JVM Session %d] jvm_destroy completed\n", session_id);
+        BRIDGE_LOG("[JVM Session %d] jvm_destroy completed\n", session_id);
     }
 
     pthread_mutex_lock(&g_sessions_lock);
@@ -913,11 +949,11 @@ void jvm_bridge_session_destroy(int session_id) {
     int remaining = session_active_count_locked();
     pthread_mutex_unlock(&g_sessions_lock);
 
-    printf("[JVM Session %d] Destroy finished, remaining sessions=%d\n", session_id, remaining);
+    BRIDGE_LOG("[JVM Session %d] Destroy finished, remaining sessions=%d\n", session_id, remaining);
 
     if (remaining == 0) {
         cleanup_shared_runtime_resources();
-        printf("[JVM Session %d] Shared runtime resources cleaned up\n", session_id);
+        BRIDGE_LOG("[JVM Session %d] Shared runtime resources cleaned up\n", session_id);
     }
 }
 
