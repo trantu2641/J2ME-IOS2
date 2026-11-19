@@ -822,6 +822,7 @@ void jvm_bridge_session_request_stop(int session_id) {
         }
     }
     pthread_mutex_unlock(&g_sessions_lock);
+    j2me_audio_stop_all();
 }
 
 void jvm_bridge_session_destroy(int session_id) {
@@ -857,11 +858,12 @@ void jvm_bridge_session_destroy(int session_id) {
         pthread_join(runner, NULL);
     }
 
+    j2me_audio_stop_all();
+    j2me_input_remove_jvm(jvm);
+
     if (jvm) {
         jvm_destroy(jvm);
     }
-
-    j2me_input_remove_jvm(jvm);
 
     pthread_mutex_lock(&g_sessions_lock);
     s = session_find_locked(session_id);
@@ -876,6 +878,7 @@ void jvm_bridge_session_destroy_all(void) {
         jvm_bridge_session_destroy(i);
     }
 
+    j2me_audio_stop_all();
     j2me_render_stop();
     j2me_render_cleanup();
     zip_reader_cache_clear();
