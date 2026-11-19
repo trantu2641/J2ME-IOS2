@@ -1224,17 +1224,27 @@ final class GameViewController: UIViewController {
 
             let session = self.runningSessions[self.activeSessionIndex]
             self.runningSessions.remove(at: self.activeSessionIndex)
-            DispatchQueue.global(qos: .userInitiated).async {
-                jvm_bridge_session_request_stop(session.id)
-                jvm_bridge_session_destroy(session.id)
-            }
 
             if self.runningSessions.isEmpty {
                 self.userRequestedExit = true
+                jvm_bridge_set_session_exit_callback(nil)
                 J2MEBackgroundAudioKeeper.shared.stop()
                 j2me_render_set_background_mode(0)
-                self.dismiss(animated: true)
+                setGlobalEmulatorView(nil)
+
+                DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                    jvm_bridge_session_request_stop(session.id)
+                    jvm_bridge_session_destroy(session.id)
+                    DispatchQueue.main.async {
+                        self?.dismiss(animated: true)
+                    }
+                }
                 return
+            }
+
+            DispatchQueue.global(qos: .userInitiated).async {
+                jvm_bridge_session_request_stop(session.id)
+                jvm_bridge_session_destroy(session.id)
             }
 
             self.activeSessionIndex = min(self.activeSessionIndex, self.runningSessions.count - 1)
@@ -1252,17 +1262,24 @@ final class GameViewController: UIViewController {
         let wasActive = (index == activeSessionIndex)
         runningSessions.remove(at: index)
 
-        DispatchQueue.global(qos: .utility).async {
-            jvm_bridge_session_destroy(sessionID)
-        }
-
         if runningSessions.isEmpty {
             userRequestedExit = true
+            jvm_bridge_set_session_exit_callback(nil)
             J2MEBackgroundAudioKeeper.shared.stop()
             j2me_render_set_background_mode(0)
-            jvm_bridge_set_session_exit_callback(nil)
-            dismiss(animated: true)
+            setGlobalEmulatorView(nil)
+
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                jvm_bridge_session_destroy(sessionID)
+                DispatchQueue.main.async {
+                    self?.dismiss(animated: true)
+                }
+            }
             return
+        }
+
+        DispatchQueue.global(qos: .utility).async {
+            jvm_bridge_session_destroy(sessionID)
         }
 
         if index < activeSessionIndex {
