@@ -846,6 +846,7 @@ void jvm_bridge_session_request_stop(int session_id) {
     }
     pthread_mutex_unlock(&g_sessions_lock);
 
+    printf("[JVM Session %d] Request stop (jvm=%p)\n", session_id, (void *)jvm);
     signal_jvm_threads_stop(jvm);
 }
 
@@ -854,12 +855,14 @@ void jvm_bridge_session_destroy(int session_id) {
     J2MESession *s = session_find_locked(session_id);
     if (!s) {
         pthread_mutex_unlock(&g_sessions_lock);
+        printf("[JVM Session %d] Destroy skipped: not found\n", session_id);
         return;
     }
 
     int expected = 0;
     if (!atomic_compare_exchange_strong(&s->destroying, &expected, 1)) {
         pthread_mutex_unlock(&g_sessions_lock);
+        printf("[JVM Session %d] Destroy skipped: already destroying\n", session_id);
         return;
     }
 
@@ -876,22 +879,30 @@ void jvm_bridge_session_destroy(int session_id) {
     int runner_valid = s->runner_valid;
     pthread_mutex_unlock(&g_sessions_lock);
 
+    printf("[JVM Session %d] Destroying begin (jvm=%p, runner_valid=%d)\n", session_id, (void *)jvm, runner_valid);
     signal_jvm_threads_stop(jvm);
 
     if (runner_valid && !pthread_equal(pthread_self(), runner)) {
         struct timespec step = {0, 25000000L}; // 25ms
+        int waited = 0;
         for (int i = 0; i < 80; i++) {
             if (!atomic_load(&s->running)) break;
             signal_jvm_threads_stop(jvm);
             nanosleep(&step, NULL);
+            waited += 25;
         }
+        printf("[JVM Session %d] Waiting runner join after %dms (still running=%d)\n",
+               session_id, waited, atomic_load(&s->running));
         pthread_join(runner, NULL);
+        printf("[JVM Session %d] Runner joined\n", session_id);
     }
 
     j2me_input_remove_jvm(jvm);
 
     if (jvm) {
+        printf("[JVM Session %d] Calling jvm_destroy\n", session_id);
         jvm_destroy(jvm);
+        printf("[JVM Session %d] jvm_destroy completed\n", session_id);
     }
 
     pthread_mutex_lock(&g_sessions_lock);
@@ -902,8 +913,11 @@ void jvm_bridge_session_destroy(int session_id) {
     int remaining = session_active_count_locked();
     pthread_mutex_unlock(&g_sessions_lock);
 
+    printf("[JVM Session %d] Destroy finished, remaining sessions=%d\n", session_id, remaining);
+
     if (remaining == 0) {
         cleanup_shared_runtime_resources();
+        printf("[JVM Session %d] Shared runtime resources cleaned up\n", session_id);
     }
 }
 
