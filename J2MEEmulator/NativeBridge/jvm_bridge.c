@@ -823,7 +823,6 @@ void jvm_bridge_session_request_stop(int session_id) {
         }
     }
     pthread_mutex_unlock(&g_sessions_lock);
-    j2me_audio_stop_all();
 }
 
 void jvm_bridge_session_destroy(int session_id) {
@@ -860,9 +859,14 @@ void jvm_bridge_session_destroy(int session_id) {
     }
     pthread_mutex_unlock(&g_sessions_lock);
 
-    j2me_audio_stop_all();
-
+    // Wait for session runner thread to unwind and exit cleanly without touching global audio of other sessions
     if (runner_valid && !pthread_equal(pthread_self(), runner)) {
+        struct timespec step = {0, 20000000L}; // 20ms
+        for (int i = 0; i < 15; i++) {
+            if (!atomic_load(&s->running)) break;
+            if (jvm) thread_stop_all(jvm);
+            nanosleep(&step, NULL);
+        }
         pthread_join(runner, NULL);
     }
 
