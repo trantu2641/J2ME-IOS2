@@ -613,6 +613,12 @@ static s32 n_destroyContext(Runtime *runtime, JClass *clazz) {
 static s32 n_flushToScreen(Runtime *runtime, JClass *clazz) {
     process_dead_shells();
 
+    if (g_render_stopped) {
+        return RUNTIME_STATUS_NORMAL;
+    }
+    if (atomic_load_explicit(&g_render_background_mode, memory_order_relaxed) != 0) {
+        return RUNTIME_STATUS_NORMAL;
+    }
     if (g_active_render_jvm && runtime->jvm != g_active_render_jvm) {
         return RUNTIME_STATUS_NORMAL;
     }
