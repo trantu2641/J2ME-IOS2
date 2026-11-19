@@ -1569,40 +1569,39 @@ final class GameViewController: UIViewController {
 
     // MARK: - Form and list overlays
 
+    private var formViewBottomConstraint: NSLayoutConstraint?
+
     private func buildOverlays() {
         for overlay in [formView, listView, textBoxOverlay] {
             overlay.translatesAutoresizingMaskIntoConstraints = false
             view.addSubview(overlay)
+            let bottomConstraint = overlay.bottomAnchor.constraint(equalTo: view.bottomAnchor)
+            if overlay === formView {
+                formViewBottomConstraint = bottomConstraint
+            }
             NSLayoutConstraint.activate([
                 overlay.topAnchor.constraint(equalTo: view.topAnchor),
                 overlay.leadingAnchor.constraint(equalTo: view.leadingAnchor),
                 overlay.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-                overlay.bottomAnchor.constraint(equalTo: view.bottomAnchor)
+                bottomConstraint
             ])
             overlay.isHidden = true
         }
 
         textBoxOverlay.onConfirm = { [weak self] text in
             guard let self else { return }
+            self.textBoxOverlay.endEditing(true)
             self.textBoxOverlay.isHidden = true
             self.keyboardIsVisible = false
-            if self.isCanvasScreenVisible {
-                self.sendTextStringToGame(text)
-                if !self.userRequestedExit {
-                    self.setKeypadVisible(true, duration: 0.18)
-                }
-            } else {
-                // Nếu đang ở màn hình UI native (TextBox / Form)
-                text.withCString { ptr in
-                    j2me_input_post_key(Int32(J2ME_UI_COMMAND_ACTION), 0)
-                    _ = ptr
-                }
-                self.sendTextStringToGame(text)
+            self.sendTextStringToGame(text)
+            if self.isCanvasScreenVisible && !self.userRequestedExit {
+                self.setKeypadVisible(true, duration: 0.18)
             }
         }
 
         textBoxOverlay.onCancel = { [weak self] in
             guard let self else { return }
+            self.textBoxOverlay.endEditing(true)
             self.textBoxOverlay.isHidden = true
             self.keyboardIsVisible = false
             if self.isCanvasScreenVisible && !self.userRequestedExit {
@@ -1685,8 +1684,10 @@ final class GameViewController: UIViewController {
 
     @objc private func toggleSystemKeyboard() {
         if !textBoxOverlay.isHidden || keyboardInput.isFirstResponder || keyboardIsVisible {
+            textBoxOverlay.endEditing(true)
             textBoxOverlay.isHidden = true
             keyboardInput.resignFirstResponder()
+            view.endEditing(true)
             keyboardIsVisible = false
             keypadBottomConstraint.constant = -7
             if isCanvasScreenVisible && !userRequestedExit {
@@ -1731,11 +1732,17 @@ final class GameViewController: UIViewController {
         }
 
         keypadBottomConstraint.constant = -(keyboardInset + 7)
+        formViewBottomConstraint?.constant = -rawKeyboardTopOffset
         textBoxOverlay.updateKeyboardBottomOffset(rawKeyboardTopOffset)
 
         if systemKeyboardVisible {
             keyboardIsVisible = true
             setKeypadVisible(false, duration: duration, animationOptions: animationOptions)
+            if !formView.isHidden {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+                    self?.scrollActiveInputIntoView(in: self?.formView)
+                }
+            }
         } else {
             keyboardIsVisible = false
             if isCanvasScreenVisible && !userRequestedExit {
@@ -1751,6 +1758,7 @@ final class GameViewController: UIViewController {
     @objc private func handleKeyboardWillHide(_ notification: Notification) {
         keyboardIsVisible = false
         keypadBottomConstraint.constant = -7
+        formViewBottomConstraint?.constant = 0
         textBoxOverlay.updateKeyboardBottomOffset(0)
 
         let duration = notification.userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double ?? 0.25
@@ -1764,6 +1772,34 @@ final class GameViewController: UIViewController {
                 self.view.layoutIfNeeded()
             }
         }
+    }
+
+
+    private func scrollActiveInputIntoView(in rootView: UIView?) {
+        guard let rootView,
+              let firstResponder = findFirstResponder(in: rootView),
+              let scrollView = findEnclosingScrollView(for: firstResponder, stopAt: rootView) else { return }
+
+        let targetRect = firstResponder.convert(firstResponder.bounds, to: scrollView).insetBy(dx: 0, dy: -16)
+        scrollView.scrollRectToVisible(targetRect, animated: true)
+    }
+
+    private func findFirstResponder(in view: UIView) -> UIView? {
+        if view.isFirstResponder { return view }
+        for subview in view.subviews {
+            if let found = findFirstResponder(in: subview) { return found }
+        }
+        return nil
+    }
+
+    private func findEnclosingScrollView(for view: UIView, stopAt root: UIView) -> UIScrollView? {
+        var current = view.superview
+        while let v = current {
+            if let scroll = v as? UIScrollView { return scroll }
+            if v === root { break }
+            current = v.superview
+        }
+        return nil
     }
 
     private func setKeypadVisible(
@@ -2027,11 +2063,7 @@ let gameUICallback: @convention(c) (Int32, UnsafePointer<CChar>?) -> Void = { ac
         case Int32(J2ME_UI_ACTION_SHOW_FORM): controller.showFormView()
         case Int32(J2ME_UI_ACTION_SHOW_LIST): controller.showListView()
         case Int32(J2ME_UI_ACTION_SHOW_ALERT): controller.showAlert()
-        default:
-            if let data {
-                let initial = String(cString: data)
-                controller.presentTextInputPopup(title: "Nhập văn bản", initialText: initial, maxSize: 256, constraints: 0)
-            }
+        default: break
         }
     }
 }

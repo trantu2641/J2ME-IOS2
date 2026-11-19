@@ -14,6 +14,7 @@ class FormView: UIView, UIGestureRecognizerDelegate {
     private let titleLabel = UILabel()
     private var commandButtons: [UIButton] = []
     private let commandBar = UIStackView()
+    private var commandBarBottomConstraint: NSLayoutConstraint!
 
     // Native-form item tracking. The index is the serialized J2ME form-item
     // index used by j2me_ui.m, so edited UIKit values can be committed back
@@ -33,6 +34,7 @@ class FormView: UIView, UIGestureRecognizerDelegate {
     private var choiceControls: [ChoiceControl] = []
     private var textControls: [TextControl] = []
     private var activeTextField: UITextField?
+    private var currentKeyboardInset: CGFloat = 0
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -61,6 +63,7 @@ class FormView: UIView, UIGestureRecognizerDelegate {
         // Scroll + Stack for items
         scrollView.translatesAutoresizingMaskIntoConstraints = false
         scrollView.alwaysBounceVertical = true
+        scrollView.keyboardDismissMode = .interactive
         addSubview(scrollView)
 
         stackView.axis = .vertical
@@ -69,7 +72,7 @@ class FormView: UIView, UIGestureRecognizerDelegate {
         stackView.layoutMargins = UIEdgeInsets(
             top: 8,
             left: 16,
-            bottom: 8,
+            bottom: 12,
             right: 16
         )
         stackView.isLayoutMarginsRelativeArrangement = true
@@ -82,6 +85,11 @@ class FormView: UIView, UIGestureRecognizerDelegate {
         commandBar.distribution = .fillEqually
         commandBar.translatesAutoresizingMaskIntoConstraints = false
         addSubview(commandBar)
+
+        commandBarBottomConstraint = commandBar.bottomAnchor.constraint(
+            equalTo: safeAreaLayoutGuide.bottomAnchor,
+            constant: -8
+        )
 
         NSLayoutConstraint.activate([
             titleLabel.topAnchor.constraint(
@@ -132,10 +140,7 @@ class FormView: UIView, UIGestureRecognizerDelegate {
                 equalTo: trailingAnchor,
                 constant: -16
             ),
-            commandBar.bottomAnchor.constraint(
-                equalTo: safeAreaLayoutGuide.bottomAnchor,
-                constant: -8
-            ),
+            commandBarBottomConstraint,
             commandBar.heightAnchor.constraint(
                 equalToConstant: 44
             )
@@ -153,7 +158,7 @@ class FormView: UIView, UIGestureRecognizerDelegate {
 
         addGestureRecognizer(outsideTap)
 
-        // Push scrollView up when keyboard appears
+        // Đẩy commandBar và thu gọn vùng hiển thị scrollView lên trên bàn phím
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(formKeyboardWillChangeFrame(_:)),
@@ -179,35 +184,56 @@ class FormView: UIView, UIGestureRecognizerDelegate {
 
         let keyboardFrame = convert(screenFrame, from: nil)
         let intersection = bounds.intersection(keyboardFrame)
-        let keyboardHeight = intersection.isNull ? 0 : intersection.height
 
-        let bottomChrome = bounds.maxY - scrollView.frame.maxY
-        let bottomInset = max(0, keyboardHeight - bottomChrome + 8)
+        let systemKeyboardVisible = !intersection.isNull &&
+            intersection.width >= bounds.width * 0.5 &&
+            intersection.height > 80
 
         let duration = userInfo[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double ?? 0.25
         let curve = userInfo[UIResponder.keyboardAnimationCurveUserInfoKey] as? UInt ?? 7
         let options = UIView.AnimationOptions(rawValue: curve << 16).union(.beginFromCurrentState)
 
-        UIView.animate(withDuration: duration, delay: 0, options: options) {
-            self.scrollView.contentInset.bottom = bottomInset
-            self.scrollView.verticalScrollIndicatorInsets.bottom = bottomInset
+        let keyboardInset: CGFloat
+        if systemKeyboardVisible {
+            let safeBottom = safeAreaLayoutGuide.layoutFrame.maxY
+            keyboardInset = max(0, safeBottom - keyboardFrame.minY)
+        } else {
+            keyboardInset = 0
         }
 
-        if let active = activeTextField {
-            let rectInScroll = active.convert(active.bounds, to: scrollView)
-            scrollView.scrollRectToVisible(rectInScroll.insetBy(dx: 0, dy: -16), animated: true)
+        currentKeyboardInset = keyboardInset
+        commandBarBottomConstraint.constant = -(keyboardInset + 8)
+
+        UIView.animate(withDuration: duration, delay: 0, options: options) {
+            self.layoutIfNeeded()
+        } completion: { _ in
+            self.scrollActiveFieldIntoView(animated: true)
+        }
+
+        // Cuộn ngay trong lúc bàn phím đang trượt lên
+        DispatchQueue.main.async {
+            self.scrollActiveFieldIntoView(animated: true)
         }
     }
 
     @objc private func formKeyboardWillHide(_ notification: Notification) {
+        currentKeyboardInset = 0
+        commandBarBottomConstraint.constant = -8
+
         let duration = notification.userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double ?? 0.25
         let curve = notification.userInfo?[UIResponder.keyboardAnimationCurveUserInfoKey] as? UInt ?? 7
         let options = UIView.AnimationOptions(rawValue: curve << 16).union(.beginFromCurrentState)
 
         UIView.animate(withDuration: duration, delay: 0, options: options) {
-            self.scrollView.contentInset.bottom = 0
-            self.scrollView.verticalScrollIndicatorInsets.bottom = 0
+            self.layoutIfNeeded()
         }
+    }
+
+    private func scrollActiveFieldIntoView(animated: Bool) {
+        guard let active = activeTextField else { return }
+        let targetContainer = active.superview ?? active
+        let rectInScroll = targetContainer.convert(targetContainer.bounds, to: scrollView)
+        scrollView.scrollRectToVisible(rectInScroll.insetBy(dx: 0, dy: -16), animated: animated)
     }
 
     // MARK: - Dismiss keyboard on outside tap
@@ -217,11 +243,11 @@ class FormView: UIView, UIGestureRecognizerDelegate {
         shouldReceive touch: UITouch
     ) -> Bool {
 
-        // Do not dismiss when the user taps inside a text field.
+        // Do not dismiss when the user taps inside a text field or command button.
         var touchedView = touch.view
 
         while let current = touchedView, current !== self {
-            if current is UITextField {
+            if current is UITextField || current is UIButton {
                 return false
             }
 
@@ -260,6 +286,8 @@ class FormView: UIView, UIGestureRecognizerDelegate {
         choiceControls.removeAll()
         textControls.removeAll()
         activeTextField = nil
+        currentKeyboardInset = 0
+        commandBarBottomConstraint.constant = -8
         scrollView.contentInset.bottom = 0
         scrollView.verticalScrollIndicatorInsets.bottom = 0
 
@@ -290,6 +318,7 @@ class FormView: UIView, UIGestureRecognizerDelegate {
             switch itemType {
             case 0:
                 addStringItem(label: label, text: text)
+                previousWasChoice = false
 
             case 1:
                 addTextField(
@@ -470,12 +499,11 @@ class FormView: UIView, UIGestureRecognizerDelegate {
         button.tintColor = .systemBlue
         button.semanticContentAttribute = .forceLeftToRight
 
-        button.imageEdgeInsets = UIEdgeInsets(
-            top: 0,
-            left: 0,
-            bottom: 0,
-            right: 6
-        )
+        var config = UIButton.Configuration.plain()
+        config.contentInsets = NSDirectionalEdgeInsets(top: 4, leading: 0, bottom: 4, trailing: 4)
+        config.imagePadding = 8
+        config.baseForegroundColor = .label
+        button.configuration = config
 
         button.tag = selected ? 1 : 0
 
@@ -494,7 +522,7 @@ class FormView: UIView, UIGestureRecognizerDelegate {
               )
 
         button.setImage(
-            UIImage(systemName: symbol),
+            UIImage(systemName: symbol)?.withTintColor(.systemBlue, renderingMode: .alwaysOriginal),
             for: .normal
         )
 
@@ -576,7 +604,7 @@ class FormView: UIView, UIGestureRecognizerDelegate {
               )
 
         button.setImage(
-            UIImage(systemName: symbol),
+            UIImage(systemName: symbol)?.withTintColor(.systemBlue, renderingMode: .alwaysOriginal),
             for: .normal
         )
     }
@@ -614,6 +642,11 @@ class FormView: UIView, UIGestureRecognizerDelegate {
         tf.textColor = .label
         tf.backgroundColor = .systemBackground
         tf.clearButtonMode = .whileEditing
+        tf.autocorrectionType = .no
+        tf.autocapitalizationType = .none
+        tf.spellCheckingType = .no
+        tf.smartQuotesType = .no
+        tf.smartDashesType = .no
 
         let baseConstraint =
             Int(constraints) & 0xFFFF
@@ -764,8 +797,9 @@ class FormView: UIView, UIGestureRecognizerDelegate {
         _ sender: UITextField
     ) {
         activeTextField = sender
-        let rectInScroll = sender.convert(sender.bounds, to: scrollView)
-        scrollView.scrollRectToVisible(rectInScroll.insetBy(dx: 0, dy: -16), animated: true)
+        DispatchQueue.main.async {
+            self.scrollActiveFieldIntoView(animated: true)
+        }
     }
 
     @objc private func textFieldDidEnd(
