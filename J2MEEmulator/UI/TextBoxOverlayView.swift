@@ -5,8 +5,8 @@ final class TextBoxOverlayView: UIView, UITextViewDelegate {
     var onConfirm: ((String) -> Void)?
     var onCancel: (() -> Void)?
 
+    static let barHeight: CGFloat = 58
     private let barView = UIView()
-    var inputBarTopAnchor: NSLayoutYAxisAnchor { barView.topAnchor }
     private let textView = UITextView()
     private let confirmButton = UIButton(type: .system)
     private let cancelButton = UIButton(type: .system)

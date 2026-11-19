@@ -174,8 +174,6 @@ final class GameViewController: UIViewController {
     private var keypadHeightConstraint: NSLayoutConstraint!
     private var keypadCollapsedConstraint: NSLayoutConstraint!
     private var keypadBottomConstraint: NSLayoutConstraint!
-    private var emulatorBottomToKeypadConstraint: NSLayoutConstraint!
-    private var emulatorBottomToTextBoxConstraint: NSLayoutConstraint!
 
     private var keyboardIsVisible = false
 
@@ -1584,7 +1582,6 @@ final class GameViewController: UIViewController {
         keypadCollapsedConstraint.priority = .required
 
         keypadBottomConstraint = keypadView.bottomAnchor.constraint(equalTo: safe.bottomAnchor, constant: -7)
-        emulatorBottomToKeypadConstraint = emulatorView.bottomAnchor.constraint(equalTo: keypadView.topAnchor, constant: -8)
 
         NSLayoutConstraint.activate([
             headerStack.topAnchor.constraint(equalTo: safe.topAnchor, constant: 3),
@@ -1595,7 +1592,7 @@ final class GameViewController: UIViewController {
             emulatorView.topAnchor.constraint(equalTo: headerStack.bottomAnchor, constant: 5),
             emulatorView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             emulatorView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            emulatorBottomToKeypadConstraint,
+            emulatorView.bottomAnchor.constraint(equalTo: keypadView.topAnchor, constant: -8),
 
             keypadView.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 2),
             keypadView.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -2),
@@ -1619,13 +1616,12 @@ final class GameViewController: UIViewController {
             overlay.isHidden = true
         }
 
-        emulatorBottomToTextBoxConstraint = emulatorView.bottomAnchor.constraint(equalTo: textBoxOverlay.inputBarTopAnchor, constant: -4)
-
         textBoxOverlay.onConfirm = { [weak self] text in
             guard let self else { return }
             self.textBoxOverlay.endEditing(true)
-            self.setTextBoxOverlayVisible(false)
+            self.textBoxOverlay.isHidden = true
             self.keyboardIsVisible = false
+            self.keypadBottomConstraint.constant = -7
             self.sendTextStringToGame(text)
             if self.isCanvasScreenVisible && !self.userRequestedExit {
                 self.setKeypadVisible(true, duration: 0.18)
@@ -1635,8 +1631,9 @@ final class GameViewController: UIViewController {
         textBoxOverlay.onCancel = { [weak self] in
             guard let self else { return }
             self.textBoxOverlay.endEditing(true)
-            self.setTextBoxOverlayVisible(false)
+            self.textBoxOverlay.isHidden = true
             self.keyboardIsVisible = false
+            self.keypadBottomConstraint.constant = -7
             if self.isCanvasScreenVisible && !self.userRequestedExit {
                 self.setKeypadVisible(true, duration: 0.18)
             }
@@ -1654,24 +1651,13 @@ final class GameViewController: UIViewController {
         }
     }
 
-    private func setTextBoxOverlayVisible(_ visible: Bool) {
-        textBoxOverlay.isHidden = !visible
-        if visible {
-            emulatorBottomToKeypadConstraint.isActive = false
-            emulatorBottomToTextBoxConstraint.isActive = true
-        } else {
-            emulatorBottomToTextBoxConstraint.isActive = false
-            emulatorBottomToKeypadConstraint.isActive = true
-        }
-    }
-
     func presentTextInputPopup(title: String = "Nhập văn bản", initialText: String = "", maxSize: Int = 256, constraints: Int = 0) {
         hideSystemKeyboard()
         keyboardIsVisible = true
+        textBoxOverlay.isHidden = false
         setKeypadVisible(false, duration: 0.12)
         view.bringSubviewToFront(textBoxOverlay)
         textBoxOverlay.configure(title: title, initialText: initialText, maxSize: maxSize, constraints: constraints)
-        setTextBoxOverlayVisible(true)
     }
 
     // MARK: - iOS software keyboard
@@ -1729,7 +1715,7 @@ final class GameViewController: UIViewController {
     @objc private func toggleSystemKeyboard() {
         if !textBoxOverlay.isHidden || keyboardInput.isFirstResponder || keyboardIsVisible {
             textBoxOverlay.endEditing(true)
-            setTextBoxOverlayVisible(false)
+            textBoxOverlay.isHidden = true
             keyboardInput.resignFirstResponder()
             view.endEditing(true)
             keyboardIsVisible = false
@@ -1775,7 +1761,8 @@ final class GameViewController: UIViewController {
             rawKeyboardTopOffset = 0
         }
 
-        keypadBottomConstraint.constant = -(keyboardInset + 7)
+        let textBoxBarOffset: CGFloat = (systemKeyboardVisible && !textBoxOverlay.isHidden) ? TextBoxOverlayView.barHeight : 0
+        keypadBottomConstraint.constant = -(keyboardInset + textBoxBarOffset + 7)
         textBoxOverlay.updateKeyboardBottomOffset(rawKeyboardTopOffset)
 
         if systemKeyboardVisible {
@@ -1889,7 +1876,7 @@ final class GameViewController: UIViewController {
         startupWatchdog?.cancel()
         startupWatchdog = nil
 
-        setTextBoxOverlayVisible(false)
+        textBoxOverlay.isHidden = true
         keyboardInput.resignFirstResponder()
         keyboardIsVisible = false
         keypadBottomConstraint.constant = -7
