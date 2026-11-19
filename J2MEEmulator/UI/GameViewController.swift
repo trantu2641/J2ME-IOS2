@@ -1928,14 +1928,10 @@ final class GameViewController: UIViewController {
             for sid in sessionIDs {
                 jvm_bridge_session_request_stop(sid)
             }
-            if sessionIDs.isEmpty {
-                jvm_bridge_session_destroy_all()
-            } else {
-                for sid in sessionIDs {
-                    jvm_bridge_session_destroy(sid)
-                }
-                jvm_bridge_session_destroy_all()
+            for sid in sessionIDs {
+                jvm_bridge_session_destroy(sid)
             }
+            jvm_bridge_session_destroy_all()
 
             DispatchQueue.main.async {
                 self?.dismiss(animated: true)
