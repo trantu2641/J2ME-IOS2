@@ -288,7 +288,6 @@ final class GameViewController: UIViewController {
 
         activeGameViewController = self
 
-        // Theo dõi vòng đời App (tắt màn hình / ẩn xuống nền) để bật âm thanh giữ sống & giảm FPS render
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(handleAppDidEnterBackground),
@@ -574,6 +573,14 @@ final class GameViewController: UIViewController {
             }
 
             DispatchQueue.main.async {
+                guard !self.userRequestedExit else {
+                    DispatchQueue.global(qos: .userInitiated).async {
+                        jvm_bridge_session_request_stop(sessionID)
+                        jvm_bridge_session_destroy(sessionID)
+                    }
+                    return
+                }
+
                 let session = J2MERunningSession(
                     id: sessionID,
                     name: name,
@@ -1222,75 +1229,85 @@ final class GameViewController: UIViewController {
         alert.addAction(UIAlertAction(title: "Đóng", style: .destructive) { [weak self] _ in
             guard let self, !self.runningSessions.isEmpty else { return }
 
-            let session = self.runningSessions[self.activeSessionIndex]
-            self.runningSessions.remove(at: self.activeSessionIndex)
+            let safeIndex = min(max(0, self.activeSessionIndex), self.runningSessions.count - 1)
+            let session = self.runningSessions[safeIndex]
+            self.runningSessions.remove(at: safeIndex)
+            let closingLastSession = self.runningSessions.isEmpty
 
-            if self.runningSessions.isEmpty {
+            if closingLastSession {
                 self.userRequestedExit = true
                 jvm_bridge_set_session_exit_callback(nil)
                 J2MEBackgroundAudioKeeper.shared.stop()
                 j2me_render_set_background_mode(0)
                 setGlobalEmulatorView(nil)
+            } else {
+                self.activeSessionIndex = min(safeIndex, self.runningSessions.count - 1)
+                self.rebuildTabs()
+                self.switchToSession(at: self.activeSessionIndex)
+            }
 
-                DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                    jvm_bridge_session_request_stop(session.id)
-                    jvm_bridge_session_destroy(session.id)
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                jvm_bridge_session_request_stop(session.id)
+                jvm_bridge_session_destroy(session.id)
+                if closingLastSession {
                     DispatchQueue.main.async {
                         self?.dismiss(animated: true)
                     }
                 }
-                return
             }
-
-            DispatchQueue.global(qos: .userInitiated).async {
-                jvm_bridge_session_request_stop(session.id)
-                jvm_bridge_session_destroy(session.id)
-            }
-
-            self.activeSessionIndex = min(self.activeSessionIndex, self.runningSessions.count - 1)
-            self.rebuildTabs()
-            self.switchToSession(at: self.activeSessionIndex)
         })
 
         present(alert, animated: true)
     }
 
     func handleSessionDidExit(sessionID: Int32, exitCode: Int32) {
-        guard !userRequestedExit,
-              let index = runningSessions.firstIndex(where: { $0.id == sessionID }) else { return }
-
-        let wasActive = (index == activeSessionIndex)
-        runningSessions.remove(at: index)
-
-        if runningSessions.isEmpty {
-            userRequestedExit = true
-            jvm_bridge_set_session_exit_callback(nil)
-            J2MEBackgroundAudioKeeper.shared.stop()
-            j2me_render_set_background_mode(0)
-            setGlobalEmulatorView(nil)
-
-            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                jvm_bridge_session_destroy(sessionID)
-                DispatchQueue.main.async {
-                    self?.dismiss(animated: true)
+        guard let index = runningSessions.firstIndex(where: { $0.id == sessionID }) else {
+            if runningSessions.isEmpty {
+                userRequestedExit = true
+                jvm_bridge_set_session_exit_callback(nil)
+                J2MEBackgroundAudioKeeper.shared.stop()
+                j2me_render_set_background_mode(0)
+                setGlobalEmulatorView(nil)
+                DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                    jvm_bridge_session_destroy(sessionID)
+                    DispatchQueue.main.async {
+                        self?.dismiss(animated: true)
+                    }
                 }
             }
             return
         }
 
-        DispatchQueue.global(qos: .utility).async {
+        let wasActive = (index == activeSessionIndex)
+        runningSessions.remove(at: index)
+        let closingLastSession = runningSessions.isEmpty
+
+        if closingLastSession {
+            userRequestedExit = true
+            jvm_bridge_set_session_exit_callback(nil)
+            J2MEBackgroundAudioKeeper.shared.stop()
+            j2me_render_set_background_mode(0)
+            setGlobalEmulatorView(nil)
+        } else {
+            if index < activeSessionIndex {
+                activeSessionIndex -= 1
+            } else if activeSessionIndex >= runningSessions.count {
+                activeSessionIndex = runningSessions.count - 1
+            }
+            rebuildTabs()
+            if wasActive {
+                switchToSession(at: activeSessionIndex)
+            }
+        }
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            jvm_bridge_session_request_stop(sessionID)
             jvm_bridge_session_destroy(sessionID)
-        }
-
-        if index < activeSessionIndex {
-            activeSessionIndex -= 1
-        } else if activeSessionIndex >= runningSessions.count {
-            activeSessionIndex = runningSessions.count - 1
-        }
-
-        rebuildTabs()
-        if wasActive {
-            switchToSession(at: activeSessionIndex)
+            if closingLastSession {
+                DispatchQueue.main.async {
+                    self?.dismiss(animated: true)
+                }
+            }
         }
     }
 
@@ -1393,7 +1410,6 @@ final class GameViewController: UIViewController {
 
     @objc private func hideApplicationFromMenu() {
         closeMoreMenu()
-        // Kích hoạt ngay background keep-alive trước khi ẩn ứng dụng xuống nền
         j2me_render_set_background_mode(1)
         J2MEBackgroundAudioKeeper.shared.start()
 
@@ -1822,7 +1838,6 @@ final class GameViewController: UIViewController {
         }
     }
 
-
     private func scrollActiveInputIntoView(in rootView: UIView?) {
         guard let rootView,
               let firstResponder = findFirstResponder(in: rootView),
@@ -1902,10 +1917,30 @@ final class GameViewController: UIViewController {
 
         J2MEBackgroundAudioKeeper.shared.stop()
         j2me_render_set_background_mode(0)
+        setGlobalEmulatorView(nil)
 
+        let sessionIDs = runningSessions.map { $0.id }
+        runningSessions.removeAll()
+        activeSessionIndex = 0
         jvm_bridge_set_session_exit_callback(nil)
-        jvm_bridge_session_destroy_all()
-        dismiss(animated: true)
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            for sid in sessionIDs {
+                jvm_bridge_session_request_stop(sid)
+            }
+            if sessionIDs.isEmpty {
+                jvm_bridge_session_destroy_all()
+            } else {
+                for sid in sessionIDs {
+                    jvm_bridge_session_destroy(sid)
+                }
+                jvm_bridge_session_destroy_all()
+            }
+
+            DispatchQueue.main.async {
+                self?.dismiss(animated: true)
+            }
+        }
     }
 
     // MARK: - MIDP transitions
