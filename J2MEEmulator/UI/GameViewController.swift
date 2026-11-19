@@ -225,6 +225,7 @@ final class GameViewController: UIViewController {
         J2MEBackgroundAudioKeeper.shared.stop()
         j2me_render_set_background_mode(0)
 
+        jvm_bridge_set_session_exit_callback(nil)
         setGlobalEmulatorView(nil)
         jvm_bridge_session_destroy_all()
     }
@@ -285,6 +286,7 @@ final class GameViewController: UIViewController {
         j2me_render_set_flush_ready_callback(flushReadyCallback)
         j2me_render_set_flush_callback(flushCallback)
         j2me_ui_set_callback(gameUICallback)
+        jvm_bridge_set_session_exit_callback(gameSessionExitCallback)
 
         activeGameViewController = self
 
@@ -1243,6 +1245,38 @@ final class GameViewController: UIViewController {
         present(alert, animated: true)
     }
 
+    func handleSessionDidExit(sessionID: Int32, exitCode: Int32) {
+        guard !userRequestedExit,
+              let index = runningSessions.firstIndex(where: { $0.id == sessionID }) else { return }
+
+        let wasActive = (index == activeSessionIndex)
+        runningSessions.remove(at: index)
+
+        DispatchQueue.global(qos: .utility).async {
+            jvm_bridge_session_destroy(sessionID)
+        }
+
+        if runningSessions.isEmpty {
+            userRequestedExit = true
+            J2MEBackgroundAudioKeeper.shared.stop()
+            j2me_render_set_background_mode(0)
+            jvm_bridge_set_session_exit_callback(nil)
+            dismiss(animated: true)
+            return
+        }
+
+        if index < activeSessionIndex {
+            activeSessionIndex -= 1
+        } else if activeSessionIndex >= runningSessions.count {
+            activeSessionIndex = runningSessions.count - 1
+        }
+
+        rebuildTabs()
+        if wasActive {
+            switchToSession(at: activeSessionIndex)
+        }
+    }
+
     // MARK: - More options menu
 
     @objc private func showMoreMenu() {
@@ -1863,6 +1897,7 @@ final class GameViewController: UIViewController {
         J2MEBackgroundAudioKeeper.shared.stop()
         j2me_render_set_background_mode(0)
 
+        jvm_bridge_set_session_exit_callback(nil)
         jvm_bridge_session_destroy_all()
         dismiss(animated: true)
     }
@@ -2073,5 +2108,11 @@ let gameUICallback: @convention(c) (Int32, UnsafePointer<CChar>?) -> Void = { ac
         case Int32(J2ME_UI_ACTION_SHOW_ALERT): controller.showAlert()
         default: break
         }
+    }
+}
+
+let gameSessionExitCallback: @convention(c) (Int32, Int32) -> Void = { sessionID, exitCode in
+    DispatchQueue.main.async {
+        activeGameViewController?.handleSessionDidExit(sessionID: sessionID, exitCode: exitCode)
     }
 }
