@@ -65,27 +65,12 @@ final class TextBoxOverlayView: UIView, UITextViewDelegate {
         cancelButton.translatesAutoresizingMaskIntoConstraints = false
         cardView.addSubview(cancelButton)
 
-        if #available(iOS 15.0, *) {
-            var config = UIButton.Configuration.filled()
-            config.title = "OK"
-            config.baseBackgroundColor = .systemBlue
-            config.baseForegroundColor = .white
-            config.cornerStyle = .medium
-            config.contentInsets = NSDirectionalEdgeInsets(top: 8, leading: 20, bottom: 8, trailing: 20)
-            config.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { incoming in
-                var outgoing = incoming
-                outgoing.font = UIFont.boldSystemFont(ofSize: 16)
-                return outgoing
-            }
-            confirmButton.configuration = config
-        } else {
-            confirmButton.setTitle("OK", for: .normal)
-            confirmButton.titleLabel?.font = UIFont.boldSystemFont(ofSize: 16)
-            confirmButton.backgroundColor = .systemBlue
-            confirmButton.setTitleColor(.white, for: .normal)
-            confirmButton.layer.cornerRadius = 10
-            confirmButton.contentEdgeInsets = UIEdgeInsets(top: 8, left: 20, bottom: 8, right: 20)
-        }
+        confirmButton.setTitle("Lưu", for: .normal)
+        confirmButton.titleLabel?.font = UIFont.boldSystemFont(ofSize: 16)
+        confirmButton.backgroundColor = .systemBlue
+        confirmButton.setTitleColor(.white, for: .normal)
+        confirmButton.layer.cornerRadius = 10
+        confirmButton.contentEdgeInsets = UIEdgeInsets(top: 8, left: 20, bottom: 8, right: 20)
         confirmButton.addTarget(self, action: #selector(confirmTapped), for: .touchUpInside)
         confirmButton.translatesAutoresizingMaskIntoConstraints = false
         cardView.addSubview(confirmButton)

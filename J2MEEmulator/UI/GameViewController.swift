@@ -91,56 +91,38 @@ private struct J2MERunningSession {
     let fpsLimit: Int
 }
 
-private final class J2MEKeyboardInputView: UITextField {
+private final class J2MEKeyboardInputView: UIView, UIKeyInput {
     var onInsertText: ((String) -> Void)?
     var onDeleteBackward: (() -> Void)?
-    var onReturnKey: (() -> Void)?
+
+    override var canBecomeFirstResponder: Bool { true }
+    var hasText: Bool { true }
+
+    var keyboardType: UIKeyboardType = .default
+    var keyboardAppearance: UIKeyboardAppearance = .default
+    var autocorrectionType: UITextAutocorrectionType = .no
+    var spellCheckingType: UITextSpellCheckingType = .no
+    var smartQuotesType: UITextSmartQuotesType = .no
+    var smartDashesType: UITextSmartDashesType = .no
+    var autocapitalizationType: UITextAutocapitalizationType = .none
+    var returnKeyType: UIReturnKeyType = .done
+    var enablesReturnKeyAutomatically: Bool = false
+    var isSecureTextEntry: Bool = false
+    var textContentType: UITextContentType? = nil
 
     override init(frame: CGRect) {
         super.init(frame: frame)
         backgroundColor = .clear
-        textColor = .clear
-        tintColor = .clear
-        borderStyle = .none
         isAccessibilityElement = false
         accessibilityElementsHidden = true
-        isUserInteractionEnabled = false
-        text = " "
-        addTarget(self, action: #selector(handleEditingChanged), for: .editingChanged)
-        addTarget(self, action: #selector(handleDidEndOnExit), for: .editingDidEndOnExit)
     }
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
     }
 
-    override func deleteBackward() {
-        let hadExtraChar = (text?.count ?? 0) > 1
-        super.deleteBackward()
-        if !hadExtraChar {
-            text = " "
-        }
-        onDeleteBackward?()
-    }
-
-    @objc private func handleEditingChanged() {
-        // Đợi IME (Telex/VNI) hoàn tất tổ hợp dấu trước khi gửi ký tự sang J2ME
-        guard markedTextRange == nil else { return }
-        let current = text ?? ""
-        if current.isEmpty {
-            text = " "
-            return
-        }
-        let payload = current.hasPrefix(" ") ? String(current.dropFirst()) : current
-        if !payload.isEmpty {
-            onInsertText?(payload)
-        }
-        text = " "
-    }
-
-    @objc private func handleDidEndOnExit() {
-        onReturnKey?()
-    }
+    func insertText(_ text: String) { onInsertText?(text) }
+    func deleteBackward() { onDeleteBackward?() }
 }
 
 final class GameViewController: UIViewController {
@@ -157,6 +139,7 @@ final class GameViewController: UIViewController {
     private let keypadView = J2MEVirtualKeypadView()
     private lazy var formView = FormView()
     private lazy var listView = J2MEListView()
+    private lazy var textBoxOverlay = TextBoxOverlayView()
 
     private let headerStack = UIStackView()
     private let tabScrollView = UIScrollView()
@@ -195,7 +178,7 @@ final class GameViewController: UIViewController {
     private var keyboardIsVisible = false
 
     private var isCanvasScreenVisible: Bool {
-        !emulatorView.isHidden && formView.isHidden && listView.isHidden
+        !emulatorView.isHidden && formView.isHidden && listView.isHidden && textBoxOverlay.isHidden
     }
 
     private var gameStarted = false
@@ -1587,7 +1570,7 @@ final class GameViewController: UIViewController {
     // MARK: - Form and list overlays
 
     private func buildOverlays() {
-        for overlay in [formView, listView] {
+        for overlay in [formView, listView, textBoxOverlay] {
             overlay.translatesAutoresizingMaskIntoConstraints = false
             view.addSubview(overlay)
             NSLayoutConstraint.activate([
@@ -1598,13 +1581,51 @@ final class GameViewController: UIViewController {
             ])
             overlay.isHidden = true
         }
+
+        textBoxOverlay.onConfirm = { [weak self] text in
+            guard let self else { return }
+            self.textBoxOverlay.isHidden = true
+            self.sendTextStringToGame(text)
+            if self.isCanvasScreenVisible && !self.userRequestedExit {
+                self.setKeypadVisible(true, duration: 0.18)
+            }
+        }
+
+        textBoxOverlay.onCancel = { [weak self] in
+            guard let self else { return }
+            self.textBoxOverlay.isHidden = true
+            if self.isCanvasScreenVisible && !self.userRequestedExit {
+                self.setKeypadVisible(true, duration: 0.18)
+            }
+        }
+    }
+
+    private func sendTextStringToGame(_ text: String) {
+        // Xóa ký tự cũ nếu có bằng chuỗi phím Backspace (-8) rồi bơm từng ký tự vào ô nhập hiện tại của game
+        for _ in 0..<48 {
+            sendKeyPulse(-8)
+        }
+        for scalar in text.unicodeScalars {
+            if scalar.value <= 0xFFFF {
+                sendKeyPulse(Int32(scalar.value))
+            }
+        }
+    }
+
+    func presentTextInputPopup(title: String = "Nhập văn bản", initialText: String = "", maxSize: Int = 256, constraints: Int = 0) {
+        hideSystemKeyboard()
+        keyboardIsVisible = false
+        setKeypadVisible(false, duration: 0.12)
+        view.bringSubviewToFront(textBoxOverlay)
+        textBoxOverlay.configure(title: title, initialText: initialText, maxSize: maxSize, constraints: constraints)
+        textBoxOverlay.isHidden = false
     }
 
     // MARK: - iOS software keyboard
 
     private func buildKeyboardInput() {
         keyboardInput.translatesAutoresizingMaskIntoConstraints = false
-        keyboardInput.alpha = 0.01
+        keyboardInput.alpha = 0.02
         keyboardInput.keyboardType = .default
         keyboardInput.keyboardAppearance = .dark
         keyboardInput.autocorrectionType = .no
@@ -1618,12 +1639,6 @@ final class GameViewController: UIViewController {
 
         keyboardInput.onDeleteBackward = { [weak self] in
             self?.sendKeyPulse(-8)
-        }
-
-        keyboardInput.onReturnKey = { [weak self] in
-            guard let self else { return }
-            self.sendKeyPulse(-5)
-            self.hideSystemKeyboard()
         }
 
         keyboardInput.onInsertText = { [weak self] text in
@@ -1649,75 +1664,34 @@ final class GameViewController: UIViewController {
             keyboardInput.heightAnchor.constraint(equalToConstant: 2)
         ])
 
-        let dismissKeyboardTap = UITapGestureRecognizer(target: self, action: #selector(handleEmulatorTapWhileKeyboardOpen))
-        dismissKeyboardTap.cancelsTouchesInView = false
-        dismissKeyboardTap.delaysTouchesBegan = false
-        emulatorView.addGestureRecognizer(dismissKeyboardTap)
+        let doubleTapInput = UITapGestureRecognizer(target: self, action: #selector(handleCanvasDoubleTapForTextInput))
+        doubleTapInput.numberOfTapsRequired = 2
+        doubleTapInput.cancelsTouchesInView = false
+        doubleTapInput.delaysTouchesBegan = false
+        emulatorView.addGestureRecognizer(doubleTapInput)
     }
 
-    @objc private func handleEmulatorTapWhileKeyboardOpen() {
-        if keyboardInput.isFirstResponder || keyboardIsVisible {
-            hideSystemKeyboard()
-        }
+    @objc private func handleCanvasDoubleTapForTextInput() {
+        guard isCanvasScreenVisible, textBoxOverlay.isHidden else { return }
+        presentTextInputPopup(title: "Nhập văn bản", initialText: "", maxSize: 256, constraints: 0)
     }
 
     // MARK: - Keypad
 
     @objc private func toggleKeypad() {
-        if keyboardInput.isFirstResponder || keyboardIsVisible {
-            hideSystemKeyboard()
-            keyboardIsVisible = false
-            setKeypadVisible(true)
-            return
-        }
+        guard !keyboardIsVisible else { return }
         setKeypadVisible(keypadView.isHidden)
     }
 
-    private func makeSystemKeyboardAccessory() -> UIToolbar {
-        let toolbar = UIToolbar(frame: CGRect(x: 0, y: 0, width: UIScreen.main.bounds.width, height: 40))
-        toolbar.barStyle = .default
-        toolbar.isTranslucent = true
-
-        let upBtn = UIBarButtonItem(image: UIImage(systemName: "chevron.up"), style: .plain, target: self, action: #selector(kbNavUp))
-        let downBtn = UIBarButtonItem(image: UIImage(systemName: "chevron.down"), style: .plain, target: self, action: #selector(kbNavDown))
-        let leftSoftBtn = UIBarButtonItem(title: "OK", style: .done, target: self, action: #selector(kbLeftSoftKey))
-        let fireBtn = UIBarButtonItem(title: "Chọn", style: .plain, target: self, action: #selector(kbFireKey))
-        let delBtn = UIBarButtonItem(image: UIImage(systemName: "delete.left"), style: .plain, target: self, action: #selector(kbBackspaceKey))
-        let flex = UIBarButtonItem(barButtonSystemItem: .flexibleSpace, target: nil, action: nil)
-        let closeBtn = UIBarButtonItem(image: UIImage(systemName: "keyboard.chevron.compact.down"), style: .plain, target: self, action: #selector(kbCloseKeyboard))
-
-        toolbar.items = [upBtn, downBtn, flex, leftSoftBtn, fireBtn, flex, delBtn, closeBtn]
-        toolbar.sizeToFit()
-        return toolbar
-    }
-
-    @objc private func kbNavUp() { sendKeyPulse(-1) }
-    @objc private func kbNavDown() { sendKeyPulse(-2) }
-    @objc private func kbLeftSoftKey() {
-        sendKeyPulse(-6)
-        hideSystemKeyboard()
-    }
-    @objc private func kbFireKey() {
-        sendKeyPulse(-5)
-        hideSystemKeyboard()
-    }
-    @objc private func kbBackspaceKey() { sendKeyPulse(-8) }
-    @objc private func kbCloseKeyboard() { hideSystemKeyboard() }
-
     @objc private func toggleSystemKeyboard() {
-        if keyboardInput.isFirstResponder || keyboardIsVisible {
-            hideSystemKeyboard()
+        if !textBoxOverlay.isHidden {
+            textBoxOverlay.isHidden = true
+            if isCanvasScreenVisible && !userRequestedExit {
+                setKeypadVisible(true, duration: 0.18)
+            }
             return
         }
-
-        if keyboardInput.inputAccessoryView == nil {
-            keyboardInput.inputAccessoryView = makeSystemKeyboardAccessory()
-        }
-        keyboardInput.text = " "
-        guard keyboardInput.becomeFirstResponder() else { return }
-        keyboardIsVisible = true
-        keypadBottomConstraint.constant = -7
-        setKeypadVisible(false, duration: 0.18)
+        presentTextInputPopup(title: "Nhập văn bản", initialText: "", maxSize: 256, constraints: 0)
     }
 
     private func hideSystemKeyboard() {
@@ -1788,15 +1762,10 @@ final class GameViewController: UIViewController {
         duration: TimeInterval = 0.18,
         animationOptions: UIView.AnimationOptions = [.beginFromCurrentState]
     ) {
-        let shouldShow = visible && !keyboardIsVisible && !userRequestedExit && isCanvasScreenVisible
+        let shouldShow = visible && !keyboardIsVisible && !userRequestedExit
         keypadView.isHidden = !shouldShow
-        if shouldShow {
-            keypadCollapsedConstraint.isActive = false
-            keypadHeightConstraint.isActive = true
-        } else {
-            keypadHeightConstraint.isActive = false
-            keypadCollapsedConstraint.isActive = true
-        }
+        keypadHeightConstraint.isActive = shouldShow
+        keypadCollapsedConstraint.isActive = !shouldShow
         toggleKeypadButton.tintColor = uiPrimaryTextColor
 
         let changes = { self.view.layoutIfNeeded() }
@@ -1854,23 +1823,23 @@ final class GameViewController: UIViewController {
     }
 
     func showFormView() {
-        hideSystemKeyboard()
-        keyboardIsVisible = false
         formView.buildFromNativeData()
         formView.isHidden = false
         emulatorView.isHidden = true
+        keypadView.isHidden = true
+        keypadHeightConstraint.isActive = false
+        keypadCollapsedConstraint.isActive = true
         listView.isHidden = true
-        setKeypadVisible(false, duration: 0)
     }
 
     func showListView() {
-        hideSystemKeyboard()
-        keyboardIsVisible = false
         listView.buildFromNativeData()
         listView.isHidden = false
         emulatorView.isHidden = true
+        keypadView.isHidden = true
+        keypadHeightConstraint.isActive = false
+        keypadCollapsedConstraint.isActive = true
         formView.isHidden = true
-        setKeypadVisible(false, duration: 0)
     }
 
     // MARK: - Alert
@@ -2045,8 +2014,7 @@ let gameUICallback: @convention(c) (Int32, UnsafePointer<CChar>?) -> Void = { ac
         guard let controller = activeGameViewController else { return }
         switch action {
         case Int32(J2ME_UI_ACTION_SHOW_CANVAS): controller.showCanvasView()
-        case Int32(J2ME_UI_ACTION_SHOW_FORM),
-             Int32(J2ME_UI_ACTION_SHOW_TEXTBOX): controller.showFormView()
+        case Int32(J2ME_UI_ACTION_SHOW_FORM): controller.showFormView()
         case Int32(J2ME_UI_ACTION_SHOW_LIST): controller.showListView()
         case Int32(J2ME_UI_ACTION_SHOW_ALERT): controller.showAlert()
         default: break
