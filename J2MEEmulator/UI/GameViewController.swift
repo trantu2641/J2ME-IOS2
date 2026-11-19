@@ -1223,9 +1223,11 @@ final class GameViewController: UIViewController {
             guard let self, !self.runningSessions.isEmpty else { return }
 
             let session = self.runningSessions[self.activeSessionIndex]
-            jvm_bridge_session_request_stop(session.id)
-            jvm_bridge_session_destroy(session.id)
             self.runningSessions.remove(at: self.activeSessionIndex)
+            DispatchQueue.global(qos: .userInitiated).async {
+                jvm_bridge_session_request_stop(session.id)
+                jvm_bridge_session_destroy(session.id)
+            }
 
             if self.runningSessions.isEmpty {
                 self.userRequestedExit = true
