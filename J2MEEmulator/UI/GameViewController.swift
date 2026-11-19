@@ -91,38 +91,56 @@ private struct J2MERunningSession {
     let fpsLimit: Int
 }
 
-private final class J2MEKeyboardInputView: UIView, UIKeyInput {
+private final class J2MEKeyboardInputView: UITextField {
     var onInsertText: ((String) -> Void)?
     var onDeleteBackward: (() -> Void)?
-
-    override var canBecomeFirstResponder: Bool { true }
-    var hasText: Bool { true }
-
-    var keyboardType: UIKeyboardType = .default
-    var keyboardAppearance: UIKeyboardAppearance = .default
-    var autocorrectionType: UITextAutocorrectionType = .no
-    var spellCheckingType: UITextSpellCheckingType = .no
-    var smartQuotesType: UITextSmartQuotesType = .no
-    var smartDashesType: UITextSmartDashesType = .no
-    var autocapitalizationType: UITextAutocapitalizationType = .none
-    var returnKeyType: UIReturnKeyType = .done
-    var enablesReturnKeyAutomatically: Bool = false
-    var isSecureTextEntry: Bool = false
-    var textContentType: UITextContentType? = nil
+    var onReturnKey: (() -> Void)?
 
     override init(frame: CGRect) {
         super.init(frame: frame)
         backgroundColor = .clear
+        textColor = .clear
+        tintColor = .clear
+        borderStyle = .none
         isAccessibilityElement = false
         accessibilityElementsHidden = true
+        isUserInteractionEnabled = false
+        text = " "
+        addTarget(self, action: #selector(handleEditingChanged), for: .editingChanged)
+        addTarget(self, action: #selector(handleDidEndOnExit), for: .editingDidEndOnExit)
     }
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
     }
 
-    func insertText(_ text: String) { onInsertText?(text) }
-    func deleteBackward() { onDeleteBackward?() }
+    override func deleteBackward() {
+        let hadExtraChar = (text?.count ?? 0) > 1
+        super.deleteBackward()
+        if !hadExtraChar {
+            text = " "
+        }
+        onDeleteBackward?()
+    }
+
+    @objc private func handleEditingChanged() {
+        // Đợi IME (Telex/VNI) hoàn tất tổ hợp dấu trước khi gửi ký tự sang J2ME
+        guard markedTextRange == nil else { return }
+        let current = text ?? ""
+        if current.isEmpty {
+            text = " "
+            return
+        }
+        let payload = current.hasPrefix(" ") ? String(current.dropFirst()) : current
+        if !payload.isEmpty {
+            onInsertText?(payload)
+        }
+        text = " "
+    }
+
+    @objc private func handleDidEndOnExit() {
+        onReturnKey?()
+    }
 }
 
 final class GameViewController: UIViewController {
@@ -1586,7 +1604,7 @@ final class GameViewController: UIViewController {
 
     private func buildKeyboardInput() {
         keyboardInput.translatesAutoresizingMaskIntoConstraints = false
-        keyboardInput.alpha = 0.02
+        keyboardInput.alpha = 0.01
         keyboardInput.keyboardType = .default
         keyboardInput.keyboardAppearance = .dark
         keyboardInput.autocorrectionType = .no
@@ -1600,6 +1618,12 @@ final class GameViewController: UIViewController {
 
         keyboardInput.onDeleteBackward = { [weak self] in
             self?.sendKeyPulse(-8)
+        }
+
+        keyboardInput.onReturnKey = { [weak self] in
+            guard let self else { return }
+            self.sendKeyPulse(-5)
+            self.hideSystemKeyboard()
         }
 
         keyboardInput.onInsertText = { [weak self] text in
@@ -1624,6 +1648,17 @@ final class GameViewController: UIViewController {
             keyboardInput.widthAnchor.constraint(equalToConstant: 2),
             keyboardInput.heightAnchor.constraint(equalToConstant: 2)
         ])
+
+        let dismissKeyboardTap = UITapGestureRecognizer(target: self, action: #selector(handleEmulatorTapWhileKeyboardOpen))
+        dismissKeyboardTap.cancelsTouchesInView = false
+        dismissKeyboardTap.delaysTouchesBegan = false
+        emulatorView.addGestureRecognizer(dismissKeyboardTap)
+    }
+
+    @objc private func handleEmulatorTapWhileKeyboardOpen() {
+        if keyboardInput.isFirstResponder || keyboardIsVisible {
+            hideSystemKeyboard()
+        }
     }
 
     // MARK: - Keypad
@@ -1638,12 +1673,47 @@ final class GameViewController: UIViewController {
         setKeypadVisible(keypadView.isHidden)
     }
 
+    private func makeSystemKeyboardAccessory() -> UIToolbar {
+        let toolbar = UIToolbar(frame: CGRect(x: 0, y: 0, width: UIScreen.main.bounds.width, height: 40))
+        toolbar.barStyle = .default
+        toolbar.isTranslucent = true
+
+        let upBtn = UIBarButtonItem(image: UIImage(systemName: "chevron.up"), style: .plain, target: self, action: #selector(kbNavUp))
+        let downBtn = UIBarButtonItem(image: UIImage(systemName: "chevron.down"), style: .plain, target: self, action: #selector(kbNavDown))
+        let leftSoftBtn = UIBarButtonItem(title: "OK", style: .done, target: self, action: #selector(kbLeftSoftKey))
+        let fireBtn = UIBarButtonItem(title: "Chọn", style: .plain, target: self, action: #selector(kbFireKey))
+        let delBtn = UIBarButtonItem(image: UIImage(systemName: "delete.left"), style: .plain, target: self, action: #selector(kbBackspaceKey))
+        let flex = UIBarButtonItem(barButtonSystemItem: .flexibleSpace, target: nil, action: nil)
+        let closeBtn = UIBarButtonItem(image: UIImage(systemName: "keyboard.chevron.compact.down"), style: .plain, target: self, action: #selector(kbCloseKeyboard))
+
+        toolbar.items = [upBtn, downBtn, flex, leftSoftBtn, fireBtn, flex, delBtn, closeBtn]
+        toolbar.sizeToFit()
+        return toolbar
+    }
+
+    @objc private func kbNavUp() { sendKeyPulse(-1) }
+    @objc private func kbNavDown() { sendKeyPulse(-2) }
+    @objc private func kbLeftSoftKey() {
+        sendKeyPulse(-6)
+        hideSystemKeyboard()
+    }
+    @objc private func kbFireKey() {
+        sendKeyPulse(-5)
+        hideSystemKeyboard()
+    }
+    @objc private func kbBackspaceKey() { sendKeyPulse(-8) }
+    @objc private func kbCloseKeyboard() { hideSystemKeyboard() }
+
     @objc private func toggleSystemKeyboard() {
         if keyboardInput.isFirstResponder || keyboardIsVisible {
-            keyboardInput.resignFirstResponder()
+            hideSystemKeyboard()
             return
         }
 
+        if keyboardInput.inputAccessoryView == nil {
+            keyboardInput.inputAccessoryView = makeSystemKeyboardAccessory()
+        }
+        keyboardInput.text = " "
         guard keyboardInput.becomeFirstResponder() else { return }
         keyboardIsVisible = true
         keypadBottomConstraint.constant = -7
