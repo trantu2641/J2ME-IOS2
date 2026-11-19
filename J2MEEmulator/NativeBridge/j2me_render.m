@@ -57,7 +57,6 @@ static CGColorSpaceRef g_colorSpace = NULL;
 static _Atomic uint64_t g_frame_interval_ticks = 0;
 static _Atomic uint64_t g_last_frame_ticks = 0;
 static volatile int g_render_stopped = 0;
-static _Atomic int g_background_mode = 0;
 
 static RenderContext *g_live_rc_head = NULL;
 static RenderImage *g_live_img_head = NULL;
@@ -293,10 +292,6 @@ void j2me_render_set_active_jvm(MiniJVM *jvm) {
     g_active_render_jvm = jvm;
 }
 
-void j2me_render_set_background_mode(int isBackground) {
-    atomic_store_explicit(&g_background_mode, isBackground ? 1 : 0, memory_order_relaxed);
-}
-
 void j2me_render_set_flush_callback(j2me_flush_callback callback) {
     g_flush_callback = callback;
 }
@@ -512,6 +507,10 @@ static int ensureImageDecoded(RenderImage *img) {
 
     CGImageSourceRef source = CGImageSourceCreateWithData(img->encodedData, NULL);
     if (!source) {
+        const uint8_t *p = CFDataGetBytePtr(img->encodedData);
+        CFIndex len = CFDataGetLength(img->encodedData);
+        printf("[J2ME Render] ImageSource NULL len=%ld head=%02X %02X %02X %02X\n",
+               (long)len, len > 0 ? p[0] : 0, len > 1 ? p[1] : 0, len > 2 ? p[2] : 0, len > 3 ? p[3] : 0);
         pthread_mutex_unlock(&g_image_decode_lock);
         return 0;
     }
@@ -520,6 +519,10 @@ static int ensureImageDecoded(RenderImage *img) {
     CFRelease(source);
 
     if (!cgImage) {
+        const uint8_t *p = CFDataGetBytePtr(img->encodedData);
+        CFIndex len = CFDataGetLength(img->encodedData);
+        printf("[J2ME Render] CGImage NULL len=%ld head=%02X %02X %02X %02X\n",
+               (long)len, len > 0 ? p[0] : 0, len > 1 ? p[1] : 0, len > 2 ? p[2] : 0, len > 3 ? p[3] : 0);
         pthread_mutex_unlock(&g_image_decode_lock);
         return 0;
     }
@@ -605,9 +608,6 @@ static s32 n_destroyContext(Runtime *runtime, JClass *clazz) {
 static s32 n_flushToScreen(Runtime *runtime, JClass *clazz) {
     process_dead_shells();
 
-    if (atomic_load_explicit(&g_background_mode, memory_order_relaxed)) {
-        return RUNTIME_STATUS_NORMAL;
-    }
     if (g_active_render_jvm && runtime->jvm != g_active_render_jvm) {
         return RUNTIME_STATUS_NORMAL;
     }
@@ -1032,6 +1032,113 @@ static s32 n_createImageFromData(Runtime *runtime, JClass *clazz) {
     return RUNTIME_STATUS_NORMAL;
 }
 
+static s32 n_createTransparentImage(Runtime *runtime, JClass *clazz) {
+    JniEnv *env = runtime->jnienv;
+    s32 width = env->localvar_getInt(runtime->localvar, 0);
+    s32 height = env->localvar_getInt(runtime->localvar, 1);
+    if (width <= 0) width = 1;
+    if (height <= 0) height = 1;
+
+    RenderImage *img = (RenderImage *)calloc(1, sizeof(RenderImage));
+    if (!img) {
+        env->push_long(runtime->stack, 0);
+        return RUNTIME_STATUS_NORMAL;
+    }
+
+    atomic_init(&img->refcount, 1);
+    img->width = width;
+    img->height = height;
+    img->isMutable = 1;
+
+    CGColorSpaceRef cs = getColorSpace();
+    img->ctx = CGBitmapContextCreate(
+        NULL, width, height, 8, width * 4, cs,
+        kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little
+    );
+    if (!img->ctx) {
+        free(img);
+        env->push_long(runtime->stack, 0);
+        return RUNTIME_STATUS_NORMAL;
+    }
+
+    CGContextClearRect(img->ctx, CGRectMake(0, 0, width, height));
+    CGContextTranslateCTM(img->ctx, 0, height);
+    CGContextScaleCTM(img->ctx, 1.0, -1.0);
+
+    track_img(img);
+    native_heap_add(width * height * 4);
+    env->push_long(runtime->stack, (s64)(intptr_t)img);
+    return RUNTIME_STATUS_NORMAL;
+}
+
+static s32 n_createRGBImage(Runtime *runtime, JClass *clazz) {
+    JniEnv *env = runtime->jnienv;
+    Instance *arr = env->localvar_getRefer(runtime->localvar, 0);
+    s32 w = env->localvar_getInt(runtime->localvar, 1);
+    s32 h = env->localvar_getInt(runtime->localvar, 2);
+    s32 processAlpha = env->localvar_getInt(runtime->localvar, 3);
+
+    if (!arr || !arr->arr_body || w <= 0 || h <= 0) {
+        env->push_long(runtime->stack, 0);
+        return RUNTIME_STATUS_NORMAL;
+    }
+
+    RenderImage *img = (RenderImage *)calloc(1, sizeof(RenderImage));
+    if (!img) {
+        env->push_long(runtime->stack, 0);
+        return RUNTIME_STATUS_NORMAL;
+    }
+
+    atomic_init(&img->refcount, 1);
+    img->width = w;
+    img->height = h;
+    img->isMutable = 0;
+
+    CGColorSpaceRef cs = getColorSpace();
+    img->ctx = CGBitmapContextCreate(
+        NULL, w, h, 8, w * 4, cs,
+        kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little
+    );
+    if (!img->ctx) {
+        free(img);
+        env->push_long(runtime->stack, 0);
+        return RUNTIME_STATUS_NORMAL;
+    }
+
+    uint8_t *dst = (uint8_t *)CGBitmapContextGetData(img->ctx);
+    s32 *srcData = (s32 *)arr->arr_body;
+    s32 maxLen = arr->arr_length;
+
+    for (int i = 0; i < w * h; i++) {
+        s32 argb = (i < maxLen) ? srcData[i] : 0;
+        uint8_t a = processAlpha ? ((argb >> 24) & 0xFF) : 0xFF;
+        uint8_t r = (argb >> 16) & 0xFF;
+        uint8_t g = (argb >> 8) & 0xFF;
+        uint8_t b = argb & 0xFF;
+
+        if (a == 0) {
+            r = 0;
+            g = 0;
+            b = 0;
+        } else if (a < 255) {
+            r = (uint8_t)(r * a / 255);
+            g = (uint8_t)(g * a / 255);
+            b = (uint8_t)(b * a / 255);
+        }
+
+        int idx = i * 4;
+        dst[idx + 0] = b;
+        dst[idx + 1] = g;
+        dst[idx + 2] = r;
+        dst[idx + 3] = a;
+    }
+
+    track_img(img);
+    native_heap_add(w * h * 4);
+    env->push_long(runtime->stack, (s64)(intptr_t)img);
+    return RUNTIME_STATUS_NORMAL;
+}
+
 static s32 n_destroyImage(Runtime *runtime, JClass *clazz) {
     JniEnv *env = runtime->jnienv;
     s64 handle = env->localvar_getLong_2slot(runtime->localvar, 0);
@@ -1188,6 +1295,19 @@ static s32 n_drawRegion(Runtime *runtime, JClass *clazz) {
     if (anchor & 2) yDst -= outH / 2;
     if (anchor & 32) yDst -= outH;
 
+    int fullW = (int)CGImageGetWidth(fullImage);
+    int fullH = (int)CGImageGetHeight(fullImage);
+    if (xSrc < 0) { wSrc += xSrc; xSrc = 0; }
+    if (ySrc < 0) { hSrc += ySrc; ySrc = 0; }
+    if (xSrc + wSrc > fullW) wSrc = fullW - xSrc;
+    if (ySrc + hSrc > fullH) hSrc = fullH - ySrc;
+    if (wSrc <= 0 || hSrc <= 0) {
+        if (releaseFullImage) CGImageRelease(fullImage);
+        img_release(img);
+        rc_release(rc);
+        return RUNTIME_STATUS_NORMAL;
+    }
+
     CGImageRef subImage = CGImageCreateWithImageInRect(
         fullImage, CGRectMake(xSrc, ySrc, wSrc, hSrc));
 
@@ -1316,6 +1436,9 @@ static s32 n_drawRGB(Runtime *runtime, JClass *clazz) {
 
     if (img) {
         CGContextSaveGState(rc->ctx);
+        if (!processAlpha) {
+            CGContextSetBlendMode(rc->ctx, kCGBlendModeCopy);
+        }
         CGContextTranslateCTM(rc->ctx, x, y + h);
         CGContextScaleCTM(rc->ctx, 1, -1);
         CGContextDrawImage(rc->ctx, CGRectMake(0, 0, w, h), img);
@@ -1565,8 +1688,10 @@ static java_native_method j2me_render_methods[] = {
     {CLS, "getStringWidth",      "(JLjava/lang/String;)I",                  n_getStringWidth},
     {CLS, "getFontHeight",       "(J)I",                                    n_getFontHeight},
     {CLS, "getFontAscent",       "(J)I",                                    n_getFontAscent},
-    {CLS, "createMutableImage",  "(II)J",                                   n_createMutableImage},
-    {CLS, "createImageFromData", "([BII)J",                                 n_createImageFromData},
+    {CLS, "createMutableImage",     "(II)J",                                   n_createMutableImage},
+    {CLS, "createTransparentImage", "(II)J",                                   n_createTransparentImage},
+    {CLS, "createRGBImage",         "([IIIZ)J",                                n_createRGBImage},
+    {CLS, "createImageFromData",    "([BII)J",                                 n_createImageFromData},
     {CLS, "destroyImage",        "(J)V",                                    n_destroyImage},
     {CLS, "getImageWidth",       "(J)I",                                    n_getImageWidth},
     {CLS, "getImageHeight",      "(J)I",                                    n_getImageHeight},
@@ -1660,7 +1785,6 @@ void j2me_render_cleanup(void) {
         }
     }
 
-    atomic_store_explicit(&g_background_mode, 0, memory_order_relaxed);
     g_render_stopped = 0;
     printf("[J2ME Render] Cleanup: %d contexts, %d images released\n", rc_count, img_count);
 }
