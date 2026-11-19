@@ -89,6 +89,33 @@ static J2MESession *session_find_by_vm_locked(MiniJVM *jvm) {
     return NULL;
 }
 
+static int session_active_count_locked(void) {
+    int count = 0;
+    for (int i = 0; i < J2ME_MAX_SESSIONS; i++) {
+        if (g_sessions[i].used) {
+            count++;
+        }
+    }
+    return count;
+}
+
+static void signal_jvm_threads_stop(MiniJVM *jvm) {
+    if (!jvm) return;
+    if (jvm->collector) {
+        jvm->collector->exit_flag = 1;
+    }
+    thread_stop_all(jvm);
+}
+
+static void cleanup_shared_runtime_resources(void) {
+    j2me_audio_stop_all();
+    j2me_render_stop();
+    j2me_micro3d_gl_cleanup();
+    j2me_m3g_cleanup();
+    j2me_render_cleanup();
+    zip_reader_cache_clear();
+}
+
 void jvm_bridge_session_set_proxy(int session_id,
                                   int proxy_type,
                                   const char *host,
@@ -213,7 +240,7 @@ static void *session_runner_main(void *arg) {
     if (!manifest) {
         printf("[JVM Session %d] ERROR: Manifest extraction failed\n", session_id);
         atomic_store(&s->running, 0);
-        if (g_session_exit_callback && !atomic_load(&s->stop_requested)) {
+        if (g_session_exit_callback && !atomic_load(&s->stop_requested) && !atomic_load(&s->destroying)) {
             g_session_exit_callback(session_id, -1);
         }
         return NULL;
@@ -223,7 +250,7 @@ static void *session_runner_main(void *arg) {
     if (!java_para) {
         free(manifest);
         atomic_store(&s->running, 0);
-        if (g_session_exit_callback && !atomic_load(&s->stop_requested)) {
+        if (g_session_exit_callback && !atomic_load(&s->stop_requested) && !atomic_load(&s->destroying)) {
             g_session_exit_callback(session_id, -2);
         }
         return NULL;
@@ -243,10 +270,9 @@ static void *session_runner_main(void *arg) {
 
     printf("[JVM Session %d] MIDlet finished with code %d\n", session_id, ret);
 
-    int was_manually_stopped = atomic_load(&s->stop_requested);
+    int was_manually_stopped = atomic_load(&s->stop_requested) || atomic_load(&s->destroying);
     atomic_store(&s->running, 0);
 
-    // Notify Swift UI when the MIDlet exits on its own (e.g. in-game Exit button)
     if (!was_manually_stopped && g_session_exit_callback) {
         g_session_exit_callback(session_id, (int)ret);
     }
@@ -723,6 +749,7 @@ int jvm_bridge_session_create(
             s->used = 1;
             atomic_init(&s->stop_requested, 0);
             atomic_init(&s->running, 0);
+            atomic_init(&s->destroying, 0);
             break;
         }
     }
@@ -813,16 +840,13 @@ int jvm_bridge_session_is_running(int session_id) {
 void jvm_bridge_session_request_stop(int session_id) {
     pthread_mutex_lock(&g_sessions_lock);
     J2MESession *s = session_find_locked(session_id);
+    MiniJVM *jvm = s ? s->jvm : NULL;
     if (s) {
         atomic_store(&s->stop_requested, 1);
-        if (s->jvm) {
-            if (s->jvm->collector) {
-                s->jvm->collector->exit_flag = 1;
-            }
-            thread_stop_all(s->jvm);
-        }
     }
     pthread_mutex_unlock(&g_sessions_lock);
+
+    signal_jvm_threads_stop(jvm);
 }
 
 void jvm_bridge_session_destroy(int session_id) {
@@ -850,21 +874,15 @@ void jvm_bridge_session_destroy(int session_id) {
     MiniJVM *jvm = s->jvm;
     pthread_t runner = s->runner;
     int runner_valid = s->runner_valid;
-
-    if (jvm) {
-        if (jvm->collector) {
-            jvm->collector->exit_flag = 1;
-        }
-        thread_stop_all(jvm);
-    }
     pthread_mutex_unlock(&g_sessions_lock);
 
-    // Wait for session runner thread to unwind and exit cleanly without touching global audio of other sessions
+    signal_jvm_threads_stop(jvm);
+
     if (runner_valid && !pthread_equal(pthread_self(), runner)) {
-        struct timespec step = {0, 20000000L}; // 20ms
-        for (int i = 0; i < 15; i++) {
+        struct timespec step = {0, 25000000L}; // 25ms
+        for (int i = 0; i < 80; i++) {
             if (!atomic_load(&s->running)) break;
-            if (jvm) thread_stop_all(jvm);
+            signal_jvm_threads_stop(jvm);
             nanosleep(&step, NULL);
         }
         pthread_join(runner, NULL);
@@ -881,7 +899,12 @@ void jvm_bridge_session_destroy(int session_id) {
     if (s) {
         memset(s, 0, sizeof(*s));
     }
+    int remaining = session_active_count_locked();
     pthread_mutex_unlock(&g_sessions_lock);
+
+    if (remaining == 0) {
+        cleanup_shared_runtime_resources();
+    }
 }
 
 void jvm_bridge_session_destroy_all(void) {
@@ -889,10 +912,7 @@ void jvm_bridge_session_destroy_all(void) {
         jvm_bridge_session_destroy(i);
     }
 
-    j2me_audio_stop_all();
-    j2me_render_stop();
-    j2me_render_cleanup();
-    zip_reader_cache_clear();
+    cleanup_shared_runtime_resources();
 }
 
 int jvm_bridge_is_stop_requested_for_vm(MiniJVM *jvm) {
@@ -908,17 +928,12 @@ void jvm_bridge_destroy(void) {
     cpu_profiler_stop();
     if (g_jvm) {
         j2me_render_stop();
-        g_jvm->collector->exit_flag = 1;
-        thread_stop_all(g_jvm);
+        signal_jvm_threads_stop(g_jvm);
         jvm_destroy(g_jvm);
         g_jvm = NULL;
 
         j2me_input_reset();
-        j2me_audio_stop_all();
-        j2me_micro3d_gl_cleanup();
-        j2me_m3g_cleanup();
-        j2me_render_cleanup();
-        zip_reader_cache_clear();
+        cleanup_shared_runtime_resources();
         atomic_store(&g_jvm_stop_requested, 0);
     }
     g_midlet_runner_pthread_valid = 0;
