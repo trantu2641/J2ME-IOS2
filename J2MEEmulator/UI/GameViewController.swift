@@ -1569,21 +1569,15 @@ final class GameViewController: UIViewController {
 
     // MARK: - Form and list overlays
 
-    private var formViewBottomConstraint: NSLayoutConstraint?
-
     private func buildOverlays() {
         for overlay in [formView, listView, textBoxOverlay] {
             overlay.translatesAutoresizingMaskIntoConstraints = false
             view.addSubview(overlay)
-            let bottomConstraint = overlay.bottomAnchor.constraint(equalTo: view.bottomAnchor)
-            if overlay === formView {
-                formViewBottomConstraint = bottomConstraint
-            }
             NSLayoutConstraint.activate([
                 overlay.topAnchor.constraint(equalTo: view.topAnchor),
                 overlay.leadingAnchor.constraint(equalTo: view.leadingAnchor),
                 overlay.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-                bottomConstraint
+                overlay.bottomAnchor.constraint(equalTo: view.bottomAnchor)
             ])
             overlay.isHidden = true
         }
@@ -1732,7 +1726,6 @@ final class GameViewController: UIViewController {
         }
 
         keypadBottomConstraint.constant = -(keyboardInset + 7)
-        formViewBottomConstraint?.constant = -rawKeyboardTopOffset
         textBoxOverlay.updateKeyboardBottomOffset(rawKeyboardTopOffset)
 
         if systemKeyboardVisible {
@@ -1758,7 +1751,6 @@ final class GameViewController: UIViewController {
     @objc private func handleKeyboardWillHide(_ notification: Notification) {
         keyboardIsVisible = false
         keypadBottomConstraint.constant = -7
-        formViewBottomConstraint?.constant = 0
         textBoxOverlay.updateKeyboardBottomOffset(0)
 
         let duration = notification.userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double ?? 0.25
