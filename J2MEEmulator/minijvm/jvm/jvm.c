@@ -238,21 +238,23 @@ s32 get_jvm_state(MiniJVM *jvm) {
 static volatile sig_atomic_t s_sig_logged_once = 0;
 
 void _on_jvm_sig_print(s32 no) {
-    s32 saved_errno = errno;
     if (!s_sig_logged_once) {
         s_sig_logged_once = 1;
-        jvm_printf("\n[SIGNAL]jvm sig:%d  errno: %d , %s\n", no, saved_errno, strerror(saved_errno));
+        jvm_printf("\n[SIGNAL]jvm sig:%d\n", no);
     }
-    errno = saved_errno;
 }
 
 void _on_jvm_sig(s32 no) {
-    s32 saved_errno = errno;
     if (!s_sig_logged_once) {
         s_sig_logged_once = 1;
-        jvm_printf("\n[SIGNAL]jvm sig:%d  errno: %d , %s\n", no, saved_errno, strerror(saved_errno));
+        jvm_printf("\n[SIGNAL]jvm sig:%d\n", no);
     }
-    errno = saved_errno;
+
+    // Do not call strerror()/errno or attempt complex cleanup from a
+    // synchronous fatal-signal handler.  Those operations are not
+    // async-signal-safe and can recursively fault while handling SIGSEGV.
+    signal(no, SIG_DFL);
+    raise(no);
 }
 
 MiniJVM *jvm_create() {
