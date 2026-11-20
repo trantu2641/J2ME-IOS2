@@ -17,6 +17,7 @@
 #include <stdatomic.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <dirent.h>
 #include <pthread.h>
 #include <time.h>
 #include <dlfcn.h>
@@ -73,6 +74,72 @@ static char *load_midlet_manifest(const char *jar_path);
     printf(fmt, ##__VA_ARGS__); \
     fflush(stdout); \
 } while (0)
+
+static void append_jar_to_path_list(char *buf, size_t buf_size, size_t *offset, const char *jar_file) {
+    if (!buf || !offset || !jar_file || jar_file[0] == '\0') return;
+    if (access(jar_file, R_OK) != 0) return;
+
+    // Avoid duplicate entries
+    size_t jar_len = strlen(jar_file);
+    const char *p = buf;
+    while (p && *p) {
+        const char *colon = strchr(p, ':');
+        size_t seg_len = colon ? (size_t)(colon - p) : strlen(p);
+        if (seg_len == jar_len && strncmp(p, jar_file, jar_len) == 0) {
+            return;
+        }
+        p = colon ? (colon + 1) : NULL;
+    }
+
+    if (*offset >= buf_size - 1) return;
+    int written = snprintf(buf + *offset, buf_size - *offset, "%s%s", (*offset > 0) ? ":" : "", jar_file);
+    if (written > 0 && (size_t)written < buf_size - *offset) {
+        *offset += (size_t)written;
+    }
+}
+
+static void build_j2me_classpath(const char *res_root, const char *midlet_jar, char *out_buf, size_t buf_size) {
+    if (!out_buf || buf_size == 0) return;
+    out_buf[0] = '\0';
+    size_t offset = 0;
+
+    if (res_root && res_root[0] != '\0') {
+        const char *priority_jars[] = {
+            "j2me_api.jar",
+            "midlet_runner.jar",
+            "j2me_midp.jar",
+            "microedition.jar",
+            "cldc.jar",
+            "midp.jar"
+        };
+        for (size_t i = 0; i < sizeof(priority_jars) / sizeof(priority_jars[0]); i++) {
+            char full_path[PATH_MAX];
+            snprintf(full_path, sizeof(full_path), "%s/%s", res_root, priority_jars[i]);
+            append_jar_to_path_list(out_buf, buf_size, &offset, full_path);
+        }
+
+        // Also scan any supporting .jar inside res_root except minijvm_rt.jar (which is bootclasspath)
+        DIR *dir = opendir(res_root);
+        if (dir) {
+            struct dirent *ent;
+            while ((ent = readdir(dir)) != NULL) {
+                const char *name = ent->d_name;
+                size_t nlen = strlen(name);
+                if (nlen > 4 && strcasecmp(name + nlen - 4, ".jar") == 0) {
+                    if (strcmp(name, "minijvm_rt.jar") == 0) continue;
+                    char full_path[PATH_MAX];
+                    snprintf(full_path, sizeof(full_path), "%s/%s", res_root, name);
+                    append_jar_to_path_list(out_buf, buf_size, &offset, full_path);
+                }
+            }
+            closedir(dir);
+        }
+    }
+
+    if (midlet_jar && midlet_jar[0] != '\0') {
+        append_jar_to_path_list(out_buf, buf_size, &offset, midlet_jar);
+    }
+}
 
 void jvm_bridge_set_session_exit_callback(j2me_session_exit_callback callback) {
     g_session_exit_callback = callback;
@@ -683,7 +750,7 @@ int jvm_bridge_init(
     snprintf(bootclasspath, sizeof(bootclasspath), "%s/minijvm_rt.jar", res_root);
 
     char classpath[4096];
-    snprintf(classpath, sizeof(classpath), "%s/j2me_api.jar:%s", res_root, midlet_jar);
+    build_j2me_classpath(res_root, midlet_jar, classpath, sizeof(classpath));
 
     g_jvm = jvm_create();
     if (!g_jvm) {
@@ -767,9 +834,12 @@ int jvm_bridge_session_create(
     snprintf(s->jar_path, sizeof(s->jar_path), "%s", midlet_jar);
 
     char bootclasspath[PATH_MAX * 2];
-    char classpath[PATH_MAX * 3];
+    char classpath[PATH_MAX * 4];
     snprintf(bootclasspath, sizeof(bootclasspath), "%s/minijvm_rt.jar", res_root);
-    snprintf(classpath, sizeof(classpath), "%s/j2me_api.jar:%s", res_root, midlet_jar);
+    build_j2me_classpath(res_root, midlet_jar, classpath, sizeof(classpath));
+
+    BRIDGE_LOG("[JVM Session %d] bootclasspath=%s\n", s->id, bootclasspath);
+    BRIDGE_LOG("[JVM Session %d] classpath=%s\n", s->id, classpath);
 
     s->jvm = jvm_create();
     if (!s->jvm) {
