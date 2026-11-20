@@ -25,9 +25,6 @@ static inline s32 _interp_should_stop(MiniJVM *jvm, JavaThreadInfo *thrd_info, R
 
 /* ==================================opcode implementation =============================*/
 
-
-
-
 void _op_notsupport(u8 *opCode, Runtime *runtime) {
     invoke_deepth(runtime);
     jvm_printf("not support instruct [%x]\n", opCode[0]);
@@ -38,7 +35,6 @@ void _op_notsupport(u8 *opCode, Runtime *runtime) {
 }
 
 //----------------------------------  tool func  ------------------------------------------
-
 
 s32 exception_handle(RuntimeStack *stack, Runtime *runtime) {
 
@@ -55,7 +51,7 @@ s32 exception_handle(RuntimeStack *stack, Runtime *runtime) {
     );
 #endif
     s32 index = 0;
-    ExceptionTable *et = NULL;// _find_exception_handler(runtime, ins, ca, (s32) (runtime->pc - ca->code), &index);
+    ExceptionTable *et = NULL;
     s32 offset = (s32) (runtime->pc - ca->code);
     s32 i;
     ExceptionTable *e = ca->exception_table;
@@ -617,7 +613,6 @@ s32 execute_method_impl(MethodInfo *method, Runtime *pruntime) {
                 sp = runtime->stack->sp;
 
                 do {
-                    /* Check stop/exit flag every iteration so closing a .jar unwinds immediately */
                     if (_interp_should_stop(jvm, thrd_info, runtime)) {
                         stack->sp = sp;
                         localvar_dispose(runtime);
@@ -1269,7 +1264,7 @@ s32 execute_method_impl(MethodInfo *method, Runtime *pruntime) {
                         case op_if_icmpgt: {
                             ival2 = (--sp)->ivalue;
                             ival1 = (--sp)->ivalue;
-                            if (ival1 > ival2) {
+                            if (ival1 > 0) {
                                 offset = *((s16 *) (runtime->pc + 1));
                                 runtime->pc += offset;
                                 check_gc_pause(offset);
