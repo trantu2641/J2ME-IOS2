@@ -12,20 +12,14 @@ import javax.microedition.io.Connector;
 /**
  * J2ME Image compatibility layer.
  *
- * Missing, corrupted, empty, or failed image resources are replaced with
- * a transparent 1x1 image so that optional graphics do not stop the MIDlet.
+ * Missing, corrupted, empty, or failed image resources use a non-allocating
+ * zero-handle Image sentinel so optional graphics do not stop the MIDlet.
  *
  * IMPORTANT:
  * Remote HTTP/HTTPS image failures are intentionally isolated from the
  * MIDlet. One failed icon must not stop subsequent icon/resource loads.
  */
 public class Image {
-
-    // Icon fallback logging intentionally disabled.
-    // Failed optional icons must not generate file/console I/O.
-    private static void logFallback(String name, String reason) {
-        // no-op
-    }
 
     public long nativeHandle;
 
@@ -47,11 +41,7 @@ public class Image {
         long handle = NativeBridge.createMutableImage(width, height);
 
         if (handle == 0) {
-            System.out.println(
-                "[Image] ERROR: createMutableImage returned 0 for "
-                + width + "x" + height
-            );
-        }
+            }
 
         return new Image(handle, width, height, true);
     }
@@ -86,34 +76,28 @@ public class Image {
 
         } catch (RuntimeException e) {
 
-            System.out.println(
-                "[Image] Unable to initialize image: " + e
-            );
-        }
+            }
 
         return img;
     }
 
     /**
-     * Creates a transparent 1x1 fallback image.
+     * Creates a non-allocating zero-handle fallback image.
      *
      * Used when an optional image/resource is missing, invalid,
      * corrupted, empty, or cannot be downloaded.
      */
-    private static Image createTransparentPlaceholder() {
-
-        // Do not allocate a 1x1 native image for every failed icon.
-        // A zero native handle is treated as an unavailable optional image
-        // by the native bridge and avoids turning a large icon failure into
-        // another native allocation.
+    /**
+     * Non-allocating failure sentinel. No native bitmap is created.
+     */
+    private static Image failedImage() {
         return new Image(0, 1, 1, false);
     }
 
     /**
      * Creates an image from a JAR resource name.
      *
-     * Local missing/corrupted resources are replaced with a transparent
-     * placeholder.
+     * Local missing/corrupted resources are replaced with a non-allocating zero-handle Image sentinel.
      *
      * HTTP/HTTPS resources are also isolated:
      *
@@ -128,8 +112,8 @@ public class Image {
         throws IOException {
 
         if (name == null || name.length() == 0) {
-            // Invalid optional image: return a zero-handle sentinel.
-            return createTransparentPlaceholder();
+
+            return failedImage();
         }
 
         /*
@@ -142,15 +126,16 @@ public class Image {
             InputStream remote = null;
 
             try {
-remote =
+
+                remote =
                     Connector.openInputStream(
                         name,
                         Connector.READ
                     );
 
                 if (remote == null) {
-                    // Optional remote image failed.
-                    return createTransparentPlaceholder();
+
+                    return failedImage();
                 }
 
                 /*
@@ -178,12 +163,7 @@ remote =
                  * Now the failed icon is replaced by a transparent
                  * placeholder and the Java game is allowed to continue.
                  */
-                logFallback(
-                    name,
-                    "remote image request failed: " + e
-                );
-
-                return createTransparentPlaceholder();
+                return failedImage();
 
             } catch (RuntimeException e) {
 
@@ -191,12 +171,7 @@ remote =
                  * Protect the MIDlet from native/network runtime errors
                  * caused by one optional image.
                  */
-                logFallback(
-                    name,
-                    "remote image runtime failure: " + e
-                );
-
-                return createTransparentPlaceholder();
+                return failedImage();
 
             } finally {
 
@@ -229,29 +204,19 @@ remote =
                 findResource(name);
 
             if (is == null) {
-                // Optional image failed; continue without allocating a placeholder.
-                return createTransparentPlaceholder();
+
+                return failedImage();
             }
 
             return createImage(is);
 
         } catch (IOException e) {
 
-            logFallback(
-                name,
-                "local resource read failed: " + e
-            );
-
-            return createTransparentPlaceholder();
+            return failedImage();
 
         } catch (RuntimeException e) {
 
-            logFallback(
-                name,
-                "local resource loader failed: " + e
-            );
-
-            return createTransparentPlaceholder();
+            return failedImage();
         }
     }
 
@@ -346,6 +311,35 @@ remote =
             return is;
         }
 
+        /*
+         * Some miniJVM/JAR classloader paths do not expose game resources
+         * through Class.getResourceAsStream(). Search the actual classpath
+         * JAR for the exact entry name before using the legacy prefix search.
+         *
+         * The previous implementation only scanned the ZIP when the
+         * requested resource had no extension. Therefore a valid resource
+         * such as "icon.png" could be reported as missing even though it
+         * existed inside the JAR.
+         */
+        String searchName =
+            name.startsWith("/")
+                ? name.substring(1)
+                : name;
+
+        String exactMatch =
+            findEntryExact(searchName);
+
+        if (exactMatch != null) {
+            is =
+                tryLoadResource(
+                    "/" + exactMatch
+                );
+
+            if (is != null) {
+                return is;
+            }
+        }
+
         if (
             name.lastIndexOf('.')
             <= name.lastIndexOf('/')
@@ -368,6 +362,86 @@ remote =
 
                 if (is != null) {
                     return is;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private static String findEntryExact(
+        String name
+    ) {
+        String cp =
+            System.getProperty(
+                "java.class.path"
+            );
+
+        if (
+            cp == null
+            || cp.length() == 0
+        ) {
+            return null;
+        }
+
+        String[] paths =
+            cp.split(
+                File.pathSeparator
+            );
+
+        for (String path : paths) {
+            if (
+                path == null
+                || path.length() == 0
+            ) {
+                continue;
+            }
+
+            File f =
+                new File(path);
+
+            if (!f.isFile()) {
+                continue;
+            }
+
+            ZipFile zf = null;
+
+            try {
+                zf = new ZipFile(f);
+
+                Enumeration entries =
+                    zf.entries();
+
+                while (
+                    entries.hasMoreElements()
+                ) {
+                    ZipEntry entry =
+                        (ZipEntry)
+                            entries.nextElement();
+
+                    String entryName =
+                        entry.getName();
+
+                    if (
+                        entryName.equals(name)
+                        || entryName.equals("/" + name)
+                    ) {
+                        return entryName;
+                    }
+                }
+
+            } catch (IOException e) {
+                // Continue with the next classpath JAR.
+
+            } catch (RuntimeException e) {
+                // Continue with the next classpath JAR.
+
+            } finally {
+                if (zf != null) {
+                    try {
+                        zf.close();
+                    } catch (IOException ignored) {
+                    }
                 }
             }
         }
@@ -548,13 +622,7 @@ remote =
 
         } catch (RuntimeException e) {
 
-            System.out.println(
-                "[Image] COMPAT: resource lookup failed for "
-                + name
-                + ": "
-                + e
-            );
-        }
+            }
 
         return null;
     }
@@ -563,7 +631,7 @@ remote =
      * Creates an image from an InputStream.
      *
      * Any failure while reading/decoding an optional image is converted
-     * into a transparent placeholder.
+     * into a non-allocating Image sentinel.
      */
     public static Image createImage(
         InputStream stream
@@ -571,12 +639,7 @@ remote =
 
         if (stream == null) {
 
-            logFallback(
-                "InputStream",
-                "null input stream"
-            );
-
-            return createTransparentPlaceholder();
+            return failedImage();
         }
 
         try {
@@ -593,12 +656,7 @@ remote =
                 || data.length == 0
             ) {
 
-                logFallback(
-                    "InputStream",
-                    "empty image data"
-                );
-
-                return createTransparentPlaceholder();
+                return failedImage();
             }
 
             return createImage(
@@ -609,21 +667,11 @@ remote =
 
         } catch (IOException e) {
 
-            logFallback(
-                "InputStream",
-                "image read failed: " + e
-            );
-
-            return createTransparentPlaceholder();
+            return failedImage();
 
         } catch (RuntimeException e) {
 
-            logFallback(
-                "InputStream",
-                "image decoding failed: " + e
-            );
-
-            return createTransparentPlaceholder();
+            return failedImage();
         }
     }
 
@@ -635,12 +683,7 @@ remote =
 
         if (imageData == null) {
 
-            logFallback(
-                "byte[]",
-                "null image data"
-            );
-
-            return createTransparentPlaceholder();
+            return failedImage();
         }
 
         if (
@@ -651,12 +694,7 @@ remote =
                     - imageLength
         ) {
 
-            logFallback(
-                "byte[]",
-                "invalid or empty image data"
-            );
-
-            return createTransparentPlaceholder();
+            return failedImage();
         }
 
         long handle = 0;
@@ -672,12 +710,7 @@ remote =
 
             if (handle == 0) {
 
-                logFallback(
-                    "byte[]",
-                    "native image decoder failed"
-                );
-
-                return createTransparentPlaceholder();
+                return failedImage();
             }
 
             int w =
@@ -704,12 +737,7 @@ remote =
 
                 handle = 0;
 
-                logFallback(
-                    "byte[]",
-                    "invalid image dimensions"
-                );
-
-                return createTransparentPlaceholder();
+                return failedImage();
             }
 
             return new Image(
@@ -731,12 +759,7 @@ remote =
                 }
             }
 
-            logFallback(
-                "byte[]",
-                "image decoding exception: " + e
-            );
-
-            return createTransparentPlaceholder();
+            return failedImage();
         }
     }
 
