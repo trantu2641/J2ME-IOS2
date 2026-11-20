@@ -3,34 +3,11 @@
 #include "jit.h"
 #include "garbage.h"
 
-/* Helper to check if current thread or JVM is stopping/exiting */
-static inline s32 _interp_should_stop(MiniJVM *jvm, JavaThreadInfo *thrd_info, Runtime *runtime) {
-    if (thrd_info && thrd_info->is_stop) {
-        return 1;
-    }
-    if (runtime && runtime->thrd_info && runtime->thrd_info->is_stop) {
-        return 1;
-    }
-    if (jvm) {
-        s32 st = jvm->jvm_state;
-        if (st == JVM_STATUS_STOPED || st == JVM_STATUS_UNKNOW) {
-            return 1;
-        }
-        if (jvm->collector && jvm->collector->exit_flag) {
-            return 1;
-        }
-    }
-    return 0;
-}
-
 /* ==================================opcode implementation =============================*/
 
 void _op_notsupport(u8 *opCode, Runtime *runtime) {
     invoke_deepth(runtime);
     jvm_printf("not support instruct [%x]\n", opCode[0]);
-    if (runtime && runtime->jvm && runtime->jvm->jvm_state == JVM_STATUS_STOPED) {
-        return;
-    }
     exit(2);
 }
 
@@ -530,21 +507,10 @@ s32 execute_method_impl(MethodInfo *method, Runtime *pruntime) {
 
     jvm = runtime->jvm;
     thrd_info = runtime->thrd_info;
-
-    if (_interp_should_stop(jvm, thrd_info, runtime)) {
-        runtime_destroy_inl(runtime);
-        if (pruntime) pruntime->son = NULL;
-        return RUNTIME_STATUS_ERROR;
-    }
-
     clazz = method->_this_class;
     runtime->clazz = clazz;
     runtime->method = method;
     while (clazz->status < CLASS_STATUS_CLINITING) {
-        if (_interp_should_stop(jvm, thrd_info, runtime)) {
-            ret = RUNTIME_STATUS_ERROR;
-            goto label_exit_method_cleanup;
-        }
         class_clinit(clazz, runtime);
     }
 
@@ -565,12 +531,6 @@ s32 execute_method_impl(MethodInfo *method, Runtime *pruntime) {
 
             //method sync begin
             if (method->is_sync)_synchronized_lock_method(method, runtime);
-
-            if (_interp_should_stop(jvm, thrd_info, runtime)) {
-                ret = RUNTIME_STATUS_ERROR;
-                localvar_dispose(runtime);
-                goto label_exit_method_sync_cleanup;
-            }
 
             if (JIT_ENABLE && ca->jit.state == JIT_GEN_SUCCESS) {
                 ret = ca->jit.func(method, runtime);
@@ -613,13 +573,6 @@ s32 execute_method_impl(MethodInfo *method, Runtime *pruntime) {
                 sp = runtime->stack->sp;
 
                 do {
-                    if (_interp_should_stop(jvm, thrd_info, runtime)) {
-                        stack->sp = sp;
-                        localvar_dispose(runtime);
-                        ret = RUNTIME_STATUS_ERROR;
-                        goto label_exit_while;
-                    }
-
                     if (jdwp_client_count(jvm->jdwpserver)) {
                         stack->sp = sp;
 
@@ -2108,11 +2061,6 @@ s32 execute_method_impl(MethodInfo *method, Runtime *pruntime) {
                                 stack->sp = sp;
                                 ret = execute_method_impl(m, runtime);
                                 sp = stack->sp;
-                                if (_interp_should_stop(jvm, thrd_info, runtime)) {
-                                    localvar_dispose(runtime);
-                                    ret = RUNTIME_STATUS_ERROR;
-                                    goto label_exit_while;
-                                }
                                 if (ret) goto label_exception_handle;
                                 runtime->pc += 3;
                             }
@@ -2128,11 +2076,6 @@ s32 execute_method_impl(MethodInfo *method, Runtime *pruntime) {
                             stack->sp = sp;
                             ret = execute_method_impl(m, runtime);
                             sp = stack->sp;
-                            if (_interp_should_stop(jvm, thrd_info, runtime)) {
-                                localvar_dispose(runtime);
-                                ret = RUNTIME_STATUS_ERROR;
-                                goto label_exit_while;
-                            }
                             if (ret) goto label_exception_handle;
                             runtime->pc += 3;
                             break;
@@ -2147,11 +2090,6 @@ s32 execute_method_impl(MethodInfo *method, Runtime *pruntime) {
                             stack->sp = sp;
                             ret = execute_method_impl(m, runtime);
                             sp = stack->sp;
-                            if (_interp_should_stop(jvm, thrd_info, runtime)) {
-                                localvar_dispose(runtime);
-                                ret = RUNTIME_STATUS_ERROR;
-                                goto label_exit_while;
-                            }
                             if (ret) goto label_exception_handle;
                             runtime->pc += 3;
                             break;
@@ -2171,11 +2109,6 @@ s32 execute_method_impl(MethodInfo *method, Runtime *pruntime) {
                                 stack->sp = sp;
                                 ret = execute_method_impl(m, runtime);
                                 sp = stack->sp;
-                                if (_interp_should_stop(jvm, thrd_info, runtime)) {
-                                    localvar_dispose(runtime);
-                                    ret = RUNTIME_STATUS_ERROR;
-                                    goto label_exit_while;
-                                }
                                 if (ret) goto label_exception_handle;
                                 runtime->pc += 5;
                             }
@@ -2192,11 +2125,6 @@ s32 execute_method_impl(MethodInfo *method, Runtime *pruntime) {
                             stack->sp = sp;
                             ret = execute_method_impl(m, runtime);
                             sp = stack->sp;
-                            if (_interp_should_stop(jvm, thrd_info, runtime)) {
-                                localvar_dispose(runtime);
-                                ret = RUNTIME_STATUS_ERROR;
-                                goto label_exit_while;
-                            }
                             if (ret) goto label_exception_handle;
                             runtime->pc += 5;
                             break;
@@ -2204,12 +2132,6 @@ s32 execute_method_impl(MethodInfo *method, Runtime *pruntime) {
 
                         default:
                             _op_notsupport(runtime->pc, runtime);
-                            if (_interp_should_stop(jvm, thrd_info, runtime)) {
-                                stack->sp = sp;
-                                localvar_dispose(runtime);
-                                ret = RUNTIME_STATUS_ERROR;
-                                goto label_exit_while;
-                            }
                     }
 
 #if _JVM_DEBUG_PROFILE
@@ -2261,11 +2183,6 @@ s32 execute_method_impl(MethodInfo *method, Runtime *pruntime) {
                     }
 
                     label_exception_handle:
-                    if (ret == RUNTIME_STATUS_ERROR || _interp_should_stop(jvm, thrd_info, runtime)) {
-                        localvar_dispose(runtime);
-                        ret = RUNTIME_STATUS_ERROR;
-                        goto label_exit_while;
-                    }
                     ret = RUNTIME_STATUS_EXCEPTION;
                     if (exception_handle(runtime->stack, runtime)) {
                         ret = RUNTIME_STATUS_NORMAL;
@@ -2292,7 +2209,6 @@ s32 execute_method_impl(MethodInfo *method, Runtime *pruntime) {
                 } while (1);
             }
 
-        label_exit_method_sync_cleanup:
             if (method->is_sync)_synchronized_unlock_method(method, runtime);
 
         } else {
@@ -2309,18 +2225,11 @@ s32 execute_method_impl(MethodInfo *method, Runtime *pruntime) {
                 method->native_func = native->func_pointer;
             }
         }
-
-        if (_interp_should_stop(jvm, thrd_info, runtime)) {
-            ret = RUNTIME_STATUS_ERROR;
-            localvar_dispose(runtime);
-        } else if (method->native_func) {
+        if (method->native_func) {
             if (method->is_sync)_synchronized_lock_method(method, runtime);
             ret = method->native_func(runtime, clazz);
             if (method->is_sync)_synchronized_unlock_method(method, runtime);
-            if (_interp_should_stop(jvm, thrd_info, runtime)) {
-                localvar_dispose(runtime);
-                ret = RUNTIME_STATUS_ERROR;
-            } else if (ret) {
+            if (ret) {
                 ins = pop_ref(stack);
                 localvar_dispose(runtime);
                 push_ref(stack, ins);
