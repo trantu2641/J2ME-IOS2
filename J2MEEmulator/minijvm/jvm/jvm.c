@@ -1,11 +1,14 @@
+
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <signal.h>
 #include "jvm.h"
 #include "garbage.h"
 #include "jvm_util.h"
 #include "jdwp.h"
+
 
 void thread_boundle(Runtime *runtime) {
 
@@ -32,14 +35,11 @@ void thread_boundle(Runtime *runtime) {
 }
 
 void thread_unboundle(Runtime *runtime) {
-    if (!runtime || !runtime->thrd_info) return;
 
     runtime->thrd_info->is_suspend = 1;
     Instance *t = runtime->thrd_info->jthread;
     //主线程实例被回收
-    if (t) {
-        jthread_dispose(t, runtime);
-    }
+    jthread_dispose(t, runtime);
 }
 
 void print_exception(Runtime *runtime) {
@@ -104,28 +104,22 @@ PeerClassLoader *classloader_create_with_path(MiniJVM *jvm, c8 *path) {
 }
 
 void classloader_destroy(PeerClassLoader *class_loader) {
-    if (!class_loader) return;
     HashtableIterator hti;
-    if (class_loader->classes) {
-        hashtable_iterate(class_loader->classes, &hti);
-        for (; hashtable_iter_has_more(&hti);) {
-            HashtableValue v = hashtable_iter_next_value(&hti);
-            if (class_loader->jvm && class_loader->jvm->collector) {
-                gc_obj_release(class_loader->jvm->collector, v);
-            }
-        }
-        hashtable_clear(class_loader->classes);
-        hashtable_destroy(class_loader->classes);
-        class_loader->classes = NULL;
+    hashtable_iterate(class_loader->classes, &hti);
+    for (; hashtable_iter_has_more(&hti);) {
+        HashtableValue v = hashtable_iter_next_value(&hti);
+        gc_obj_release(class_loader->jvm->collector, v);
     }
-    if (class_loader->classpath) {
-        s32 i;
-        for (i = 0; i < class_loader->classpath->length; i++) {
-            utf8_destroy(arraylist_get_value(class_loader->classpath, i));
-        }
-        arraylist_destroy(class_loader->classpath);
-        class_loader->classpath = NULL;
+
+    hashtable_clear(class_loader->classes);
+    s32 i;
+    for (i = 0; i < class_loader->classpath->length; i++) {
+        utf8_destroy(arraylist_get_value(class_loader->classpath, i));
     }
+    arraylist_destroy(class_loader->classpath);
+    hashtable_destroy(class_loader->classes);
+
+    class_loader->classes = NULL;
 
     jvm_free(class_loader);
 }
@@ -207,54 +201,38 @@ void classloaders_clear_all_static(MiniJVM *jvm) {
 }
 
 void classloaders_destroy_all(MiniJVM *jvm) {
-    if (!jvm) return;
-    if (jvm->classloaders) {
-        spin_lock(&jvm->lock_cloader);
-        {
-            s32 i;
-            for (i = 0; i < jvm->classloaders->length; i++) {
-                PeerClassLoader *pcl = arraylist_get_value_unsafe(jvm->classloaders, i);
-                classloader_destroy(pcl);
-            }
+
+    spin_lock(&jvm->lock_cloader);
+    {
+        s32 i;
+        for (i = 0; i < jvm->classloaders->length; i++) {
+            PeerClassLoader *pcl = arraylist_get_value_unsafe(jvm->classloaders, i);
+            //release class static field
+            classloader_destroy(pcl);
         }
-        spin_unlock(&jvm->lock_cloader);
-        spin_destroy(&jvm->lock_cloader);
-        arraylist_destroy(jvm->classloaders);
-        jvm->classloaders = NULL;
     }
+    spin_unlock(&jvm->lock_cloader);
+    spin_destroy(&jvm->lock_cloader);
+    arraylist_destroy(jvm->classloaders);
     jvm->boot_classloader = NULL;
+    jvm->classloaders = NULL;
 }
 
 void set_jvm_state(MiniJVM *jvm, s32 state) {
-    if (!jvm) return;
     jvm->jvm_state = state;
 }
 
 s32 get_jvm_state(MiniJVM *jvm) {
-    if (!jvm) return JVM_STATUS_UNKNOW;
     return jvm->jvm_state;
 }
 
-static volatile sig_atomic_t s_sig_logged_once = 0;
-
 void _on_jvm_sig_print(s32 no) {
-    if (!s_sig_logged_once) {
-        s_sig_logged_once = 1;
-        jvm_printf("\n[SIGNAL]jvm sig:%d\n", no);
-    }
+    jvm_printf("[SIGNAL]jvm sig:%d  errno: %d , %s\n", no, errno, strerror(errno));
 }
 
 void _on_jvm_sig(s32 no) {
-    if (!s_sig_logged_once) {
-        s_sig_logged_once = 1;
-        jvm_printf("\n[SIGNAL]jvm sig:%d\n", no);
-    }
-
-    // Do not call strerror()/errno or attempt complex cleanup from a
-    // synchronous fatal-signal handler.  Those operations are not
-    // async-signal-safe and can recursively fault while handling SIGSEGV.
-    signal(no, SIG_DFL);
-    raise(no);
+    _on_jvm_sig_print(no);
+    exit(no);
 }
 
 MiniJVM *jvm_create() {
@@ -275,7 +253,15 @@ s32 jvm_init(MiniJVM *jvm, c8 *p_bootclasspath, c8 *p_classpath) {
         jvm_printf("jvm not found.");
         return -1;
     }
-    s_sig_logged_once = 0;
+
+    signal(SIGABRT, _on_jvm_sig);
+    signal(SIGFPE, _on_jvm_sig);
+    signal(SIGSEGV, _on_jvm_sig);
+    signal(SIGTERM, _on_jvm_sig);
+#ifdef SIGPIPE
+    signal(SIGPIPE, _on_jvm_sig_print); //not exit when network sigpipe
+#endif
+
     set_jvm_state(jvm, JVM_STATUS_INITING);
 
     if (!p_classpath) {
@@ -284,11 +270,13 @@ s32 jvm_init(MiniJVM *jvm, c8 *p_bootclasspath, c8 *p_classpath) {
     if (!jvm->startup_dir) {
         jvm->startup_dir = utf8_create_c("./");
     }
+    //
     open_log();
 
 #if _JVM_DEBUG_PROFILE
     profile_init();
 #endif
+    //
     init_jni_func_table(jvm);
 
     //创建线程容器
@@ -348,7 +336,7 @@ s32 jvm_init(MiniJVM *jvm, c8 *p_bootclasspath, c8 *p_classpath) {
     classes_load_get_with_clinit(NULL, clsName, runtime);
     //for interrupted thread
     utf8_clear(clsName);
-    utf8_append_c(clsName, STR_CLASS_JAVA_LANG_INTERRUPTED);
+    utf8_append_c(clsName, STR_CLASS_JAVA_LANG_INTERRUPTED);//must load this class ,because it will be used when thread interrupt ,but it can not load when that thread is marked as interrupted
     JClass *c2;
     c2 = classes_load_get_with_clinit(NULL, clsName, runtime);
     instance_create(runtime, c2);
@@ -376,70 +364,62 @@ s32 jvm_init(MiniJVM *jvm, c8 *p_bootclasspath, c8 *p_classpath) {
 }
 
 void jvm_destroy(MiniJVM *jvm) {
-    if (!jvm) return;
-    set_jvm_state(jvm, JVM_STATUS_STOPED);
-    if (jvm->collector) {
-        jvm->collector->exit_flag = 1;
+    Runtime *parent = runtime_create(jvm);
+
+    while (parent && jvm->shutdown_hook->length) {
+        Instance *inst = arraylist_get_value(jvm->shutdown_hook, 0);
+        arraylist_remove_at(jvm->shutdown_hook, 0);
+
+        //there is an week is that the hook thread is serialized execution,
+        // because the hook thread may be not inserted into the thread list,
+        // then vm is destroyed
+        thrd_t t = jthread_start(inst, parent);
+        thrd_join(t, NULL);
     }
-    jdwp_stop_server(jvm);
+    runtime_destroy(parent);
+    parent = NULL;
+    while (threadlist_count_none_daemon(jvm) > 0 && !jvm->collector->exit_flag) {//wait for other thread over ,
+        threadSleep(20);
+    }
+    set_jvm_state(jvm, JVM_STATUS_STOPED);
+    //waiting for daemon thread terminate
     thread_stop_all(jvm);
 
-    Runtime *parent = runtime_create(jvm);
-    if (parent && jvm->shutdown_hook) {
-        while (jvm->shutdown_hook->length) {
-            Instance *inst = arraylist_get_value(jvm->shutdown_hook, 0);
-            arraylist_remove_at(jvm->shutdown_hook, 0);
-            if (inst) {
-                thrd_t t = jthread_start(inst, parent);
-                thrd_join(t, NULL);
-            }
+#if _JVM_DEBUG_LOG_LEVEL > 0
+    jvm_printf("[INFO]waitting for thread terminate\n");
+#endif
+    {
+        s32 wait_count = 0;
+        s32 max_wait = 150; // 150 * 20ms = 3 seconds timeout
+        while (threadlist_count_active(jvm) > 0 && wait_count < max_wait) {
+            threadSleep(20);
+            wait_count++;
+        }
+        if (threadlist_count_active(jvm) > 0) {
+            jvm_printf("[WARN]%d threads still active after %dms timeout, force-zombie\n",
+                       threadlist_count_active(jvm), max_wait * 20);
+            thread_zombie_all(jvm);
         }
     }
-    if (parent) {
-        runtime_destroy(parent);
-        parent = NULL;
-    }
 
-#if _JVM_DEBUG_LOG_LEVEL > 0
-    jvm_printf("[INFO]waiting for all threads to terminate\n");
-#endif
-    s32 wait_count = 0;
-    while (threadlist_count_active(jvm) > 0 && wait_count < 250) {
-        threadSleep(20);
-        wait_count++;
-    }
-    if (threadlist_count_active(jvm) > 0) {
-        thread_zombie_all(jvm);
-    }
-
-    classloaders_clear_all_static(jvm);
-    classloaders_destroy_all(jvm);
-
+    jdwp_stop_server(jvm);
+    //
     gc_destroy(jvm);
 
-    if (jvm->table_jstring_const) {
-        hashtable_destroy(jvm->table_jstring_const);
-        jvm->table_jstring_const = NULL;
-    }
+    hashtable_destroy(jvm->table_jstring_const);
+    //
     thread_lock_dispose(&jvm->threadlock);
-    if (jvm->thread_list) {
-        arraylist_destroy(jvm->thread_list);
-        jvm->thread_list = NULL;
-    }
-    if (jvm->shutdown_hook) {
-        arraylist_destroy(jvm->shutdown_hook);
-        jvm->shutdown_hook = NULL;
-    }
+    arraylist_destroy(jvm->thread_list);
+    arraylist_destroy(jvm->shutdown_hook);
     native_lib_destroy(jvm);
     sys_properties_dispose(jvm);
     close_log();
 #if _JVM_DEBUG_LOG_LEVEL > 0
-    jvm_printf("[INFO]jvm destroyed\n");
+    jvm_printf("[INFO]jvm destoried\n");
 #endif
     set_jvm_state(jvm, JVM_STATUS_UNKNOW);
     if (jvm->startup_dir) {
         utf8_destroy(jvm->startup_dir);
-        jvm->startup_dir = NULL;
     }
     jvm_free(jvm);
 }
