@@ -2,31 +2,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <signal.h>
 #include "jvm.h"
 #include "garbage.h"
 #include "jvm_util.h"
 #include "jdwp.h"
-
-static volatile sig_atomic_t s_fatal_sig_logged = 0;
-static volatile sig_atomic_t s_pipe_sig_logged = 0;
-
-/* Helper to check whether the JVM or current thread has been asked to stop/exit */
-static inline s32 _jvm_should_stop(MiniJVM *jvm, Runtime *runtime) {
-    if (runtime && runtime->thrd_info && runtime->thrd_info->is_stop) {
-        return 1;
-    }
-    if (jvm) {
-        s32 st = get_jvm_state(jvm);
-        if (st == JVM_STATUS_STOPED || st == JVM_STATUS_UNKNOW) {
-            return 1;
-        }
-        if (jvm->collector && jvm->collector->exit_flag) {
-            return 1;
-        }
-    }
-    return 0;
-}
 
 void thread_boundle(Runtime *runtime) {
 
@@ -53,11 +32,14 @@ void thread_boundle(Runtime *runtime) {
 }
 
 void thread_unboundle(Runtime *runtime) {
+    if (!runtime || !runtime->thrd_info) return;
 
     runtime->thrd_info->is_suspend = 1;
     Instance *t = runtime->thrd_info->jthread;
     //主线程实例被回收
-    jthread_dispose(t, runtime);
+    if (t) {
+        jthread_dispose(t, runtime);
+    }
 }
 
 void print_exception(Runtime *runtime) {
@@ -253,53 +235,24 @@ s32 get_jvm_state(MiniJVM *jvm) {
     return jvm->jvm_state;
 }
 
+static volatile sig_atomic_t s_sig_logged_once = 0;
+
 void _on_jvm_sig_print(s32 no) {
     s32 saved_errno = errno;
-    if (s_pipe_sig_logged) {
-        errno = saved_errno;
-        return;
-    }
-    s_pipe_sig_logged = 1;
-    jvm_printf("\n[SIGNAL]jvm sig:%d  errno: %d , %s\n", no, saved_errno, strerror(saved_errno));
-    errno = saved_errno;
-}
-
-/* Log fatal signal at most once per process to avoid 500MB infinite signal-loop logs,
- * then restore default handler (SA_RESETHAND) so Xcode/OS crash reporting sees true fault. */
-void _on_jvm_sig(s32 no) {
-    s32 saved_errno = errno;
-    if (!s_fatal_sig_logged) {
-        s_fatal_sig_logged = 1;
+    if (!s_sig_logged_once) {
+        s_sig_logged_once = 1;
         jvm_printf("\n[SIGNAL]jvm sig:%d  errno: %d , %s\n", no, saved_errno, strerror(saved_errno));
     }
-    signal(no, SIG_DFL);
     errno = saved_errno;
-    raise(no);
 }
 
-static void _install_jvm_signal_handlers(void) {
-    s_fatal_sig_logged = 0;
-    s_pipe_sig_logged = 0;
-
-    struct sigaction sa;
-    memset(&sa, 0, sizeof(sa));
-    sigemptyset(&sa.sa_mask);
-    sa.sa_handler = _on_jvm_sig;
-    sa.sa_flags = SA_RESETHAND;
-
-    sigaction(SIGABRT, &sa, NULL);
-    sigaction(SIGFPE, &sa, NULL);
-    sigaction(SIGSEGV, &sa, NULL);
-    sigaction(SIGTERM, &sa, NULL);
-
-#ifdef SIGPIPE
-    struct sigaction sa_pipe;
-    memset(&sa_pipe, 0, sizeof(sa_pipe));
-    sigemptyset(&sa_pipe.sa_mask);
-    sa_pipe.sa_handler = _on_jvm_sig_print;
-    sa_pipe.sa_flags = 0;
-    sigaction(SIGPIPE, &sa_pipe, NULL);
-#endif
+void _on_jvm_sig(s32 no) {
+    s32 saved_errno = errno;
+    if (!s_sig_logged_once) {
+        s_sig_logged_once = 1;
+        jvm_printf("\n[SIGNAL]jvm sig:%d  errno: %d , %s\n", no, saved_errno, strerror(saved_errno));
+    }
+    errno = saved_errno;
 }
 
 MiniJVM *jvm_create() {
@@ -320,9 +273,7 @@ s32 jvm_init(MiniJVM *jvm, c8 *p_bootclasspath, c8 *p_classpath) {
         jvm_printf("jvm not found.");
         return -1;
     }
-
-    _install_jvm_signal_handlers();
-
+    s_sig_logged_once = 0;
     set_jvm_state(jvm, JVM_STATUS_INITING);
 
     if (!p_classpath) {
@@ -331,13 +282,11 @@ s32 jvm_init(MiniJVM *jvm, c8 *p_bootclasspath, c8 *p_classpath) {
     if (!jvm->startup_dir) {
         jvm->startup_dir = utf8_create_c("./");
     }
-    //
     open_log();
 
 #if _JVM_DEBUG_PROFILE
     profile_init();
 #endif
-    //
     init_jni_func_table(jvm);
 
     //创建线程容器
@@ -397,7 +346,7 @@ s32 jvm_init(MiniJVM *jvm, c8 *p_bootclasspath, c8 *p_classpath) {
     classes_load_get_with_clinit(NULL, clsName, runtime);
     //for interrupted thread
     utf8_clear(clsName);
-    utf8_append_c(clsName, STR_CLASS_JAVA_LANG_INTERRUPTED);//must load this class ,because it will be used when thread interrupt ,but it can not load when that thread is marked as interrupted
+    utf8_append_c(clsName, STR_CLASS_JAVA_LANG_INTERRUPTED);
     JClass *c2;
     c2 = classes_load_get_with_clinit(NULL, clsName, runtime);
     instance_create(runtime, c2);
@@ -426,20 +375,13 @@ s32 jvm_init(MiniJVM *jvm, c8 *p_bootclasspath, c8 *p_classpath) {
 
 void jvm_destroy(MiniJVM *jvm) {
     if (!jvm) return;
-
-    /* 1. Mark JVM state as stopping immediately so bytecode loops & native checks see it */
     set_jvm_state(jvm, JVM_STATUS_STOPED);
     if (jvm->collector) {
         jvm->collector->exit_flag = 1;
     }
-
-    /* 2. Stop JDWP server early so debugging sockets/threads do not block teardown */
     jdwp_stop_server(jvm);
-
-    /* 3. Signal all running Java/native threads to stop */
     thread_stop_all(jvm);
 
-    /* 4. Run shutdown hooks with a per-hook safety wait */
     Runtime *parent = runtime_create(jvm);
     if (parent && jvm->shutdown_hook) {
         while (jvm->shutdown_hook->length) {
@@ -456,32 +398,18 @@ void jvm_destroy(MiniJVM *jvm) {
         parent = NULL;
     }
 
-    /* Re-assert stop flags after hooks in case a hook spawned a thread */
-    set_jvm_state(jvm, JVM_STATUS_STOPED);
-    thread_stop_all(jvm);
-
 #if _JVM_DEBUG_LOG_LEVEL > 0
     jvm_printf("[INFO]waiting for all threads to terminate\n");
 #endif
-    /* 5. Wait thoroughly for threads to exit; re-issue stop signal periodically if needed */
-    {
-        s32 wait_count = 0;
-        s32 max_wait = 500; // 500 * 20ms = 10 seconds max wait
-        while (threadlist_count_active(jvm) > 0 && wait_count < max_wait) {
-            if ((wait_count % 25) == 0) {
-                thread_stop_all(jvm);
-            }
-            threadSleep(20);
-            wait_count++;
-        }
-        if (threadlist_count_active(jvm) > 0) {
-            jvm_printf("[WARN]%d threads still active after %dms timeout, marking zombie\n",
-                       threadlist_count_active(jvm), max_wait * 20);
-            thread_zombie_all(jvm);
-        }
+    s32 wait_count = 0;
+    while (threadlist_count_active(jvm) > 0 && wait_count < 250) {
+        threadSleep(20);
+        wait_count++;
+    }
+    if (threadlist_count_active(jvm) > 0) {
+        thread_zombie_all(jvm);
     }
 
-    /* 6. Tear down classloaders, GC, and JVM containers only after threads have stopped */
     classloaders_clear_all_static(jvm);
     classloaders_destroy_all(jvm);
 
@@ -556,9 +484,6 @@ s32 call_method(MiniJVM *jvm, c8 *p_classname, c8 *p_methodname, c8 *p_methoddes
     }
     if (!jvm) {
         jvm_printf("[ERROR]jvm not found .\n");
-        return RUNTIME_STATUS_ERROR;
-    }
-    if (_jvm_should_stop(jvm, p_runtime)) {
         return RUNTIME_STATUS_ERROR;
     }
     //创建运行时栈
@@ -644,9 +569,6 @@ s32 call_method(MiniJVM *jvm, c8 *p_classname, c8 *p_methodname, c8 *p_methoddes
 
 s32 execute_method(MethodInfo *method, Runtime *runtime) {
     if (!runtime || !method) {
-        return RUNTIME_STATUS_ERROR;
-    }
-    if (_jvm_should_stop(runtime->jvm, runtime)) {
         return RUNTIME_STATUS_ERROR;
     }
     // if not detect the son ,may cause jthread enter fake blocking state,
