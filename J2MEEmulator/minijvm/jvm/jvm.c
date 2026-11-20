@@ -8,6 +8,9 @@
 #include "jvm_util.h"
 #include "jdwp.h"
 
+static volatile sig_atomic_t s_fatal_sig_logged = 0;
+static volatile sig_atomic_t s_pipe_sig_logged = 0;
+
 /* Helper to check whether the JVM or current thread has been asked to stop/exit */
 static inline s32 _jvm_should_stop(MiniJVM *jvm, Runtime *runtime) {
     if (runtime && runtime->thrd_info && runtime->thrd_info->is_stop) {
@@ -251,13 +254,52 @@ s32 get_jvm_state(MiniJVM *jvm) {
 }
 
 void _on_jvm_sig_print(s32 no) {
-    jvm_printf("[SIGNAL]jvm sig:%d  errno: %d , %s\n", no, errno, strerror(errno));
+    s32 saved_errno = errno;
+    if (s_pipe_sig_logged) {
+        errno = saved_errno;
+        return;
+    }
+    s_pipe_sig_logged = 1;
+    jvm_printf("\n[SIGNAL]jvm sig:%d  errno: %d , %s\n", no, saved_errno, strerror(saved_errno));
+    errno = saved_errno;
 }
 
-/* On embedded/mobile hosts (like iOS JarBox), avoid killing the whole host process on signal;
- * log and let session cleanup / crash handler take over cleanly. */
+/* Log fatal signal at most once per process to avoid 500MB infinite signal-loop logs,
+ * then restore default handler (SA_RESETHAND) so Xcode/OS crash reporting sees true fault. */
 void _on_jvm_sig(s32 no) {
-    _on_jvm_sig_print(no);
+    s32 saved_errno = errno;
+    if (!s_fatal_sig_logged) {
+        s_fatal_sig_logged = 1;
+        jvm_printf("\n[SIGNAL]jvm sig:%d  errno: %d , %s\n", no, saved_errno, strerror(saved_errno));
+    }
+    signal(no, SIG_DFL);
+    errno = saved_errno;
+    raise(no);
+}
+
+static void _install_jvm_signal_handlers(void) {
+    s_fatal_sig_logged = 0;
+    s_pipe_sig_logged = 0;
+
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sigemptyset(&sa.sa_mask);
+    sa.sa_handler = _on_jvm_sig;
+    sa.sa_flags = SA_RESETHAND;
+
+    sigaction(SIGABRT, &sa, NULL);
+    sigaction(SIGFPE, &sa, NULL);
+    sigaction(SIGSEGV, &sa, NULL);
+    sigaction(SIGTERM, &sa, NULL);
+
+#ifdef SIGPIPE
+    struct sigaction sa_pipe;
+    memset(&sa_pipe, 0, sizeof(sa_pipe));
+    sigemptyset(&sa_pipe.sa_mask);
+    sa_pipe.sa_handler = _on_jvm_sig_print;
+    sa_pipe.sa_flags = 0;
+    sigaction(SIGPIPE, &sa_pipe, NULL);
+#endif
 }
 
 MiniJVM *jvm_create() {
@@ -279,13 +321,7 @@ s32 jvm_init(MiniJVM *jvm, c8 *p_bootclasspath, c8 *p_classpath) {
         return -1;
     }
 
-    signal(SIGABRT, _on_jvm_sig);
-    signal(SIGFPE, _on_jvm_sig);
-    signal(SIGSEGV, _on_jvm_sig);
-    signal(SIGTERM, _on_jvm_sig);
-#ifdef SIGPIPE
-    signal(SIGPIPE, _on_jvm_sig_print); //not exit when network sigpipe
-#endif
+    _install_jvm_signal_handlers();
 
     set_jvm_state(jvm, JVM_STATUS_INITING);
 
