@@ -104,39 +104,10 @@ static int session_active_count_locked(void) {
     return count;
 }
 
-static int count_live_jvm_threads(MiniJVM *jvm) {
-    if (!jvm || !jvm->thread_list) return 0;
-    int live = 0;
-    spin_lock(&jvm->thread_list->spinlock);
-    for (int i = 0; i < jvm->thread_list->length; i++) {
-        Runtime *rt = (Runtime *)arraylist_get_value_unsafe(jvm->thread_list, i);
-        if (rt && rt->thrd_info) {
-            int st = rt->thrd_info->thread_status;
-            if (st != THREAD_STATUS_ZOMBIE && st != THREAD_STATUS_DEAD) {
-                live++;
-            }
-        }
-    }
-    spin_unlock(&jvm->thread_list->spinlock);
-    return live;
-}
-
 static void signal_jvm_threads_stop(MiniJVM *jvm) {
     if (!jvm) return;
     if (jvm->collector) {
         jvm->collector->exit_flag = 1;
-    }
-    if (jvm->thread_list) {
-        spin_lock(&jvm->thread_list->spinlock);
-        for (int i = 0; i < jvm->thread_list->length; i++) {
-            Runtime *rt = (Runtime *)arraylist_get_value_unsafe(jvm->thread_list, i);
-            if (rt && rt->thrd_info) {
-                rt->thrd_info->is_blocking = 0;
-                rt->thrd_info->thread_status = THREAD_STATUS_ZOMBIE;
-                jthread_stop(rt);
-            }
-        }
-        spin_unlock(&jvm->thread_list->spinlock);
     }
     thread_stop_all(jvm);
 }
@@ -920,14 +891,13 @@ void jvm_bridge_session_destroy(int session_id) {
         struct timespec step = {0, 25000000L}; // 25ms
         int waited = 0;
         for (int i = 0; i < 80; i++) {
-            if (!atomic_load(&s->running) && count_live_jvm_threads(jvm) == 0) break;
+            if (!atomic_load(&s->running)) break;
             signal_jvm_threads_stop(jvm);
             nanosleep(&step, NULL);
             waited += 25;
         }
-        int live_after_wait = count_live_jvm_threads(jvm);
-        BRIDGE_LOG("[JVM Session %d] Waiting runner join after %dms (running=%d, live_threads=%d)\n",
-                   session_id, waited, atomic_load(&s->running), live_after_wait);
+        BRIDGE_LOG("[JVM Session %d] Waiting runner join after %dms (still running=%d)\n",
+                   session_id, waited, atomic_load(&s->running));
         signal_jvm_threads_stop(jvm);
         pthread_join(runner, NULL);
         BRIDGE_LOG("[JVM Session %d] Runner joined\n", session_id);
