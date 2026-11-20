@@ -1,4 +1,3 @@
-
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -9,6 +8,22 @@
 #include "jvm_util.h"
 #include "jdwp.h"
 
+/* Helper to check whether the JVM or current thread has been asked to stop/exit */
+static inline s32 _jvm_should_stop(MiniJVM *jvm, Runtime *runtime) {
+    if (runtime && runtime->thrd_info && runtime->thrd_info->is_stop) {
+        return 1;
+    }
+    if (jvm) {
+        s32 st = get_jvm_state(jvm);
+        if (st == JVM_STATUS_STOPED || st == JVM_STATUS_UNKNOW) {
+            return 1;
+        }
+        if (jvm->collector && jvm->collector->exit_flag) {
+            return 1;
+        }
+    }
+    return 0;
+}
 
 void thread_boundle(Runtime *runtime) {
 
@@ -104,22 +119,28 @@ PeerClassLoader *classloader_create_with_path(MiniJVM *jvm, c8 *path) {
 }
 
 void classloader_destroy(PeerClassLoader *class_loader) {
+    if (!class_loader) return;
     HashtableIterator hti;
-    hashtable_iterate(class_loader->classes, &hti);
-    for (; hashtable_iter_has_more(&hti);) {
-        HashtableValue v = hashtable_iter_next_value(&hti);
-        gc_obj_release(class_loader->jvm->collector, v);
+    if (class_loader->classes) {
+        hashtable_iterate(class_loader->classes, &hti);
+        for (; hashtable_iter_has_more(&hti);) {
+            HashtableValue v = hashtable_iter_next_value(&hti);
+            if (class_loader->jvm && class_loader->jvm->collector) {
+                gc_obj_release(class_loader->jvm->collector, v);
+            }
+        }
+        hashtable_clear(class_loader->classes);
+        hashtable_destroy(class_loader->classes);
+        class_loader->classes = NULL;
     }
-
-    hashtable_clear(class_loader->classes);
-    s32 i;
-    for (i = 0; i < class_loader->classpath->length; i++) {
-        utf8_destroy(arraylist_get_value(class_loader->classpath, i));
+    if (class_loader->classpath) {
+        s32 i;
+        for (i = 0; i < class_loader->classpath->length; i++) {
+            utf8_destroy(arraylist_get_value(class_loader->classpath, i));
+        }
+        arraylist_destroy(class_loader->classpath);
+        class_loader->classpath = NULL;
     }
-    arraylist_destroy(class_loader->classpath);
-    hashtable_destroy(class_loader->classes);
-
-    class_loader->classes = NULL;
 
     jvm_free(class_loader);
 }
@@ -201,28 +222,31 @@ void classloaders_clear_all_static(MiniJVM *jvm) {
 }
 
 void classloaders_destroy_all(MiniJVM *jvm) {
-
-    spin_lock(&jvm->lock_cloader);
-    {
-        s32 i;
-        for (i = 0; i < jvm->classloaders->length; i++) {
-            PeerClassLoader *pcl = arraylist_get_value_unsafe(jvm->classloaders, i);
-            //release class static field
-            classloader_destroy(pcl);
+    if (!jvm) return;
+    if (jvm->classloaders) {
+        spin_lock(&jvm->lock_cloader);
+        {
+            s32 i;
+            for (i = 0; i < jvm->classloaders->length; i++) {
+                PeerClassLoader *pcl = arraylist_get_value_unsafe(jvm->classloaders, i);
+                classloader_destroy(pcl);
+            }
         }
+        spin_unlock(&jvm->lock_cloader);
+        spin_destroy(&jvm->lock_cloader);
+        arraylist_destroy(jvm->classloaders);
+        jvm->classloaders = NULL;
     }
-    spin_unlock(&jvm->lock_cloader);
-    spin_destroy(&jvm->lock_cloader);
-    arraylist_destroy(jvm->classloaders);
     jvm->boot_classloader = NULL;
-    jvm->classloaders = NULL;
 }
 
 void set_jvm_state(MiniJVM *jvm, s32 state) {
+    if (!jvm) return;
     jvm->jvm_state = state;
 }
 
 s32 get_jvm_state(MiniJVM *jvm) {
+    if (!jvm) return JVM_STATUS_UNKNOW;
     return jvm->jvm_state;
 }
 
@@ -230,9 +254,10 @@ void _on_jvm_sig_print(s32 no) {
     jvm_printf("[SIGNAL]jvm sig:%d  errno: %d , %s\n", no, errno, strerror(errno));
 }
 
+/* On embedded/mobile hosts (like iOS JarBox), avoid killing the whole host process on signal;
+ * log and let session cleanup / crash handler take over cleanly. */
 void _on_jvm_sig(s32 no) {
     _on_jvm_sig_print(no);
-    exit(no);
 }
 
 MiniJVM *jvm_create() {
@@ -364,62 +389,91 @@ s32 jvm_init(MiniJVM *jvm, c8 *p_bootclasspath, c8 *p_classpath) {
 }
 
 void jvm_destroy(MiniJVM *jvm) {
-    Runtime *parent = runtime_create(jvm);
+    if (!jvm) return;
 
-    while (parent && jvm->shutdown_hook->length) {
-        Instance *inst = arraylist_get_value(jvm->shutdown_hook, 0);
-        arraylist_remove_at(jvm->shutdown_hook, 0);
-
-        //there is an week is that the hook thread is serialized execution,
-        // because the hook thread may be not inserted into the thread list,
-        // then vm is destroyed
-        thrd_t t = jthread_start(inst, parent);
-        thrd_join(t, NULL);
-    }
-    runtime_destroy(parent);
-    parent = NULL;
-    while (threadlist_count_none_daemon(jvm) > 0 && !jvm->collector->exit_flag) {//wait for other thread over ,
-        threadSleep(20);
-    }
+    /* 1. Mark JVM state as stopping immediately so bytecode loops & native checks see it */
     set_jvm_state(jvm, JVM_STATUS_STOPED);
-    //waiting for daemon thread terminate
+    if (jvm->collector) {
+        jvm->collector->exit_flag = 1;
+    }
+
+    /* 2. Stop JDWP server early so debugging sockets/threads do not block teardown */
+    jdwp_stop_server(jvm);
+
+    /* 3. Signal all running Java/native threads to stop */
+    thread_stop_all(jvm);
+
+    /* 4. Run shutdown hooks with a per-hook safety wait */
+    Runtime *parent = runtime_create(jvm);
+    if (parent && jvm->shutdown_hook) {
+        while (jvm->shutdown_hook->length) {
+            Instance *inst = arraylist_get_value(jvm->shutdown_hook, 0);
+            arraylist_remove_at(jvm->shutdown_hook, 0);
+            if (inst) {
+                thrd_t t = jthread_start(inst, parent);
+                thrd_join(t, NULL);
+            }
+        }
+    }
+    if (parent) {
+        runtime_destroy(parent);
+        parent = NULL;
+    }
+
+    /* Re-assert stop flags after hooks in case a hook spawned a thread */
+    set_jvm_state(jvm, JVM_STATUS_STOPED);
     thread_stop_all(jvm);
 
 #if _JVM_DEBUG_LOG_LEVEL > 0
-    jvm_printf("[INFO]waitting for thread terminate\n");
+    jvm_printf("[INFO]waiting for all threads to terminate\n");
 #endif
+    /* 5. Wait thoroughly for threads to exit; re-issue stop signal periodically if needed */
     {
         s32 wait_count = 0;
-        s32 max_wait = 150; // 150 * 20ms = 3 seconds timeout
+        s32 max_wait = 500; // 500 * 20ms = 10 seconds max wait
         while (threadlist_count_active(jvm) > 0 && wait_count < max_wait) {
+            if ((wait_count % 25) == 0) {
+                thread_stop_all(jvm);
+            }
             threadSleep(20);
             wait_count++;
         }
         if (threadlist_count_active(jvm) > 0) {
-            jvm_printf("[WARN]%d threads still active after %dms timeout, force-zombie\n",
+            jvm_printf("[WARN]%d threads still active after %dms timeout, marking zombie\n",
                        threadlist_count_active(jvm), max_wait * 20);
             thread_zombie_all(jvm);
         }
     }
 
-    jdwp_stop_server(jvm);
-    //
+    /* 6. Tear down classloaders, GC, and JVM containers only after threads have stopped */
+    classloaders_clear_all_static(jvm);
+    classloaders_destroy_all(jvm);
+
     gc_destroy(jvm);
 
-    hashtable_destroy(jvm->table_jstring_const);
-    //
+    if (jvm->table_jstring_const) {
+        hashtable_destroy(jvm->table_jstring_const);
+        jvm->table_jstring_const = NULL;
+    }
     thread_lock_dispose(&jvm->threadlock);
-    arraylist_destroy(jvm->thread_list);
-    arraylist_destroy(jvm->shutdown_hook);
+    if (jvm->thread_list) {
+        arraylist_destroy(jvm->thread_list);
+        jvm->thread_list = NULL;
+    }
+    if (jvm->shutdown_hook) {
+        arraylist_destroy(jvm->shutdown_hook);
+        jvm->shutdown_hook = NULL;
+    }
     native_lib_destroy(jvm);
     sys_properties_dispose(jvm);
     close_log();
 #if _JVM_DEBUG_LOG_LEVEL > 0
-    jvm_printf("[INFO]jvm destoried\n");
+    jvm_printf("[INFO]jvm destroyed\n");
 #endif
     set_jvm_state(jvm, JVM_STATUS_UNKNOW);
     if (jvm->startup_dir) {
         utf8_destroy(jvm->startup_dir);
+        jvm->startup_dir = NULL;
     }
     jvm_free(jvm);
 }
@@ -466,6 +520,9 @@ s32 call_method(MiniJVM *jvm, c8 *p_classname, c8 *p_methodname, c8 *p_methoddes
     }
     if (!jvm) {
         jvm_printf("[ERROR]jvm not found .\n");
+        return RUNTIME_STATUS_ERROR;
+    }
+    if (_jvm_should_stop(jvm, p_runtime)) {
         return RUNTIME_STATUS_ERROR;
     }
     //创建运行时栈
@@ -551,6 +608,9 @@ s32 call_method(MiniJVM *jvm, c8 *p_classname, c8 *p_methodname, c8 *p_methoddes
 
 s32 execute_method(MethodInfo *method, Runtime *runtime) {
     if (!runtime || !method) {
+        return RUNTIME_STATUS_ERROR;
+    }
+    if (_jvm_should_stop(runtime->jvm, runtime)) {
         return RUNTIME_STATUS_ERROR;
     }
     // if not detect the son ,may cause jthread enter fake blocking state,
