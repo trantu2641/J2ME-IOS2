@@ -566,6 +566,7 @@ final class GameViewController: UIViewController {
             }
 
             self.applySavedProxy(toSession: sessionID)
+            jvm_bridge_session_set_active(sessionID)
 
             let startResult = jvm_bridge_session_start(sessionID)
             guard startResult == 0 else {
