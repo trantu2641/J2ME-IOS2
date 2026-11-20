@@ -225,7 +225,9 @@ final class GameViewController: UIViewController {
 
         jvm_bridge_set_session_exit_callback(nil)
         setGlobalEmulatorView(nil)
-        jvm_bridge_session_destroy_all()
+        if !userRequestedExit {
+            jvm_bridge_session_destroy_all()
+        }
     }
 
     override var prefersStatusBarHidden: Bool { true }
@@ -1261,6 +1263,7 @@ final class GameViewController: UIViewController {
     }
 
     func handleSessionDidExit(sessionID: Int32, exitCode: Int32) {
+        guard !userRequestedExit else { return }
         guard let index = runningSessions.firstIndex(where: { $0.id == sessionID }) else {
             if runningSessions.isEmpty {
                 userRequestedExit = true
@@ -1737,7 +1740,6 @@ final class GameViewController: UIViewController {
             keyboardInput.widthAnchor.constraint(equalToConstant: 2),
             keyboardInput.heightAnchor.constraint(equalToConstant: 2)
         ])
-
     }
 
     // MARK: - Keypad
