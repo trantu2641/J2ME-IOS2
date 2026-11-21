@@ -12,9 +12,12 @@ import javax.microedition.io.Connector;
 /**
  * J2ME Image compatibility layer.
  *
- * Optional image/resource failures are isolated from the MIDlet.
- * Failed resources return a non-native sentinel Image; no non-native
- * sentinel bitmap is allocated.
+ * Missing, corrupted, empty, or failed image resources use a non-allocating
+ * zero-handle Image sentinel so optional graphics do not stop the MIDlet.
+ *
+ * IMPORTANT:
+ * Remote HTTP/HTTPS image failures are intentionally isolated from the
+ * MIDlet. One failed icon must not stop subsequent icon/resource loads.
  */
 public class Image {
 
@@ -36,6 +39,9 @@ public class Image {
     public static Image createImage(int width, int height) {
 
         long handle = NativeBridge.createMutableImage(width, height);
+
+        if (handle == 0) {
+            }
 
         return new Image(handle, width, height, true);
     }
@@ -69,16 +75,20 @@ public class Image {
             );
 
         } catch (RuntimeException e) {
-        }
+
+            }
 
         return img;
     }
 
     /**
-     * Non-native sentinel returned for an optional image that cannot be
-     * loaded. It is deliberately NOT a transparent bitmap and allocates
-     * no native image/context. Keeping a non-null Image object preserves
-     * J2ME applications that do not tolerate null image references.
+     * Creates a non-allocating zero-handle fallback image.
+     *
+     * Used when an optional image/resource is missing, invalid,
+     * corrupted, empty, or cannot be downloaded.
+     */
+    /**
+     * Non-allocating failure sentinel. No native bitmap is created.
      */
     private static Image failedImage() {
         return new Image(0, 1, 1, false);
@@ -87,13 +97,12 @@ public class Image {
     /**
      * Creates an image from a JAR resource name.
      *
-     * Local missing/corrupted resources are replaced with a non-native
-     * sentinel.
+     * Local missing/corrupted resources are replaced with a non-allocating zero-handle Image sentinel.
      *
      * HTTP/HTTPS resources are also isolated:
      *
      *     request A -> OK
-     *     request B -> FAILED -> sentinel
+     *     request B -> FAILED -> placeholder
      *     request C -> still allowed to continue
      *
      * A failed remote icon must never be allowed to kill the resource
@@ -151,10 +160,9 @@ public class Image {
                  * That allowed one failed server icon to propagate
                  * into the game and potentially terminate its loader.
                  *
-                 * Now the failed icon is replaced by a non-native
-                 * sentinel and the Java game is allowed to continue.
+                 * Now the failed icon is replaced by a transparent
+                 * placeholder and the Java game is allowed to continue.
                  */
-
                 return failedImage();
 
             } catch (RuntimeException e) {
@@ -163,7 +171,6 @@ public class Image {
                  * Protect the MIDlet from native/network runtime errors
                  * caused by one optional image.
                  */
-
                 return failedImage();
 
             } finally {
@@ -304,37 +311,15 @@ public class Image {
             return is;
         }
 
-        /*
-         * Some J2ME games request an image with its extension already
-         * present (for example /icons/123.png), while the normal
-         * classloader lookup can fail for resources packed inside the
-         * imported game JAR. Try an exact ZIP entry before the older
-         * prefix fallback.
-         */
-        String searchName =
-            name.startsWith("/")
-                ? name.substring(1)
-                : name;
-
-        String exactMatch =
-            findEntryExact(searchName);
-
-        if (exactMatch != null) {
-
-            is =
-                tryLoadResource(
-                    "/" + exactMatch
-                );
-
-            if (is != null) {
-                return is;
-            }
-        }
-
         if (
             name.lastIndexOf('.')
             <= name.lastIndexOf('/')
         ) {
+
+            String searchName =
+                name.startsWith("/")
+                    ? name.substring(1)
+                    : name;
 
             String match =
                 findEntryByPrefix(searchName);
@@ -348,75 +333,6 @@ public class Image {
 
                 if (is != null) {
                     return is;
-                }
-            }
-        }
-
-        return null;
-    }
-
-    private static String findEntryExact(
-        String name
-    ) {
-
-        String cp =
-            System.getProperty(
-                "java.class.path"
-            );
-
-        if (
-            cp == null
-            || cp.length() == 0
-            || name == null
-            || name.length() == 0
-        ) {
-            return null;
-        }
-
-        String[] paths =
-            cp.split(
-                File.pathSeparator
-            );
-
-        for (String path : paths) {
-
-            if (
-                path == null
-                || path.length() == 0
-            ) {
-                continue;
-            }
-
-            File f = new File(path);
-
-            if (!f.isFile()) {
-                continue;
-            }
-
-            ZipFile zip = null;
-
-            try {
-
-                zip = new ZipFile(f);
-
-                ZipEntry entry =
-                    zip.getEntry(name);
-
-                if (entry != null) {
-                    return entry.getName();
-                }
-
-            } catch (Exception e) {
-
-                // Ignore this classpath entry and continue.
-
-            } finally {
-
-                if (zip != null) {
-                    try {
-                        zip.close();
-                    } catch (IOException e) {
-                    }
                 }
             }
         }
@@ -596,7 +512,8 @@ public class Image {
             }
 
         } catch (RuntimeException e) {
-        }
+
+            }
 
         return null;
     }
@@ -605,7 +522,7 @@ public class Image {
      * Creates an image from an InputStream.
      *
      * Any failure while reading/decoding an optional image is converted
-     * into a non-native sentinel Image.
+     * into a non-allocating Image sentinel.
      */
     public static Image createImage(
         InputStream stream
@@ -675,11 +592,23 @@ public class Image {
 
         try {
 
-            handle =
-                NativeBridge.createImageFromData(
+            /*
+             * Restore the PNG compatibility normalization used by the
+             * known-good runtime. In particular, keep tRNS so indexed PNG
+             * transparency survives the native decode path.
+             */
+            byte[] decodeData =
+                normalizePNGForNativeDecoder(
                     imageData,
                     imageOffset,
                     imageLength
+                );
+
+            handle =
+                NativeBridge.createImageFromData(
+                    decodeData,
+                    0,
+                    decodeData.length
                 );
 
             if (handle == 0) {
@@ -735,6 +664,105 @@ public class Image {
 
             return failedImage();
         }
+    }
+
+    /**
+     * Normalize PNG data before passing it to ImageIO/CoreGraphics.
+     * Essential chunks are retained, including tRNS for PNG transparency.
+     * Non-PNG data is returned unchanged.
+     */
+    private static byte[] normalizePNGForNativeDecoder(
+        byte[] data,
+        int offset,
+        int length
+    ) {
+        if (data == null || length <= 0) {
+            return new byte[0];
+        }
+
+        if (length < 8) {
+            byte[] out = new byte[length];
+            System.arraycopy(data, offset, out, 0, length);
+            return out;
+        }
+
+        final byte[] PNG = {
+            (byte) 0x89, 0x50, 0x4E, 0x47,
+            0x0D, 0x0A, 0x1A, 0x0A
+        };
+
+        for (int i = 0; i < PNG.length; i++) {
+            if ((data[offset + i] & 0xFF) != (PNG[i] & 0xFF)) {
+                byte[] out = new byte[length];
+                System.arraycopy(data, offset, out, 0, length);
+                return out;
+            }
+        }
+
+        ByteArrayOutputStream out =
+            new ByteArrayOutputStream(length);
+
+        out.write(PNG, 0, PNG.length);
+
+        int p = 8;
+
+        while (p + 12 <= length) {
+            int chunkLength =
+                ((data[offset + p] & 0xFF) << 24)
+                | ((data[offset + p + 1] & 0xFF) << 16)
+                | ((data[offset + p + 2] & 0xFF) << 8)
+                | (data[offset + p + 3] & 0xFF);
+
+            if (chunkLength < 0 || chunkLength > length - p - 12) {
+                byte[] raw = new byte[length];
+                System.arraycopy(data, offset, raw, 0, length);
+                return raw;
+            }
+
+            int type = offset + p + 4;
+
+            boolean keep =
+                isPNGChunk(type, data, "IHDR")
+                || isPNGChunk(type, data, "PLTE")
+                || isPNGChunk(type, data, "tRNS")
+                || isPNGChunk(type, data, "gAMA")
+                || isPNGChunk(type, data, "IDAT")
+                || isPNGChunk(type, data, "IEND");
+
+            int total = chunkLength + 12;
+
+            if (keep) {
+                out.write(data, offset + p, total);
+            }
+
+            p += total;
+
+            if (isPNGChunk(type, data, "IEND")) {
+                break;
+            }
+        }
+
+        byte[] normalized = out.toByteArray();
+
+        if (normalized.length < 33) {
+            byte[] raw = new byte[length];
+            System.arraycopy(data, offset, raw, 0, length);
+            return raw;
+        }
+
+        return normalized;
+    }
+
+    private static boolean isPNGChunk(
+        int typeOffset,
+        byte[] data,
+        String name
+    ) {
+        return
+            data[typeOffset] == (byte) name.charAt(0)
+            && data[typeOffset + 1] == (byte) name.charAt(1)
+            && data[typeOffset + 2] == (byte) name.charAt(2)
+            && data[typeOffset + 3] == (byte) name.charAt(3);
     }
 
     public static Image createImage(
