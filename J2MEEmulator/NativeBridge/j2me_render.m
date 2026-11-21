@@ -845,17 +845,18 @@ static int ensureImageDecoded(RenderImage *img) {
     CGColorSpaceRef cs = getColorSpace();
 
     /*
-     * Decode immutable JAR/PNG images into an explicit RGBA bitmap.
+     * Decode the source image through a temporary canonical RGBA surface.
      *
-     * The previous ARGB-first/32Little destination can make indexed PNG
-     * transparency (especially palette + tRNS images) unreliable on the
-     * CoreGraphics -> bitmap -> CGImage path.  Use the canonical
-     * premultiplied-last / 32Big RGBA layout for decoded source images.
+     * This is important for indexed PNGs (palette + tRNS): ImageIO/CoreGraphics
+     * resolves the palette transparency correctly when rendered into an
+     * alpha-capable RGBA bitmap.
      *
-     * This change is intentionally limited to immutable image decoding.
-     * Mutable J2ME surfaces and drawRGB keep their existing BGRA layout.
+     * The emulator itself still expects BGRA in RenderImage->ctx because
+     * n_getRGB() reads the context bytes as B,G,R,A. Therefore we explicitly
+     * swizzle RGBA -> BGRA after decoding instead of changing the permanent
+     * RenderImage bitmap layout.
      */
-    CGContextRef ctx = CGBitmapContextCreate(
+    CGContextRef rgbaCtx = CGBitmapContextCreate(
         NULL,
         decodedWidth,
         decodedHeight,
@@ -866,31 +867,73 @@ static int ensureImageDecoded(RenderImage *img) {
         kCGBitmapByteOrder32Big
     );
 
-    if (!ctx) {
+    if (!rgbaCtx) {
         CGImageRelease(cgImage);
         spin_unlock(&g_image_decode_lock);
         return 0;
     }
 
     CGContextClearRect(
-        ctx,
+        rgbaCtx,
         CGRectMake(0, 0, (CGFloat)decodedWidth, (CGFloat)decodedHeight)
     );
-
-    /*
-     * Copy the decoded PNG with normal source-over semantics while the
-     * destination is already transparent.  CoreGraphics preserves the
-     * source alpha channel here, including PNG tRNS/palette transparency.
-     */
-    CGContextSetBlendMode(ctx, kCGBlendModeNormal);
+    CGContextSetBlendMode(rgbaCtx, kCGBlendModeNormal);
 
     CGContextDrawImage(
-        ctx,
+        rgbaCtx,
         CGRectMake(0, 0, (CGFloat)decodedWidth, (CGFloat)decodedHeight),
         cgImage
     );
 
     CGImageRelease(cgImage);
+
+    const uint8_t *rgba = (const uint8_t *)CGBitmapContextGetData(rgbaCtx);
+    size_t bytesPerRow = CGBitmapContextGetBytesPerRow(rgbaCtx);
+
+    CGContextRef ctx = CGBitmapContextCreate(
+        NULL,
+        decodedWidth,
+        decodedHeight,
+        8,
+        decodedWidth * 4,
+        cs,
+        kCGImageAlphaPremultipliedFirst |
+        kCGBitmapByteOrder32Little
+    );
+
+    if (!ctx || !rgba) {
+        if (ctx) CGContextRelease(ctx);
+        CGContextRelease(rgbaCtx);
+        spin_unlock(&g_image_decode_lock);
+        return 0;
+    }
+
+    uint8_t *bgra = (uint8_t *)CGBitmapContextGetData(ctx);
+    size_t dstBytesPerRow = CGBitmapContextGetBytesPerRow(ctx);
+
+    if (!bgra) {
+        CGContextRelease(ctx);
+        CGContextRelease(rgbaCtx);
+        spin_unlock(&g_image_decode_lock);
+        return 0;
+    }
+
+    for (size_t row = 0; row < decodedHeight; row++) {
+        const uint8_t *srcRow = rgba + row * bytesPerRow;
+        uint8_t *dstRow = bgra + row * dstBytesPerRow;
+
+        for (size_t col = 0; col < decodedWidth; col++) {
+            const uint8_t *s = srcRow + col * 4;
+            uint8_t *d = dstRow + col * 4;
+
+            d[0] = s[2]; // B
+            d[1] = s[1]; // G
+            d[2] = s[0]; // R
+            d[3] = s[3]; // A
+        }
+    }
+
+    CGContextRelease(rgbaCtx);
 
     img->width = (int)decodedWidth;
     img->height = (int)decodedHeight;
