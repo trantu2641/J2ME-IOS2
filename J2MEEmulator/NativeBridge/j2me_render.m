@@ -844,6 +844,17 @@ static int ensureImageDecoded(RenderImage *img) {
 
     CGColorSpaceRef cs = getColorSpace();
 
+    /*
+     * Decode immutable JAR/PNG images into an explicit RGBA bitmap.
+     *
+     * The previous ARGB-first/32Little destination can make indexed PNG
+     * transparency (especially palette + tRNS images) unreliable on the
+     * CoreGraphics -> bitmap -> CGImage path.  Use the canonical
+     * premultiplied-last / 32Big RGBA layout for decoded source images.
+     *
+     * This change is intentionally limited to immutable image decoding.
+     * Mutable J2ME surfaces and drawRGB keep their existing BGRA layout.
+     */
     CGContextRef ctx = CGBitmapContextCreate(
         NULL,
         decodedWidth,
@@ -851,8 +862,8 @@ static int ensureImageDecoded(RenderImage *img) {
         8,
         decodedWidth * 4,
         cs,
-        kCGImageAlphaPremultipliedFirst |
-        kCGBitmapByteOrder32Little
+        kCGImageAlphaPremultipliedLast |
+        kCGBitmapByteOrder32Big
     );
 
     if (!ctx) {
@@ -865,6 +876,13 @@ static int ensureImageDecoded(RenderImage *img) {
         ctx,
         CGRectMake(0, 0, (CGFloat)decodedWidth, (CGFloat)decodedHeight)
     );
+
+    /*
+     * Copy the decoded PNG with normal source-over semantics while the
+     * destination is already transparent.  CoreGraphics preserves the
+     * source alpha channel here, including PNG tRNS/palette transparency.
+     */
+    CGContextSetBlendMode(ctx, kCGBlendModeNormal);
 
     CGContextDrawImage(
         ctx,
