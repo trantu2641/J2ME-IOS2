@@ -2965,3 +2965,10 @@ void j2me_render_cleanup(void) {
         img_count
     );
 }
+
+// Compatibility entry point used by GameViewController.
+// The renderer itself does not need to change its pixel format for this mode;
+// the call is kept as a no-op so existing Swift/Objective-C callers link cleanly.
+void j2me_render_set_background_mode(int background) {
+    (void)background;
+}
