@@ -104,11 +104,6 @@ public class Image {
 
         if (name == null || name.length() == 0) {
 
-            logFallback(
-                String.valueOf(name),
-                "invalid resource name"
-            );
-
             return failedImage();
         }
 
@@ -130,11 +125,6 @@ public class Image {
                     );
 
                 if (remote == null) {
-
-                    logFallback(
-                        name,
-                        "remote connection returned null stream"
-                    );
 
                     return failedImage();
                 }
@@ -164,10 +154,6 @@ public class Image {
                  * Now the failed icon is replaced by a non-native
                  * sentinel and the Java game is allowed to continue.
                  */
-                logFallback(
-                    name,
-                    "remote image request failed: " + e
-                );
 
                 return failedImage();
 
@@ -177,10 +163,6 @@ public class Image {
                  * Protect the MIDlet from native/network runtime errors
                  * caused by one optional image.
                  */
-                logFallback(
-                    name,
-                    "remote image runtime failure: " + e
-                );
 
                 return failedImage();
 
@@ -216,11 +198,6 @@ public class Image {
 
             if (is == null) {
 
-                logFallback(
-                    name,
-                    "local resource not found"
-                );
-
                 return failedImage();
             }
 
@@ -228,19 +205,9 @@ public class Image {
 
         } catch (IOException e) {
 
-            logFallback(
-                name,
-                "local resource read failed: " + e
-            );
-
             return failedImage();
 
         } catch (RuntimeException e) {
-
-            logFallback(
-                name,
-                "local resource loader failed: " + e
-            );
 
             return failedImage();
         }
@@ -646,11 +613,6 @@ public class Image {
 
         if (stream == null) {
 
-            logFallback(
-                "InputStream",
-                "null input stream"
-            );
-
             return failedImage();
         }
 
@@ -668,11 +630,6 @@ public class Image {
                 || data.length == 0
             ) {
 
-                logFallback(
-                    "InputStream",
-                    "empty image data"
-                );
-
                 return failedImage();
             }
 
@@ -684,19 +641,9 @@ public class Image {
 
         } catch (IOException e) {
 
-            logFallback(
-                "InputStream",
-                "image read failed: " + e
-            );
-
             return failedImage();
 
         } catch (RuntimeException e) {
-
-            logFallback(
-                "InputStream",
-                "image decoding failed: " + e
-            );
 
             return failedImage();
         }
@@ -710,11 +657,6 @@ public class Image {
 
         if (imageData == null) {
 
-            logFallback(
-                "byte[]",
-                "null image data"
-            );
-
             return failedImage();
         }
 
@@ -725,11 +667,6 @@ public class Image {
                 > imageData.length
                     - imageLength
         ) {
-
-            logFallback(
-                "byte[]",
-                "invalid or empty image data"
-            );
 
             return failedImage();
         }
@@ -746,11 +683,6 @@ public class Image {
                 );
 
             if (handle == 0) {
-
-                logFallback(
-                    "byte[]",
-                    "native image decoder failed"
-                );
 
                 return failedImage();
             }
@@ -779,11 +711,6 @@ public class Image {
 
                 handle = 0;
 
-                logFallback(
-                    "byte[]",
-                    "invalid image dimensions"
-                );
-
                 return failedImage();
             }
 
@@ -805,11 +732,6 @@ public class Image {
                 } catch (RuntimeException ignored) {
                 }
             }
-
-            logFallback(
-                "byte[]",
-                "image decoding exception: " + e
-            );
 
             return failedImage();
         }
